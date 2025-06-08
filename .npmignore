@@ -1,0 +1,50 @@
+# 源代码
+src/
+
+# 配置文件
+.eslintrc.js
+.eslintignore
+.prettierrc
+.prettierignore
+tsconfig.json
+vitest.config.ts
+jest.config.js
+.editorconfig
+.husky/
+commitlint.config.js
+
+# 开发工具
+.github/
+.vscode/
+.idea/
+.travis.yml
+.gitlab-ci.yml
+.circleci/
+build/
+
+# 测试文件
+tests/
+coverage/
+*.spec.ts
+*.test.ts
+
+# 文档和示例
+docs/
+examples/
+CONTRIBUTING.md
+CHANGELOG.md
+
+# 临时和构建工件
+.temp/
+.tmp/
+.cache/
+stats/
+
+# 杂项
+.DS_Store
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+pnpm-lock.yaml 

@@ -1,0 +1,7 @@
+node_modules
+dist
+types
+coverage
+workers
+build/*.js
+*.d.ts 

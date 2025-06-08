@@ -1,0 +1,170 @@
+{
+  "name": "file-chunk-pro",
+  "version": "1.0.0",
+  "description": "高性能大文件上传工具，支持多环境",
+  "main": "dist/browser/fileChunkPro.cjs.js",
+  "module": "dist/browser/fileChunkPro.esm.js",
+  "browser": "dist/browser/fileChunkPro.umd.js",
+  "types": "types/index.d.ts",
+  "sideEffects": false,
+  "exports": {
+    ".": {
+      "import": "./dist/browser/fileChunkPro.esm.js",
+      "require": "./dist/browser/fileChunkPro.cjs.js",
+      "browser": "./dist/browser/fileChunkPro.umd.js",
+      "types": "./types/index.d.ts"
+    },
+    "./miniprogram/wechat": {
+      "require": "./dist/miniprogram/wechat/index.js",
+      "types": "./types/index.d.ts"
+    },
+    "./miniprogram/alipay": {
+      "require": "./dist/miniprogram/alipay/index.js",
+      "types": "./types/index.d.ts"
+    },
+    "./miniprogram/bytedance": {
+      "require": "./dist/miniprogram/bytedance/index.js",
+      "types": "./types/index.d.ts"
+    },
+    "./miniprogram/baidu": {
+      "require": "./dist/miniprogram/baidu/index.js",
+      "types": "./types/index.d.ts"
+    },
+    "./taro": {
+      "require": "./dist/taro/index.js",
+      "import": "./dist/taro/index.mjs",
+      "types": "./types/index.d.ts"
+    },
+    "./uni-app": {
+      "require": "./dist/uni-app/index.js",
+      "import": "./dist/uni-app/index.mjs",
+      "types": "./types/index.d.ts"
+    },
+    "./ui/react": {
+      "import": "./dist/browser/ui/react/index.js",
+      "require": "./dist/browser/ui/react/index.cjs",
+      "types": "./types/ui/react.d.ts"
+    },
+    "./ui/vue": {
+      "import": "./dist/browser/ui/vue/index.js",
+      "require": "./dist/browser/ui/vue/index.cjs",
+      "types": "./types/ui/vue.d.ts"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "dist",
+    "types",
+    "workers",
+    "LICENSE",
+    "README.md"
+  ],
+  "scripts": {
+    "clean": "rimraf dist types workers",
+    "type-check": "tsc --noEmit",
+    "type-declarations": "tsc --emitDeclarationOnly --outDir types",
+    "lint": "eslint . --ext .js,.ts,.tsx --fix",
+    "prettier": "prettier --write \"**/*.{js,ts,tsx,json,md}\"",
+    "build": "pnpm run clean && pnpm run type-check && pnpm run type-declarations && rollup -c build/rollup.config.js",
+    "build:workers": "esbuild src/workers/*.ts --outdir=workers/default --format=iife --bundle",
+    "build:dev": "cross-env NODE_ENV=development pnpm run build",
+    "build:prod": "cross-env NODE_ENV=production pnpm run build && pnpm run build:workers",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "size": "size-limit",
+    "analyze": "size-limit --why",
+    "prepare": "husky install",
+    "release": "bumpp && pnpm build && pnpm publish"
+  },
+  "size-limit": [
+    {
+      "path": "dist/browser/fileChunkPro.esm.js",
+      "limit": "12 KB"
+    },
+    {
+      "path": "dist/browser/fileChunkPro.umd.js",
+      "limit": "15 KB"
+    }
+  ],
+  "peerDependencies": {
+    "react": ">=16.8.0",
+    "vue": ">=3.0.0"
+  },
+  "peerDependenciesMeta": {
+    "react": {
+      "optional": true
+    },
+    "vue": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "@commitlint/cli": "^17.6.6",
+    "@commitlint/config-conventional": "^17.6.6",
+    "@rollup/plugin-alias": "^5.0.0",
+    "@rollup/plugin-commonjs": "^25.0.3",
+    "@rollup/plugin-node-resolve": "^15.1.0",
+    "@rollup/plugin-replace": "^5.0.2",
+    "@rollup/plugin-terser": "^0.4.3",
+    "@rollup/plugin-typescript": "^11.1.2",
+    "@size-limit/preset-small-lib": "^8.2.6",
+    "@types/node": "^20.19.0",
+    "@types/react": "^18.2.15",
+    "@typescript-eslint/eslint-plugin": "^5.62.0",
+    "@typescript-eslint/parser": "^5.62.0",
+    "@vitest/coverage-c8": "^0.33.0",
+    "bumpp": "^9.1.1",
+    "cross-env": "^7.0.3",
+    "esbuild": "^0.18.11",
+    "eslint": "^8.44.0",
+    "eslint-config-prettier": "^8.8.0",
+    "eslint-plugin-import": "^2.27.5",
+    "eslint-plugin-react": "^7.32.2",
+    "eslint-plugin-react-hooks": "^4.6.0",
+    "husky": "^8.0.3",
+    "jsdom": "^26.1.0",
+    "lint-staged": "^13.2.3",
+    "prettier": "^3.0.0",
+    "react": "^18.2.0",
+    "rimraf": "^5.0.1",
+    "rollup": "^3.26.2",
+    "rollup-plugin-dts": "^5.3.0",
+    "rollup-plugin-esbuild": "^5.0.0",
+    "rollup-plugin-visualizer": "^5.9.2",
+    "size-limit": "^8.2.6",
+    "tslib": "^2.6.0",
+    "typescript": "^5.8.3",
+    "vitest": "^0.33.0",
+    "vue": "^3.3.4"
+  },
+  "dependencies": {
+    "tslib": "^2.6.0"
+  },
+  "lint-staged": {
+    "*.{js,jsx,ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ],
+    "*.{json,md,yml}": [
+      "prettier --write"
+    ]
+  },
+  "author": "codefish",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/your-organization/fileChunkPro.git"
+  },
+  "keywords": [
+    "file",
+    "upload",
+    "chunk",
+    "browser",
+    "miniprogram",
+    "taro",
+    "uni-app",
+    "wechat",
+    "alipay"
+  ]
+}
