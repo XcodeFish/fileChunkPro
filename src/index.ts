@@ -9,8 +9,15 @@
 // 导出类型
 export * from './types';
 
-// 导出主类（占位，实际实现后替换）
-const UploaderCore = {};
+// 导出核心模块
+export * from './core';
+
+// 导出工具类
+export { default as EnvUtils } from './utils/EnvUtils';
+export { default as MemoryManager } from './utils/MemoryManager';
+
+// 默认导出UploaderCore
+import UploaderCore from './core/UploaderCore';
 export default UploaderCore;
 
 // 导出插件API（占位）
