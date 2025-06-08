@@ -7,6 +7,7 @@ import EventBus from './EventBus';
 import PluginManager from './PluginManager';
 import TaskScheduler from './TaskScheduler';
 import UploaderCore from './UploaderCore';
+import WorkerManager from './WorkerManager';
 
 export {
   UploaderCore,
@@ -15,6 +16,7 @@ export {
   TaskScheduler,
   ErrorCenter,
   UploadError,
+  WorkerManager,
 };
 
 export default UploaderCore;
