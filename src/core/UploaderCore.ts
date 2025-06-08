@@ -117,10 +117,10 @@ export class UploaderCore {
   /**
    * 触发事件
    * @param event 事件名称
-   * @param args 事件参数
+   * @param data 事件数据
    */
-  public emit(event: string, ...args: any[]): void {
-    this.events.emit(event, ...args);
+  public emit(event: string, data?: any): void {
+    this.events.emit(event, data);
   }
 
   /**
@@ -215,7 +215,7 @@ export class UploaderCore {
   public cancel(): void {
     this.isCancelled = true;
     this.scheduler.clear();
-    this.emit('cancel');
+    this.emit('cancel', { fileId: this.currentFileId });
   }
 
   /**
@@ -461,7 +461,7 @@ export class UploaderCore {
    */
   private emitProgress(progress: number): void {
     if (this.isCancelled) return;
-    this.emit('progress', progress);
+    this.emit('progress', { progress });
   }
 
   /**
