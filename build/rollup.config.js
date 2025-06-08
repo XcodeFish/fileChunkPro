@@ -254,7 +254,89 @@ const miniprogramBuilds = [
     ...baseConfig,
   },
 
-  // 其他小程序平台类似...
+  // 支付宝小程序
+  {
+    input: 'src/entries/alipay.ts',
+    output: {
+      file: 'dist/miniprogram/alipay/index.js',
+      format: 'cjs',
+      banner,
+    },
+    plugins: [
+      replace({
+        preventAssignment: true,
+        'process.env.NODE_ENV': JSON.stringify(
+          isProd ? 'production' : 'development'
+        ),
+        'process.env.TARGET': JSON.stringify('alipay'),
+      }),
+      typescript({
+        tsconfig: './tsconfig.json',
+        declaration: false,
+      }),
+      esbuild({
+        target: 'es2018',
+        minify: isProd,
+      }),
+    ],
+    ...baseConfig,
+  },
+
+  // 字节跳动小程序
+  {
+    input: 'src/entries/bytedance.ts',
+    output: {
+      file: 'dist/miniprogram/bytedance/index.js',
+      format: 'cjs',
+      banner,
+    },
+    plugins: [
+      replace({
+        preventAssignment: true,
+        'process.env.NODE_ENV': JSON.stringify(
+          isProd ? 'production' : 'development'
+        ),
+        'process.env.TARGET': JSON.stringify('bytedance'),
+      }),
+      typescript({
+        tsconfig: './tsconfig.json',
+        declaration: false,
+      }),
+      esbuild({
+        target: 'es2018',
+        minify: isProd,
+      }),
+    ],
+    ...baseConfig,
+  },
+
+  // 百度小程序
+  {
+    input: 'src/entries/baidu.ts',
+    output: {
+      file: 'dist/miniprogram/baidu/index.js',
+      format: 'cjs',
+      banner,
+    },
+    plugins: [
+      replace({
+        preventAssignment: true,
+        'process.env.NODE_ENV': JSON.stringify(
+          isProd ? 'production' : 'development'
+        ),
+        'process.env.TARGET': JSON.stringify('baidu'),
+      }),
+      typescript({
+        tsconfig: './tsconfig.json',
+        declaration: false,
+      }),
+      esbuild({
+        target: 'es2018',
+        minify: isProd,
+      }),
+    ],
+    ...baseConfig,
+  },
 ];
 
 // Taro构建
