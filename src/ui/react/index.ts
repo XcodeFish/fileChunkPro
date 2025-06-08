@@ -14,3 +14,15 @@ export { default as UploadProgress } from './components/UploadProgress';
 export type { UseFileUploadReturn } from './hooks';
 export type { UploadButtonProps } from './components/UploadButton';
 export type { UploadProgressProps } from './components/UploadProgress';
+
+/**
+ * React 组件与钩子导出
+ * 这是一个占位文件，将在后续开发中实现
+ */
+
+// 占位导出，待完善
+export const React = {
+  // 将在未来实现
+};
+
+export default React;

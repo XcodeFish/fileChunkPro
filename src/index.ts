@@ -20,6 +20,9 @@ export { default as EnvUtils } from './utils/EnvUtils';
 export { default as MemoryManager } from './utils/MemoryManager';
 export { default as StorageUtils } from './utils/StorageUtils';
 
+// 导出UI组件
+export * as UI from './ui';
+
 // 默认导出UploaderCore
 import UploaderCore from './core/UploaderCore';
 export default UploaderCore;
