@@ -9,6 +9,8 @@ import {
   UploadResult,
   ChunkInfo,
   UploadErrorType,
+  TaskPriority,
+  TaskSchedulerOptions,
 } from '../types';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
@@ -67,7 +69,7 @@ export class UploaderCore {
       retryCount: this.options.retryCount as number,
       retryDelay: this.options.retryDelay as number,
       timeout: this.options.timeout as number,
-    });
+    } as TaskSchedulerOptions);
 
     // 设置调度器进度回调
     this.scheduler.onProgress(progress => {
@@ -150,20 +152,30 @@ export class UploaderCore {
 
       // 添加所有分片上传任务
       chunks.forEach((chunk, index) => {
-        this.scheduler.addTask(async () => {
-          if (this.isCancelled) {
-            throw new Error('上传已取消');
-          }
+        // 设置任务优先级：首尾分片为高优先级，其他为普通优先级
+        const priority =
+          index === 0 || index === chunks.length - 1
+            ? TaskPriority.HIGH
+            : TaskPriority.NORMAL;
 
-          await this.uploadChunk(chunk, index, this.currentFileId!);
+        this.scheduler.addTask(
+          async () => {
+            if (this.isCancelled) {
+              throw new Error('上传已取消');
+            }
 
-          // 调用分片上传成功钩子
-          await this.runPluginHook('chunkUploaded', {
-            chunkIndex: index,
-            chunkCount: chunks.length,
-            fileId: this.currentFileId,
-          });
-        }, index);
+            await this.uploadChunk(chunk, index, this.currentFileId!);
+
+            // 调用分片上传成功钩子
+            await this.runPluginHook('chunkUploaded', {
+              chunkIndex: index,
+              chunkCount: chunks.length,
+              fileId: this.currentFileId,
+            });
+          },
+          index,
+          priority
+        );
       });
 
       // 执行所有任务

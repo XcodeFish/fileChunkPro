@@ -3,21 +3,19 @@
  * 负责并发控制、任务队列管理和进度计算
  */
 
-interface TaskSchedulerOptions {
-  maxConcurrent: number; // 最大并发数
-  retryCount: number; // 最大重试次数
-  retryDelay: number; // 重试延迟(毫秒)
-  timeout: number; // 任务超时时间(毫秒)
-}
-
-type Task = () => Promise<any>;
-type ProgressCallback = (progress: number) => void;
+import {
+  TaskSchedulerOptions,
+  Task,
+  ProgressCallback,
+  TaskPriority,
+} from '../types';
 
 interface TaskItem {
   id: number; // 任务ID
   task: Task; // 任务函数
   retryCount: number; // 已重试次数
   completed: boolean; // 是否已完成
+  priority: TaskPriority; // 任务优先级
 }
 
 export class TaskScheduler {
@@ -42,13 +40,19 @@ export class TaskScheduler {
    * 添加任务到队列
    * @param task 任务函数
    * @param id 任务ID
+   * @param priority 任务优先级，默认为正常优先级
    */
-  public addTask(task: Task, id: number): void {
+  public addTask(
+    task: Task,
+    id: number,
+    priority: TaskPriority = TaskPriority.NORMAL
+  ): void {
     this.taskQueue.push({
       id,
       task,
       retryCount: 0,
       completed: false,
+      priority,
     });
   }
 
@@ -120,6 +124,32 @@ export class TaskScheduler {
   }
 
   /**
+   * 设置任务优先级
+   * @param id 任务ID
+   * @param priority 新的优先级
+   */
+  public setTaskPriority(id: number, priority: TaskPriority): void {
+    const task = this.taskQueue.find(t => t.id === id);
+    if (task) {
+      task.priority = priority;
+    }
+  }
+
+  /**
+   * 根据优先级对任务进行排序
+   */
+  private sortTasksByPriority(): TaskItem[] {
+    return [...this.taskQueue].sort((a, b) => {
+      if (a.completed === b.completed) {
+        // 优先级高的排在前面
+        return b.priority - a.priority;
+      }
+      // 已完成的排在后面
+      return a.completed ? 1 : -1;
+    });
+  }
+
+  /**
    * 调度下一批任务
    */
   private async scheduleNext(): Promise<void> {
@@ -130,8 +160,8 @@ export class TaskScheduler {
     const availableSlots = this.options.maxConcurrent - this.runningTasks.size;
     if (availableSlots <= 0) return;
 
-    // 找出未完成且未运行的任务
-    const pendingTasks = this.taskQueue.filter(
+    // 找出未完成且未运行的任务，并按优先级排序
+    const pendingTasks = this.sortTasksByPriority().filter(
       task => !task.completed && !this.runningTasks.has(task.id)
     );
 

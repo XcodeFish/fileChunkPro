@@ -40,6 +40,28 @@ export interface ChunkInfo {
   [key: string]: any;          // 其他信息
 }
 
+// 任务调度器选项
+export interface TaskSchedulerOptions {
+  maxConcurrent: number;      // 最大并发数
+  retryCount: number;         // 最大重试次数
+  retryDelay: number;         // 重试延迟(毫秒)
+  timeout: number;            // 任务超时时间(毫秒)
+}
+
+// 任务优先级枚举
+export enum TaskPriority {
+  LOW = 0,                    // 低优先级
+  NORMAL = 1,                 // 正常优先级
+  HIGH = 2,                   // 高优先级
+  CRITICAL = 3                // 关键优先级
+}
+
+// 任务类型定义
+export type Task = () => Promise<any>;
+
+// 进度回调函数类型
+export type ProgressCallback = (progress: number) => void;
+
 // 错误类型枚举
 export enum UploadErrorType {
   NETWORK_ERROR = 'NETWORK_ERROR',        // 网络错误
