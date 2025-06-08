@@ -18,6 +18,7 @@ export * from './adapters';
 // 导出工具类
 export { default as EnvUtils } from './utils/EnvUtils';
 export { default as MemoryManager } from './utils/MemoryManager';
+export { default as StorageUtils } from './utils/StorageUtils';
 
 // 默认导出UploaderCore
 import UploaderCore from './core/UploaderCore';
