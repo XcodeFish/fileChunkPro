@@ -51,10 +51,7 @@ export class ProgressPlugin implements IPlugin {
     uploader.on('error', this.handleError.bind(this));
 
     // 注册钩子，获取分片总数
-    uploader.hooks?.afterChunksGenerated?.tap(
-      'ProgressPlugin',
-      this.setTotalChunks.bind(this)
-    );
+    uploader.hook('afterChunksGenerated', this.setTotalChunks.bind(this));
   }
 
   /**
@@ -143,3 +140,5 @@ export class ProgressPlugin implements IPlugin {
     }
   }
 }
+
+export default ProgressPlugin;

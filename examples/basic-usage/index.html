@@ -1,0 +1,282 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fileChunkPro 基础使用示例</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+      line-height: 1.6;
+    }
+
+    h1 {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .container {
+      border: 1px solid #e0e0e0;
+      border-radius: 8px;
+      padding: 20px;
+      background-color: #f9f9f9;
+      margin-bottom: 20px;
+    }
+
+    .file-selector {
+      margin-bottom: 20px;
+    }
+
+    .button {
+      display: inline-block;
+      padding: 10px 16px;
+      background-color: #4a90e2;
+      color: white;
+      border-radius: 4px;
+      cursor: pointer;
+      font-weight: 500;
+      transition: background-color 0.2s;
+      border: none;
+    }
+
+    .button:hover {
+      background-color: #3a80d2;
+    }
+
+    .button.cancel {
+      background-color: #e74c3c;
+    }
+
+    .button.cancel:hover {
+      background-color: #d73c2c;
+    }
+
+    .file-info {
+      margin-top: 10px;
+      padding: 10px;
+      background-color: #fff;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      display: none;
+    }
+
+    .progress-container {
+      margin-top: 20px;
+      display: none;
+    }
+
+    .progress-bar {
+      height: 8px;
+      background-color: #e0e0e0;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 5px;
+    }
+
+    .progress-fill {
+      height: 100%;
+      background-color: #4a90e2;
+      border-radius: 4px;
+      width: 0;
+      transition: width 0.3s ease;
+    }
+
+    .status {
+      margin-top: 10px;
+      font-weight: 500;
+    }
+
+    .log {
+      margin-top: 20px;
+      padding: 10px;
+      background-color: #f0f0f0;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      height: 150px;
+      overflow-y: auto;
+      font-family: monospace;
+      font-size: 14px;
+    }
+
+    .log-entry {
+      margin-bottom: 5px;
+      padding: 3px 0;
+      border-bottom: 1px solid #eee;
+    }
+
+    .log-entry.error {
+      color: #e74c3c;
+    }
+
+    .log-entry.success {
+      color: #2ecc71;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>fileChunkPro 基础使用示例</h1>
+
+  <div class="container">
+    <div class="file-selector">
+      <input type="file" id="fileInput" style="display: none">
+      <button class="button" id="selectButton">选择文件</button>
+      <button class="button cancel" id="cancelButton" style="display: none">取消上传</button>
+    </div>
+
+    <div class="file-info" id="fileInfo">
+      <div><strong>文件名:</strong> <span id="fileName"></span></div>
+      <div><strong>文件大小:</strong> <span id="fileSize"></span></div>
+      <div><strong>文件类型:</strong> <span id="fileType"></span></div>
+    </div>
+
+    <div class="progress-container" id="progressContainer">
+      <div class="progress-bar">
+        <div class="progress-fill" id="progressFill"></div>
+      </div>
+      <div><span id="progressText">0%</span></div>
+      <div class="status" id="statusText"></div>
+    </div>
+  </div>
+
+  <div class="container">
+    <h3>上传日志</h3>
+    <div class="log" id="log"></div>
+  </div>
+
+  <!-- 引入fileChunkPro库 -->
+  <script src="../../dist/browser/fileChunkPro.umd.js"></script>
+
+  <script>
+    // 初始化上传器
+    const uploader = new fileChunkPro.UploaderCore({
+      endpoint: 'https://example.com/upload', // 替换为你的上传端点
+      chunkSize: 2 * 1024 * 1024, // 2MB分片大小
+      concurrency: 3, // 并发上传数量
+      timeout: 30000, // 超时时间 30 秒
+      retryCount: 3, // 失败重试次数
+      headers: {
+        'X-Custom-Header': 'fileChunkPro-Demo'
+      }
+    })
+
+    // 注册内置插件
+    uploader.registerPlugin('validator', new fileChunkPro.ValidatorPlugin({
+      maxFileSize: 1024 * 1024 * 1024, // 最大1GB
+      allowFileTypes: ['image/*', 'video/*', 'application/pdf', 'text/*']
+    }))
+
+    uploader.registerPlugin('chunk', new fileChunkPro.ChunkPlugin())
+    uploader.registerPlugin('progress', new fileChunkPro.ProgressPlugin())
+
+    // DOM 元素
+    const fileInput = document.getElementById('fileInput')
+    const selectButton = document.getElementById('selectButton')
+    const cancelButton = document.getElementById('cancelButton')
+    const fileInfo = document.getElementById('fileInfo')
+    const fileName = document.getElementById('fileName')
+    const fileSize = document.getElementById('fileSize')
+    const fileType = document.getElementById('fileType')
+    const progressContainer = document.getElementById('progressContainer')
+    const progressFill = document.getElementById('progressFill')
+    const progressText = document.getElementById('progressText')
+    const statusText = document.getElementById('statusText')
+    const log = document.getElementById('log')
+
+    // 格式化文件大小
+    function formatSize (bytes)
+    {
+      if (bytes === 0) return '0 Bytes'
+      const k = 1024
+      const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB']
+      const i = Math.floor(Math.log(bytes) / Math.log(k))
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+    }
+
+    // 添加日志条目
+    function addLog (message, type = '')
+    {
+      const entry = document.createElement('div')
+      entry.className = 'log-entry ' + type
+      entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`
+      log.appendChild(entry)
+      log.scrollTop = log.scrollHeight
+    }
+
+    // 事件监听
+    selectButton.addEventListener('click', () =>
+    {
+      fileInput.click()
+    })
+
+    fileInput.addEventListener('change', async () =>
+    {
+      const file = fileInput.files[0]
+      if (!file) return
+
+      // 显示文件信息
+      fileName.textContent = file.name
+      fileSize.textContent = formatSize(file.size)
+      fileType.textContent = file.type || '未知'
+      fileInfo.style.display = 'block'
+
+      // 显示进度条和取消按钮
+      progressContainer.style.display = 'block'
+      cancelButton.style.display = 'inline-block'
+
+      // 重置进度
+      progressFill.style.width = '0%'
+      progressText.textContent = '0%'
+      statusText.textContent = '准备上传...'
+
+      addLog(`开始上传文件: ${file.name} (${formatSize(file.size)})`)
+
+      try {
+        // 注册事件监听
+        uploader.on('progress', (progress) =>
+        {
+          progressFill.style.width = `${progress}%`
+          progressText.textContent = `${Math.round(progress)}%`
+          statusText.textContent = '上传中...'
+        })
+
+        uploader.on('chunkSuccess', (data) =>
+        {
+          addLog(`分片 ${data.chunkIndex + 1}/${data.chunkCount} 上传成功`)
+        })
+
+        // 开始上传
+        const result = await uploader.upload(file)
+
+        statusText.textContent = '上传成功!'
+        addLog(`文件上传成功: ${result.url || ''}`, 'success')
+      } catch (error) {
+        statusText.textContent = `上传失败: ${error.message}`
+        addLog(`上传错误: ${error.message}`, 'error')
+        console.error('上传错误:', error)
+      } finally {
+        cancelButton.style.display = 'none'
+        // 移除事件监听
+        uploader.off('progress')
+        uploader.off('chunkSuccess')
+      }
+    })
+
+    cancelButton.addEventListener('click', () =>
+    {
+      uploader.cancel()
+      statusText.textContent = '上传已取消'
+      addLog('用户取消了上传')
+      cancelButton.style.display = 'none'
+    })
+
+    // 初始化日志
+    addLog('fileChunkPro 初始化完成');
+  </script>
+</body>
+
+</html>

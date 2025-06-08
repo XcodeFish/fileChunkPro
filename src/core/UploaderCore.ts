@@ -10,7 +10,6 @@ import {
   ChunkInfo,
   UploadErrorType,
   TaskPriority,
-  TaskSchedulerOptions,
 } from '../types';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
@@ -64,12 +63,15 @@ export class UploaderCore {
     };
 
     // 初始化任务调度器
-    this.scheduler = new TaskScheduler({
-      maxConcurrent: this.options.concurrency as number,
-      retryCount: this.options.retryCount as number,
-      retryDelay: this.options.retryDelay as number,
-      timeout: this.options.timeout as number,
-    } as TaskSchedulerOptions);
+    this.scheduler = new TaskScheduler(
+      {
+        maxConcurrent: this.options.concurrency as number,
+        retryCount: this.options.retryCount as number,
+        retryDelay: this.options.retryDelay as number,
+        timeout: this.options.timeout as number,
+      },
+      this.events
+    );
 
     // 设置调度器进度回调
     this.scheduler.onProgress(progress => {
@@ -97,12 +99,31 @@ export class UploaderCore {
   }
 
   /**
+   * 注册插件的便捷方法
+   * @param plugin 插件实例
+   */
+  public use(plugin: any): this {
+    const name = plugin.name || `plugin_${Date.now()}`;
+    return this.registerPlugin(name, plugin);
+  }
+
+  /**
    * 注册事件监听器
    * @param event 事件名称
    * @param handler 处理函数
    */
   public on(event: string, handler: (...args: any[]) => void): this {
     this.events.on(event, handler);
+    return this;
+  }
+
+  /**
+   * 注册钩子处理函数
+   * @param hookName 钩子名称
+   * @param handler 处理函数
+   */
+  public hook(hookName: string, handler: (...args: any[]) => any): this {
+    this.pluginManager.registerHook(hookName, handler);
     return this;
   }
 
@@ -243,6 +264,30 @@ export class UploaderCore {
     }
 
     this.currentFileId = null;
+  }
+
+  /**
+   * 准备文件，用于测试
+   * 此方法仅用于测试文件处理性能，不实际上传
+   * @param file 要处理的文件
+   * @returns 分片信息数组
+   */
+  public async prepareFile(file: AnyFile): Promise<ChunkInfo[]> {
+    try {
+      // 验证文件
+      this.validateFile(file);
+
+      // 执行前置钩子
+      await this.runPluginHook('beforeUpload', { file });
+
+      // 创建文件分片
+      const chunks = await this.createChunks(file);
+
+      return chunks;
+    } catch (error) {
+      const uploadError = this.errorCenter.handle(error);
+      throw uploadError;
+    }
   }
 
   /**

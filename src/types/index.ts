@@ -42,11 +42,52 @@ export interface ChunkInfo {
 
 // 任务调度器选项
 export interface TaskSchedulerOptions {
-  maxConcurrent: number;      // 最大并发数
-  retryCount: number;         // 最大重试次数
-  retryDelay: number;         // 重试延迟(毫秒)
-  timeout: number;            // 任务超时时间(毫秒)
+  concurrency?: number;      // 最大并发数
+  retries?: number;          // 最大重试次数
+  retryDelay?: number;       // 重试延迟(毫秒)
+  priorityQueue?: boolean;   // 是否按优先级排序
+  autoStart?: boolean;       // 是否自动启动
+  memoryOptimization?: boolean; // 是否启用内存优化
+  networkOptimization?: boolean; // 是否启用网络状态优化
+  maxIdleTime?: number;      // 最大空闲时间(毫秒)
 }
+
+// 任务状态枚举
+export enum TaskState {
+  PENDING = 'pending',       // 等待中
+  RUNNING = 'running',       // 执行中
+  COMPLETED = 'completed',   // 已完成
+  FAILED = 'failed',         // 失败
+  ABORTED = 'aborted',       // 已中止
+  CANCELLED = 'cancelled'    // 已取消
+}
+
+// 任务统计信息
+export interface TaskStats {
+  executed: number;          // 已执行任务数
+  succeeded: number;         // 成功任务数
+  failed: number;            // 失败任务数
+  retried: number;           // 重试任务数
+  aborted: number;           // 中止任务数
+  averageExecutionTime: number; // 平均执行时间
+  totalExecutionTime: number;   // 总执行时间
+  longestExecutionTime: number; // 最长执行时间
+  shortestExecutionTime: number; // 最短执行时间
+}
+
+// 任务元数据
+export interface TaskMetadata {
+  fileId?: string;           // 文件ID
+  chunkIndex?: number;       // 分片索引
+  size?: number;             // 分片/文件大小
+  fileName?: string;         // 文件名
+  mimeType?: string;         // 文件类型
+  speed?: number;            // 预估速度
+  [key: string]: any;        // 其他元数据
+}
+
+// 网络状态类型
+export type NetworkStatus = 'online' | 'offline' | 'unknown';
 
 // 任务优先级枚举
 export enum TaskPriority {
@@ -56,11 +97,19 @@ export enum TaskPriority {
   CRITICAL = 3                // 关键优先级
 }
 
+// 任务接口
+export interface ITask {
+  id: number;                 // 任务ID
+  execute: () => Promise<any>; // 执行任务
+  priority: TaskPriority;     // 优先级
+  metadata?: TaskMetadata;    // 元数据
+}
+
 // 任务类型定义
 export type Task = () => Promise<any>;
 
 // 进度回调函数类型
-export type ProgressCallback = (progress: number) => void;
+export type ProgressCallback = (progress: any) => void;
 
 // 错误类型枚举
 export enum UploadErrorType {

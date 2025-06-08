@@ -173,7 +173,7 @@ export class EventBus {
   public emit(event: string | EventObject, ...args: any[]): EventObject {
     // 如果传入的是字符串，创建事件对象
     const eventObj: EventObject =
-      typeof event === 'string' ? createEventObject(event) : event;
+      typeof event === 'string' ? createEventObject(event, args[0]) : event;
 
     const eventType = eventObj.type;
 
@@ -193,8 +193,8 @@ export class EventBus {
           break;
         }
 
-        // 执行处理函数
-        handlerInfo.handler(eventObj, ...args);
+        // 执行处理函数，传递事件对象作为第一个参数
+        handlerInfo.handler(eventObj);
 
         // 收集一次性处理函数，稍后统一移除
         if (handlerInfo.options?.once) {
