@@ -20,3 +20,15 @@ rad.json
 *.flf
 #Test results file
 TestResults.xml
+
+dist
+.cursor
+node_modules
+coverage
+.DS_Store
+*.log
+.env
+.env.*
+!.env.example
+.cache
+.rpt2_cache
