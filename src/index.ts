@@ -12,6 +12,9 @@ export * from './types';
 // 导出核心模块
 export * from './core';
 
+// 导出适配器
+export * from './adapters';
+
 // 导出工具类
 export { default as EnvUtils } from './utils/EnvUtils';
 export { default as MemoryManager } from './utils/MemoryManager';
