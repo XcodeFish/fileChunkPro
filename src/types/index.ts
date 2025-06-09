@@ -122,6 +122,10 @@ export enum UploadErrorType {
   MEMORY_ERROR = 'MEMORY_ERROR',          // 内存不足错误
   PERMISSION_ERROR = 'PERMISSION_ERROR',  // 权限错误
   QUOTA_EXCEEDED_ERROR = 'QUOTA_EXCEEDED_ERROR', // 存储配额超出
+  UPLOAD_ERROR = 'UPLOAD_ERROR',         // 上传错误
+  MERGE_ERROR = 'MERGE_ERROR',           // 合并错误
+  VALIDATION_ERROR = 'VALIDATION_ERROR', // 验证错误
+  CANCEL_ERROR = 'CANCEL_ERROR',         // 取消错误
   SECURITY_ERROR = 'SECURITY_ERROR',      // 安全错误
   UNKNOWN_ERROR = 'UNKNOWN_ERROR'         // 未知错误
 }
@@ -151,6 +155,7 @@ export interface MiniProgramFile {
 // 插件接口
 export interface IPlugin {
   install: (uploader: any) => void;
+  version?: string;           // 插件版本
 }
 
 // 上传适配器接口
@@ -164,4 +169,72 @@ export enum SecurityLevel {
   BASIC = 'BASIC',
   STANDARD = 'STANDARD',
   ADVANCED = 'ADVANCED'
+}
+
+// 插件优先级枚举
+export enum PluginPriority {
+  LOWEST = 0,
+  LOW = 1,
+  NORMAL = 2,
+  HIGH = 3,
+  HIGHEST = 4
+}
+
+// 钩子执行结果
+export interface HookResult {
+  handled: boolean;          // 是否有处理函数执行
+  result: any;               // 执行结果
+  modified: boolean;         // 是否修改了参数
+  errors?: Error[];          // 执行错误列表
+}
+
+// 网络质量枚举
+export enum NetworkQuality {
+  POOR = 'poor',
+  FAIR = 'fair',
+  GOOD = 'good',
+  EXCELLENT = 'excellent',
+  UNKNOWN = 'unknown'
+}
+
+// 网络条件接口
+export interface NetworkCondition {
+  type: string;              // 网络类型
+  effectiveType: string;     // 有效网络类型
+  downlink: number;          // 下载速度
+  rtt: number;               // 往返时间
+  saveData?: boolean;        // 是否启用数据节省
+}
+
+// 上传策略接口
+export interface UploadStrategy {
+  chunkSize: number;         // 分片大小
+  concurrency: number;       // 并发数
+  retryCount: number;        // 重试次数
+  retryDelay: number;        // 重试延迟
+  timeout: number;           // 超时时间
+  prioritizeFirstChunk?: boolean; // 是否优先上传第一个分片
+  prioritizeLastChunk?: boolean;  // 是否优先上传最后一个分片
+}
+
+// 重试策略接口
+export interface RetryStrategy {
+  maxRetries: number;        // 最大重试次数
+  initialDelay: number;      // 初始延迟
+  maxDelay: number;          // 最大延迟
+  factor: number;            // 延迟增长因子
+  shouldRetry: (error: Error) => boolean; // 判断是否应该重试
+}
+
+// 文件验证结果
+export interface FileValidationResult {
+  valid: boolean;            // 是否有效
+  errors: string[];          // 错误信息
+  warnings: string[];        // 警告信息
+}
+
+// 内容验证结果
+export interface ContentValidationResult {
+  valid: boolean;            // 是否有效
+  reason: string;            // 无效原因
 } 

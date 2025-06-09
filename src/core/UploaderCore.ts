@@ -10,9 +10,14 @@ import {
   ChunkInfo,
   UploadErrorType,
   TaskPriority,
+  NetworkQuality,
+  UploadStrategy,
+  RetryStrategy,
+  FileValidationResult,
 } from '../types';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
+import NetworkDetector from '../utils/NetworkDetector';
 
 import ErrorCenter, { UploadError } from './ErrorCenter';
 import EventBus from './EventBus';
@@ -38,6 +43,14 @@ export class UploaderCore {
   private currentFileId: string | null = null;
   private memoryWatcher: NodeJS.Timeout | null = null;
 
+  // 新增属性
+  private memoryCheckInterval = 10000; // 10秒检查一次内存使用情况
+  private uploadStrategies: Map<string, UploadStrategy> = new Map();
+  private memoryThreshold = 0.8; // 内存使用阈值，超过则调整策略
+  private networkDetector: NetworkDetector | null = null;
+  private activeUploads: Set<string> = new Set(); // 活动上传集合
+  private failedChunks: Map<string, number> = new Map(); // 失败分片计数
+
   /**
    * 创建UploaderCore实例
    * @param options 上传选项
@@ -60,6 +73,11 @@ export class UploaderCore {
       chunkSize: options.chunkSize || 'auto',
       headers: options.headers || {},
       useWorker: options.useWorker !== false && EnvUtils.isWorkerSupported(),
+      // 新增默认设置
+      enableAdaptiveUploads: options.enableAdaptiveUploads !== false,
+      maxMemoryUsage: options.maxMemoryUsage || 0.9,
+      smartRetry: options.smartRetry !== false,
+      autoResume: options.autoResume !== false,
     };
 
     // 初始化任务调度器
@@ -81,10 +99,65 @@ export class UploaderCore {
     // 检测环境
     this.environment = EnvUtils.detectEnvironment();
 
+    // 初始化网络检测器
+    if (this.options.enableAdaptiveUploads) {
+      this.networkDetector = new NetworkDetector();
+    }
+
+    // 设置内存阈值
+    this.memoryThreshold = this.options.maxMemoryUsage || 0.8;
+
     // 设置内存监控
     if (options.enableMemoryMonitoring !== false) {
       this.setupMemoryMonitoring();
     }
+
+    // 初始化上传策略
+    this.initializeUploadStrategies();
+  }
+
+  /**
+   * 初始化上传策略
+   */
+  private initializeUploadStrategies(): void {
+    // 默认策略
+    this.uploadStrategies.set('default', {
+      concurrency: this.options.concurrency as number,
+      chunkSize:
+        typeof this.options.chunkSize === 'number'
+          ? this.options.chunkSize
+          : 2 * 1024 * 1024, // 默认2MB
+      retryCount: this.options.retryCount as number,
+      retryDelay: this.options.retryDelay as number,
+      timeout: this.options.timeout as number,
+    });
+
+    // 高性能策略 - 适用于良好网络和设备
+    this.uploadStrategies.set('highPerformance', {
+      concurrency: Math.min(6, navigator.hardwareConcurrency || 4),
+      chunkSize: 8 * 1024 * 1024, // 8MB
+      retryCount: 2,
+      retryDelay: 500,
+      timeout: 30000,
+    });
+
+    // 稳定性策略 - 适用于较差网络
+    this.uploadStrategies.set('reliability', {
+      concurrency: 2,
+      chunkSize: 1 * 1024 * 1024, // 1MB
+      retryCount: 5,
+      retryDelay: 2000,
+      timeout: 60000,
+    });
+
+    // 省电策略 - 适用于移动设备或电池供电设备
+    this.uploadStrategies.set('powerSaving', {
+      concurrency: 1,
+      chunkSize: 4 * 1024 * 1024, // 4MB
+      retryCount: 3,
+      retryDelay: 1000,
+      timeout: 45000,
+    });
   }
 
   /**
@@ -159,17 +232,31 @@ export class UploaderCore {
       // 验证文件
       this.validateFile(file);
 
+      // 选择上传策略
+      const strategy = await this.selectUploadStrategy(file);
+
       // 执行前置钩子
-      await this.runPluginHook('beforeUpload', { file });
+      await this.runPluginHook('beforeUpload', { file, strategy });
 
       // 生成文件唯一ID
       this.currentFileId = await this.generateFileId(file);
 
+      // 添加到活动上传
+      this.activeUploads.add(this.currentFileId);
+
       // 创建文件分片
-      const chunks = await this.createChunks(file);
+      const chunks = await this.createChunks(file, strategy.chunkSize);
 
       // 初始化上传（可能包含与服务器的交互）
       await this.initializeUpload(file, this.currentFileId, chunks.length);
+
+      // 更新调度器设置
+      this.scheduler.updateSettings({
+        maxConcurrent: strategy.concurrency,
+        retryCount: strategy.retryCount,
+        retryDelay: strategy.retryDelay,
+        timeout: strategy.timeout,
+      });
 
       // 添加所有分片上传任务
       chunks.forEach((chunk, index) => {
@@ -226,6 +313,9 @@ export class UploaderCore {
       // 发送完成事件
       this.emit('complete', result);
 
+      // 从活动上传中移除
+      this.activeUploads.delete(this.currentFileId);
+
       return result;
     } catch (error) {
       const uploadError = this.errorCenter.handle(error);
@@ -233,6 +323,11 @@ export class UploaderCore {
       // 如果不是因取消造成的错误，才发送错误事件
       if (!this.isCancelled) {
         this.emit('error', uploadError);
+      }
+
+      // 如果有当前文件ID，从活动上传中移除
+      if (this.currentFileId) {
+        this.activeUploads.delete(this.currentFileId);
       }
 
       throw uploadError;
@@ -252,102 +347,161 @@ export class UploaderCore {
   }
 
   /**
-   * 释放资源
+   * 销毁实例，释放资源
    */
   public dispose(): void {
-    this.scheduler.clear();
-    this.events.removeAllListeners();
+    // 取消所有上传
+    this.cancel();
 
+    // 清理事件监听器
+    this.events.clear();
+
+    // 停止内存监控
     if (this.memoryWatcher) {
       clearInterval(this.memoryWatcher);
       this.memoryWatcher = null;
     }
 
+    // 关闭网络检测器
+    if (this.networkDetector) {
+      this.networkDetector.dispose();
+      this.networkDetector = null;
+    }
+
+    // 调用插件销毁钩子
+    this.runPluginHook('dispose', {});
+
+    // 清空插件
+    this.pluginManager.clearPlugins();
+
+    // 清空策略
+    this.uploadStrategies.clear();
+
+    // 清空集合
+    this.activeUploads.clear();
+    this.failedChunks.clear();
+
+    // 重置状态
     this.currentFileId = null;
+    this.isCancelled = false;
   }
 
   /**
-   * 准备文件，用于测试
-   * 此方法仅用于测试文件处理性能，不实际上传
-   * @param file 要处理的文件
-   * @returns 分片信息数组
+   * 预处理文件，获取分片信息
+   * @param file 待上传的文件
+   * @returns 文件分片信息
    */
   public async prepareFile(file: AnyFile): Promise<ChunkInfo[]> {
-    try {
-      // 验证文件
-      this.validateFile(file);
+    this.validateFile(file);
 
-      // 执行前置钩子
-      await this.runPluginHook('beforeUpload', { file });
+    // 选择上传策略
+    const strategy = await this.selectUploadStrategy(file);
 
-      // 创建文件分片
-      const chunks = await this.createChunks(file);
-
-      return chunks;
-    } catch (error) {
-      const uploadError = this.errorCenter.handle(error);
-      throw uploadError;
-    }
+    // 创建分片
+    return this.createChunks(file, strategy.chunkSize);
   }
 
   /**
-   * 获取插件
+   * 获取插件实例
    * @param name 插件名称
+   * @returns 插件实例
    */
   public getPlugin(name: string): any {
     return this.pluginManager.getPlugin(name);
   }
 
   /**
-   * 验证文件
-   * @param file 文件对象
-   * @throws 如果文件不符合要求则抛出错误
+   * 获取当前活动上传数量
+   */
+  public getActiveUploadsCount(): number {
+    return this.activeUploads.size;
+  }
+
+  /**
+   * 暂停所有上传
+   */
+  public pauseAll(): void {
+    this.scheduler.pause();
+    this.emit('pauseAll', { count: this.activeUploads.size });
+  }
+
+  /**
+   * 恢复所有上传
+   */
+  public resumeAll(): void {
+    this.scheduler.resume();
+    this.emit('resumeAll', { count: this.activeUploads.size });
+  }
+
+  /**
+   * 验证文件是否符合上传条件
+   * @param file 待验证的文件
    */
   private validateFile(file: AnyFile): void {
-    // 检查文件大小是否在限制范围内
-    if (this.options.maxFileSize && file.size > this.options.maxFileSize) {
+    // 检查文件是否存在
+    if (!file) {
+      throw new UploadError(UploadErrorType.FILE_ERROR, '未提供有效文件');
+    }
+
+    // 检查文件大小
+    if (file.size <= 0) {
+      throw new UploadError(UploadErrorType.FILE_ERROR, '文件大小无效');
+    }
+
+    const { maxFileSize, allowedFileTypes } = this.options;
+
+    // 检查文件大小限制
+    if (maxFileSize && file.size > maxFileSize) {
       throw new UploadError(
         UploadErrorType.FILE_ERROR,
-        `文件大小超过限制: ${file.size} > ${this.options.maxFileSize}`
+        `文件大小超过限制 (${(maxFileSize / 1024 / 1024).toFixed(2)}MB)`
       );
     }
 
-    // 检查文件类型是否在允许列表中
-    if (this.options.allowFileTypes && this.options.allowFileTypes.length > 0) {
-      // 获取文件类型
+    // 检查文件类型限制
+    if (allowedFileTypes && allowedFileTypes.length > 0) {
       const fileType = file.type || this.getFileTypeFromName(file.name);
+      const isTypeAllowed = allowedFileTypes.some(
+        type => fileType.includes(type) || type === '*'
+      );
 
-      if (
-        !this.options.allowFileTypes.some(allowedType => {
-          // 支持通配符匹配，如 'image/*'
-          if (allowedType.endsWith('/*')) {
-            const prefix = allowedType.substr(0, allowedType.indexOf('/*'));
-            return fileType.startsWith(prefix);
-          }
-          return fileType === allowedType;
-        })
-      ) {
+      if (!isTypeAllowed) {
         throw new UploadError(
           UploadErrorType.FILE_ERROR,
           `不支持的文件类型: ${fileType}`
         );
       }
     }
+
+    // 文件验证钩子
+    this.runPluginHook('validateFile', { file }).then(
+      (result: FileValidationResult) => {
+        if (result && !result.valid) {
+          throw new UploadError(
+            UploadErrorType.FILE_ERROR,
+            result.message || '文件验证失败'
+          );
+        }
+      }
+    );
   }
 
   /**
-   * 从文件名推断文件类型
+   * 从文件名获取文件类型
    * @param fileName 文件名
-   * @returns MIME类型字符串
+   * @returns 文件类型
    */
   private getFileTypeFromName(fileName: string): string {
-    const ext = fileName.split('.').pop()?.toLowerCase() || '';
-    // 简单的类型映射
-    const mimeMap: { [key: string]: string } = {
+    const extension = fileName.split('.').pop()?.toLowerCase() || '';
+
+    // 常见文件类型映射
+    const mimeTypes: Record<string, string> = {
       jpg: 'image/jpeg',
       jpeg: 'image/jpeg',
       png: 'image/png',
       gif: 'image/gif',
+      webp: 'image/webp',
+      svg: 'image/svg+xml',
       pdf: 'application/pdf',
       doc: 'application/msword',
       docx: 'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
@@ -355,67 +509,181 @@ export class UploaderCore {
       xlsx: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
       ppt: 'application/vnd.ms-powerpoint',
       pptx: 'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+      zip: 'application/zip',
+      rar: 'application/x-rar-compressed',
+      '7z': 'application/x-7z-compressed',
+      mp3: 'audio/mpeg',
+      mp4: 'video/mp4',
+      avi: 'video/x-msvideo',
+      mov: 'video/quicktime',
       txt: 'text/plain',
-      csv: 'text/csv',
       html: 'text/html',
       css: 'text/css',
       js: 'application/javascript',
       json: 'application/json',
       xml: 'application/xml',
-      zip: 'application/zip',
-      rar: 'application/x-rar-compressed',
-      mp3: 'audio/mpeg',
-      mp4: 'video/mp4',
-      avi: 'video/x-msvideo',
-      mov: 'video/quicktime',
-      wav: 'audio/wav',
     };
-    return mimeMap[ext] || 'application/octet-stream';
+
+    return mimeTypes[extension] || 'application/octet-stream';
+  }
+
+  /**
+   * 选择上传策略
+   * @param file 待上传的文件
+   * @returns 选择的上传策略
+   */
+  private async selectUploadStrategy(file: AnyFile): Promise<UploadStrategy> {
+    // 如果不启用自适应上传，直接使用默认策略
+    if (!this.options.enableAdaptiveUploads) {
+      return this.uploadStrategies.get('default')!;
+    }
+
+    // 检测网络质量
+    let networkQuality: NetworkQuality = 'unknown';
+    if (this.networkDetector) {
+      networkQuality = await this.networkDetector.detectNetworkQuality();
+    }
+
+    // 获取设备信息
+    const isLowMemoryDevice = MemoryManager.isLowMemoryDevice();
+    const isLowPowerDevice = MemoryManager.isLowPowerDevice();
+
+    // 基于网络和设备状况选择策略
+    if (networkQuality === 'good' && !isLowMemoryDevice && !isLowPowerDevice) {
+      return this.uploadStrategies.get('highPerformance')!;
+    } else if (networkQuality === 'poor' || file.size > 100 * 1024 * 1024) {
+      return this.uploadStrategies.get('reliability')!;
+    } else if (isLowPowerDevice || isLowMemoryDevice) {
+      return this.uploadStrategies.get('powerSaving')!;
+    }
+
+    return this.uploadStrategies.get('default')!;
   }
 
   /**
    * 设置内存监控
    */
   private setupMemoryMonitoring(): void {
-    // 仅在浏览器环境启用
-    if (this.environment === Environment.Browser) {
-      this.memoryWatcher = setInterval(() => {
-        if (MemoryManager.needsMemoryCleanup()) {
-          this.emit('memoryWarning', {
-            message: '内存使用率较高，建议及时释放不必要的资源',
-          });
+    // 清除现有的监控
+    if (this.memoryWatcher) {
+      clearInterval(this.memoryWatcher);
+    }
+
+    // 设置内存监控定时器
+    this.memoryWatcher = setInterval(() => {
+      const memoryInfo = MemoryManager.getMemoryInfo();
+
+      // 发送内存使用事件
+      this.emit('memoryUsage', memoryInfo);
+
+      // 内存使用率超过阈值时采取措施
+      if (memoryInfo.usageRatio > this.memoryThreshold) {
+        this.handleHighMemoryUsage(memoryInfo.usageRatio);
+      }
+    }, this.memoryCheckInterval);
+  }
+
+  /**
+   * 处理高内存使用情况
+   * @param usageRatio 内存使用率
+   */
+  private handleHighMemoryUsage(usageRatio: number): void {
+    // 发送警告事件
+    this.emit('memoryWarning', { usageRatio });
+
+    // 如果内存使用率非常高，暂停上传并触发GC
+    if (usageRatio > 0.95) {
+      this.scheduler.pause();
+
+      // 尝试触发垃圾回收
+      if (global?.gc) {
+        try {
+          global.gc();
+        } catch (e) {
+          // 忽略错误
         }
-      }, 10000);
+      }
+
+      // 延迟后恢复上传
+      setTimeout(() => {
+        this.scheduler.resume();
+      }, 1000);
+    }
+    // 如果内存使用率较高，减少并发数
+    else if (usageRatio > 0.85) {
+      const currentConcurrency = this.scheduler.getConcurrency();
+      if (currentConcurrency > 1) {
+        this.scheduler.updateSettings({
+          maxConcurrent: currentConcurrency - 1,
+        });
+
+        this.emit('concurrencyAdjusted', {
+          from: currentConcurrency,
+          to: currentConcurrency - 1,
+          reason: 'highMemory',
+        });
+      }
     }
   }
 
   /**
    * 创建文件分片
-   * @param file 文件对象
-   * @returns 分片数组
+   * @param file 待分片的文件
+   * @param preferredChunkSize 分片大小
+   * @returns 分片信息数组
    */
-  private async createChunks(file: AnyFile): Promise<ChunkInfo[]> {
-    // 确定分片大小
-    const chunkSize = MemoryManager.getOptimalChunkSize(
-      file.size,
-      this.options.chunkSize || 'auto'
-    );
+  private async createChunks(
+    file: AnyFile,
+    preferredChunkSize: number
+  ): Promise<ChunkInfo[]> {
+    // 判断分片大小
+    let chunkSize = preferredChunkSize;
+
+    // 如果是 'auto'，根据文件大小自动计算合适的分片大小
+    if (this.options.chunkSize === 'auto') {
+      if (file.size <= 5 * 1024 * 1024) {
+        // 5MB以下
+        chunkSize = 512 * 1024; // 512KB
+      } else if (file.size <= 100 * 1024 * 1024) {
+        // 5MB-100MB
+        chunkSize = 2 * 1024 * 1024; // 2MB
+      } else if (file.size <= 1024 * 1024 * 1024) {
+        // 100MB-1GB
+        chunkSize = 5 * 1024 * 1024; // 5MB
+      } else {
+        // >1GB
+        chunkSize = 10 * 1024 * 1024; // 10MB
+      }
+    } else if (typeof this.options.chunkSize === 'number') {
+      chunkSize = this.options.chunkSize;
+    }
+
+    // 调用插件钩子，允许插件修改分片大小
+    const hookResult = await this.runPluginHook('beforeCreateChunks', {
+      file,
+      chunkSize,
+    });
+
+    if (hookResult && typeof hookResult.chunkSize === 'number') {
+      chunkSize = hookResult.chunkSize;
+    }
 
     // 计算分片数量
-    const chunkCount = Math.ceil(file.size / chunkSize);
     const chunks: ChunkInfo[] = [];
+    const chunkCount = Math.ceil(file.size / chunkSize);
 
-    // 创建分片信息
     for (let i = 0; i < chunkCount; i++) {
       const start = i * chunkSize;
-      const end = Math.min(file.size, start + chunkSize);
+      const end = Math.min(start + chunkSize, file.size);
 
       chunks.push({
         index: i,
         start,
         end,
         size: end - start,
-        fileSize: file.size,
+        progress: 0,
+        status: 'pending',
+        retries: 0,
       });
     }
 
@@ -423,52 +691,272 @@ export class UploaderCore {
   }
 
   /**
-   * 上传单个分片
+   * 上传文件分片
    * @param chunk 分片信息
    * @param index 分片索引
    * @param fileId 文件ID
    */
   private async uploadChunk(
-    _chunk: ChunkInfo,
-    _index: number,
-    _fileId: string
+    chunk: ChunkInfo,
+    index: number,
+    fileId: string
   ): Promise<void> {
-    // 这里实现具体的分片上传逻辑
-    // 实际实现会涉及到适配器的使用，这里简化处理
+    // 根据网络状态自适应调整重试策略
+    const networkQuality = this.networkDetector
+      ? await this.networkDetector.detectNetworkQuality()
+      : 'unknown';
+    const retryStrategy = this.getRetryStrategy(networkQuality);
 
-    // 等待片刻模拟上传
-    await new Promise(resolve => setTimeout(resolve, 50));
+    let attempts = 0;
+    let lastError: Error | null = null;
 
-    // 如果已取消，则终止上传
-    if (this.isCancelled) {
-      throw new Error('上传已取消');
+    // 更新分片状态
+    chunk.status = 'uploading';
+
+    while (attempts <= retryStrategy.maxRetries) {
+      try {
+        // 如果已取消上传，终止重试
+        if (this.isCancelled) {
+          chunk.status = 'cancelled';
+          throw new Error('上传已取消');
+        }
+
+        if (attempts > 0) {
+          // 如果是重试，等待一段时间
+          const delay = this.calculateRetryDelay(attempts, retryStrategy);
+          await new Promise(resolve => setTimeout(resolve, delay));
+
+          // 更新分片状态
+          chunk.retries = attempts;
+          this.emit('chunkRetry', {
+            chunk,
+            attempt: attempts,
+            fileId,
+            error: lastError,
+          });
+        }
+
+        // 上传前检查分片状态钩子
+        await this.runPluginHook('beforeChunkUpload', { chunk, index, fileId });
+
+        // 执行上传
+        const response = await this.executeChunkUpload(chunk, index, fileId);
+
+        // 上传成功钩子
+        await this.runPluginHook('chunkUploadSuccess', {
+          chunk,
+          index,
+          fileId,
+          response,
+        });
+
+        // 更新分片状态
+        chunk.status = 'uploaded';
+        chunk.progress = 100;
+
+        // 成功上传，重置失败计数
+        const chunkKey = `${fileId}:${index}`;
+        this.failedChunks.delete(chunkKey);
+
+        return;
+      } catch (error) {
+        lastError = error instanceof Error ? error : new Error(String(error));
+        attempts++;
+
+        // 记录失败次数
+        const chunkKey = `${fileId}:${index}`;
+        this.failedChunks.set(
+          chunkKey,
+          (this.failedChunks.get(chunkKey) || 0) + 1
+        );
+
+        // 上传失败钩子
+        await this.runPluginHook('chunkUploadError', {
+          chunk,
+          index,
+          fileId,
+          error: lastError,
+          attempt: attempts,
+        });
+
+        // 如果达到最大重试次数，抛出错误
+        if (attempts > retryStrategy.maxRetries) {
+          chunk.status = 'failed';
+          throw new UploadError(
+            UploadErrorType.UPLOAD_ERROR,
+            `分片 ${index} 上传失败，已重试 ${attempts - 1} 次`,
+            lastError,
+            { index, retryCount: attempts - 1 }
+          );
+        }
+      }
     }
+  }
+
+  /**
+   * 执行分片上传
+   * @param chunk 分片信息
+   * @param index 分片索引
+   * @param fileId 文件ID
+   */
+  private async executeChunkUpload(
+    chunk: ChunkInfo,
+    index: number,
+    fileId: string
+  ): Promise<any> {
+    // 此处应包含实际的分片上传逻辑
+    // 实际实现需要根据您的上传服务来定制
+    // 这里仅作为示例
+
+    // 模拟上传进度
+    const updateProgress = (progress: number) => {
+      chunk.progress = progress;
+      this.emit('chunkProgress', { chunk, index, fileId, progress });
+    };
+
+    // 每10%更新一次进度
+    for (let i = 0; i < 10; i++) {
+      // 如果已取消，停止上传
+      if (this.isCancelled) {
+        throw new Error('上传已取消');
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 100));
+      updateProgress((i + 1) * 10);
+    }
+
+    // 实际项目中应该调用服务器API上传分片
+    // 例如:
+    // const formData = new FormData();
+    // formData.append('chunk', chunk.data);
+    // formData.append('index', String(index));
+    // formData.append('fileId', fileId);
+    // const response = await fetch(`${this.options.endpoint}/upload`, {
+    //   method: 'POST',
+    //   body: formData,
+    //   headers: this.options.headers
+    // });
+    // return response.json();
+
+    // 此处仅返回模拟响应
+    return { success: true, chunkIndex: index };
+  }
+
+  /**
+   * 获取重试策略
+   * @param networkQuality 网络质量
+   */
+  private getRetryStrategy(networkQuality: NetworkQuality): RetryStrategy {
+    // 智能重试策略
+    if (this.options.smartRetry) {
+      switch (networkQuality) {
+        case 'good':
+          return {
+            maxRetries: 2,
+            baseDelay: 500,
+            multiplier: 1.5,
+            jitter: 0.2,
+          };
+        case 'average':
+          return {
+            maxRetries: 4,
+            baseDelay: 1000,
+            multiplier: 2,
+            jitter: 0.3,
+          };
+        case 'poor':
+          return {
+            maxRetries: 7,
+            baseDelay: 2000,
+            multiplier: 2.5,
+            jitter: 0.4,
+          };
+        default:
+          // 默认策略
+          return {
+            maxRetries: Number(this.options.retryCount) || 3,
+            baseDelay: Number(this.options.retryDelay) || 1000,
+            multiplier: 2,
+            jitter: 0.3,
+          };
+      }
+    }
+
+    // 使用固定重试策略
+    return {
+      maxRetries: Number(this.options.retryCount) || 3,
+      baseDelay: Number(this.options.retryDelay) || 1000,
+      multiplier: 1,
+      jitter: 0,
+    };
+  }
+
+  /**
+   * 计算重试延迟时间
+   * @param attempt 当前尝试次数
+   * @param strategy 重试策略
+   */
+  private calculateRetryDelay(
+    attempt: number,
+    strategy: RetryStrategy
+  ): number {
+    // 指数退避算法
+    const exponentialDelay =
+      strategy.baseDelay * Math.pow(strategy.multiplier, attempt - 1);
+
+    // 添加抖动以避免同时重试
+    const jitter = strategy.jitter * exponentialDelay * (Math.random() * 2 - 1);
+
+    return Math.min(exponentialDelay + jitter, 30000); // 最大延迟30秒
   }
 
   /**
    * 生成文件唯一ID
    * @param file 文件对象
-   * @returns 文件ID
+   * @returns 文件唯一ID
    */
   private async generateFileId(_file: AnyFile): Promise<string> {
-    // 简单实现，实际项目中可能需要更复杂的逻辑
-    return `file_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
+    // 可以使用文件名、大小和日期时间创建唯一ID
+    const timestamp = Date.now();
+    const random = Math.floor(Math.random() * 10000);
+
+    // 调用插件钩子，允许插件提供自定义ID
+    const customId = await this.runPluginHook('generateFileId', {
+      file: _file,
+    });
+    if (customId && typeof customId === 'string') {
+      return customId;
+    }
+
+    return `file_${timestamp}_${random}`;
   }
 
   /**
-   * 初始化上传
+   * 初始化上传（与服务器交互，创建上传会话）
    * @param file 文件对象
-   * @param fileId 文件ID
-   * @param chunkCount 分片数
+   * @param fileId 文件唯一ID
+   * @param chunkCount 分片总数
    */
   private async initializeUpload(
     file: AnyFile,
     fileId: string,
     chunkCount: number
   ): Promise<void> {
-    // 实现上传初始化逻辑，例如向服务器请求上传会话
-    // 这里简化处理
-    this.emit('start', {
+    // 调用插件钩子，准备上传
+    await this.runPluginHook('initializeUpload', {
+      file,
+      fileId,
+      chunkCount,
+      fileName: file.name,
+      fileSize: file.size,
+      fileType: file.type || this.getFileTypeFromName(file.name),
+    });
+
+    // 这里可以添加与服务器通信的逻辑，告知服务器即将开始上传
+    // 例如，创建上传会话，获取上传凭证等
+
+    // 告知上传已初始化
+    this.emit('initialized', {
       fileId,
       fileName: file.name,
       fileSize: file.size,
@@ -477,10 +965,10 @@ export class UploaderCore {
   }
 
   /**
-   * 合并分片
-   * @param fileId 文件ID
+   * 合并文件分片
+   * @param fileId 文件唯一ID
    * @param fileName 文件名
-   * @param chunkCount 分片数
+   * @param chunkCount 分片总数
    * @returns 上传结果
    */
   private async mergeChunks(
@@ -488,14 +976,37 @@ export class UploaderCore {
     fileName: string,
     _chunkCount: number
   ): Promise<UploadResult> {
-    // 实现分片合并逻辑，例如通知服务器进行合并
-    // 这里简化处理，返回模拟结果
-    return {
-      success: true,
+    // 调用插件钩子，准备合并
+    await this.runPluginHook('beforeMerge', {
       fileId,
       fileName,
-      url: `https://example.com/files/${fileId}/${fileName}`,
+      chunkCount: _chunkCount,
+    });
+
+    // 发送合并事件
+    this.emit('merging', { fileId, fileName });
+
+    // 实际项目中应该调用服务器API合并分片
+    // 此处仅返回模拟结果
+    const url = `${this.options.endpoint}/${fileId}/${encodeURIComponent(fileName)}`;
+
+    // 模拟服务器响应
+    const result: UploadResult = {
+      fileId,
+      fileName,
+      url,
+      success: true,
     };
+
+    // 调用插件钩子，处理合并结果
+    const hookResult = await this.runPluginHook('afterMerge', {
+      result,
+      fileId,
+      fileName,
+    });
+
+    // 允许插件修改结果
+    return hookResult?.result || result;
   }
 
   /**
@@ -508,23 +1019,30 @@ export class UploaderCore {
     try {
       return await this.pluginManager.runHook(hookName, args);
     } catch (error) {
-      throw this.errorCenter.handle(error);
+      this.emit('hookError', {
+        hookName,
+        error,
+      });
+      return null;
     }
   }
 
   /**
-   * 触发进度事件
-   * @param progress 进度值(0-100)
+   * 触发上传进度事件
+   * @param progress 进度百分比
    */
   private emitProgress(progress: number): void {
-    if (this.isCancelled) return;
-    this.emit('progress', { progress });
+    this.emit('progress', {
+      fileId: this.currentFileId,
+      progress: Math.min(progress, 99.99), // 不发送100%，留给上传完成事件
+    });
   }
 
   /**
    * 清理资源
    */
   private cleanup(): void {
+    // 清空当前文件ID
     this.currentFileId = null;
   }
 }
