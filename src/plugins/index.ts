@@ -3,7 +3,11 @@
  */
 
 import { ChunkPlugin } from './ChunkPlugin';
-import { PrecheckPlugin } from './PrecheckPlugin';
+import {
+  PrecheckPlugin,
+  PrecheckOptions,
+  PrecheckResult,
+} from './PrecheckPlugin';
 import { ProgressPlugin } from './ProgressPlugin';
 import { ResumePlugin } from './ResumePlugin';
 import { SmartConcurrencyPlugin } from './SmartConcurrencyPlugin';
@@ -16,6 +20,8 @@ export {
   ValidatorPlugin,
   ResumePlugin,
   PrecheckPlugin,
+  PrecheckOptions,
+  PrecheckResult,
   SmartConcurrencyPlugin,
 };
 

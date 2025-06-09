@@ -10,3 +10,10 @@ export { default as NetworkDetector } from './NetworkDetector';
 export { default as NetworkQuality } from './NetworkQuality';
 export { default as StorageUtils } from './StorageUtils';
 export { default as EnvUtils } from './EnvUtils';
+export {
+  MD5,
+  HashCalculator,
+  FileFingerprint,
+  FingerprintOptions,
+  FingerprintResult,
+} from './HashUtils';

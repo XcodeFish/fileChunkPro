@@ -5,6 +5,11 @@
 
 import { IPlugin, PluginPriority } from '../types';
 import { EnvUtils } from '../utils/EnvUtils';
+import {
+  FileFingerprint,
+  FingerprintOptions,
+  FingerprintResult,
+} from '../utils/HashUtils';
 import { Logger } from '../utils/Logger';
 
 /**
@@ -12,7 +17,7 @@ import { Logger } from '../utils/Logger';
  */
 export interface PrecheckOptions {
   enabled?: boolean; // 是否启用秒传功能
-  algorithm?: 'md5' | 'sha1' | 'simple'; // 文件指纹算法
+  algorithm?: 'md5' | 'sha1' | 'sha256' | 'simple'; // 文件指纹算法
   quickHash?: boolean; // 是否使用快速哈希（仅计算文件部分内容）
   quickHashSize?: number; // 快速哈希采样大小（字节）
   requestMethod?: 'POST' | 'HEAD' | 'GET'; // 秒传检查请求方法
@@ -22,11 +27,15 @@ export interface PrecheckOptions {
   useWorker?: boolean; // 是否使用 Worker 进行哈希计算
   timeout?: number; // 请求超时时间
   retryCount?: number; // 重试次数
+  retryDelay?: number; // 重试间隔（毫秒）
   checkBeforeUpload?: boolean; // 是否在上传前检查
   localCacheExpiry?: number; // 本地缓存过期时间（毫秒）
   maxFileSizeForFullHash?: number; // 执行完整哈希的最大文件大小限制
   additionalParams?: Record<string, any>; // 附加请求参数
   onPrecheck?: (result: PrecheckResult) => void; // 预检结果回调
+  onHashProgress?: (fileId: string, progress: number) => void; // 哈希计算进度回调
+  includeFilenameInHash?: boolean; // 是否在哈希中包含文件名，增强唯一性
+  includeLastModifiedInHash?: boolean; // 是否在哈希中包含最后修改时间
 }
 
 /**
@@ -45,17 +54,19 @@ export interface PrecheckResult {
   requestTime?: number; // 请求耗时
   isQuickHash?: boolean; // 是否为快速哈希
   serverResponse?: any; // 服务器响应原始数据
+  retryCount?: number; // 重试次数
 }
 
 /**
  * 文件预检与秒传插件实现
  */
 export class PrecheckPlugin implements IPlugin {
-  public version = '1.0.0';
+  public version = '2.0.0';
   private options: PrecheckOptions;
   private logger: Logger;
   private cache: Map<string, PrecheckResult>;
   private pendingChecks: Map<string, Promise<PrecheckResult>>;
+  private uploader: any;
 
   /**
    * 构造函数
@@ -73,9 +84,12 @@ export class PrecheckPlugin implements IPlugin {
       useWorker: true,
       timeout: 10000,
       retryCount: 2,
+      retryDelay: 2000, // 两秒后重试
       checkBeforeUpload: true,
       localCacheExpiry: 24 * 60 * 60 * 1000, // 默认24小时
       maxFileSizeForFullHash: 100 * 1024 * 1024, // 默认100MB
+      includeFilenameInHash: true,
+      includeLastModifiedInHash: false,
       ...options,
     };
 
@@ -94,6 +108,7 @@ export class PrecheckPlugin implements IPlugin {
       return;
     }
 
+    this.uploader = uploader;
     this.logger.info('秒传插件已安装');
 
     // 注册文件上传前预检钩子
@@ -104,7 +119,7 @@ export class PrecheckPlugin implements IPlugin {
       },
       async (file: File) => {
         if (!this.options.checkBeforeUpload) {
-          return;
+          return null;
         }
 
         try {
@@ -179,6 +194,13 @@ export class PrecheckPlugin implements IPlugin {
         return requestData;
       }
     );
+
+    // 监听进度回调
+    uploader.on('hashProgress', (fileId: string, progress: number) => {
+      if (this.options.onHashProgress) {
+        this.options.onHashProgress(fileId, progress);
+      }
+    });
   }
 
   /**
@@ -193,6 +215,9 @@ export class PrecheckPlugin implements IPlugin {
     baseEndpoint: string,
     headers: Record<string, string> = {}
   ): Promise<PrecheckResult> {
+    const fileId = this.uploader
+      ? await this.uploader.generateFileId(file)
+      : file.name;
     const cacheKey = `${file.name}_${file.size}_${file.lastModified}`;
 
     // 检查缓存
@@ -215,12 +240,15 @@ export class PrecheckPlugin implements IPlugin {
     }
 
     // 创建新的预检过程
-    const checkPromise = this.performCheck(file, baseEndpoint, headers).finally(
-      () => {
-        // 无论成功还是失败，都从待处理列表中移除
-        this.pendingChecks.delete(cacheKey);
-      }
-    );
+    const checkPromise = this.performCheck(
+      file,
+      baseEndpoint,
+      headers,
+      fileId
+    ).finally(() => {
+      // 无论成功还是失败，都从待处理列表中移除
+      this.pendingChecks.delete(cacheKey);
+    });
 
     // 添加到待处理列表
     this.pendingChecks.set(cacheKey, checkPromise);
@@ -233,19 +261,22 @@ export class PrecheckPlugin implements IPlugin {
    * @param file 文件对象
    * @param baseEndpoint 基础上传端点
    * @param headers 请求头
+   * @param fileId 文件ID
    * @returns 预检结果
    */
   private async performCheck(
     file: File,
     baseEndpoint: string,
-    headers: Record<string, string>
+    headers: Record<string, string>,
+    fileId: string
   ): Promise<PrecheckResult> {
-    const startTime = Date.now();
     this.logger.debug(`开始预检文件: ${file.name}`);
 
     // 计算文件哈希
-    const fileHash = await this.calculateFileHash(file);
-    const hashTime = Date.now() - startTime;
+    const fingerprintResult = await this.calculateFileHash(file, fileId);
+    const fileHash = fingerprintResult.hash;
+    const hashTime = fingerprintResult.time;
+    const isQuickHash = fingerprintResult.isQuickHash;
 
     // 构建请求URL
     const endpoint =
@@ -258,7 +289,8 @@ export class PrecheckPlugin implements IPlugin {
       fileSize: file.size,
       fileHash: fileHash,
       hashType: this.options.algorithm,
-      isQuickHash: this.options.quickHash,
+      isQuickHash: isQuickHash,
+      fileId: fileId,
       ...this.options.additionalParams,
     };
 
@@ -271,7 +303,7 @@ export class PrecheckPlugin implements IPlugin {
 
     // 初始化结果对象
     const result: PrecheckResult = {
-      fileId: fileHash,
+      fileId: fileId,
       fileName: file.name,
       fileSize: file.size,
       fileHash: fileHash,
@@ -279,40 +311,67 @@ export class PrecheckPlugin implements IPlugin {
       skipUpload: false,
       hashType: this.options.algorithm,
       hashTime,
-      isQuickHash: this.options.quickHash,
+      isQuickHash,
+      retryCount: 0,
     };
 
     try {
       const requestStartTime = Date.now();
-      let response;
+      let response = null;
+      let retryCount = 0;
 
-      // 根据请求方法执行请求
-      switch (this.options.requestMethod) {
-        case 'HEAD':
-          response = await this.sendHeadRequest(
-            endpoint,
-            fileHash,
-            mergedHeaders
-          );
+      // 实现重试逻辑
+      while (retryCount <= this.options.retryCount!) {
+        try {
+          // 根据请求方法执行请求
+          switch (this.options.requestMethod) {
+            case 'HEAD':
+              response = await this.sendHeadRequest(
+                endpoint,
+                fileHash,
+                mergedHeaders
+              );
+              break;
+            case 'GET':
+              response = await this.sendGetRequest(
+                endpoint,
+                requestData,
+                mergedHeaders
+              );
+              break;
+            case 'POST':
+            default:
+              response = await this.sendPostRequest(
+                endpoint,
+                requestData,
+                mergedHeaders
+              );
+              break;
+          }
+
+          // 请求成功，跳出重试循环
           break;
-        case 'GET':
-          response = await this.sendGetRequest(
-            endpoint,
-            requestData,
-            mergedHeaders
+        } catch (error) {
+          retryCount++;
+
+          // 如果已达到最大重试次数，抛出最后一个错误
+          if (retryCount > this.options.retryCount!) {
+            throw error;
+          }
+
+          // 等待指定时间后重试
+          this.logger.warn(
+            `预检请求失败，${this.options.retryDelay}ms后重试 (${retryCount}/${this.options.retryCount})`,
+            error
           );
-          break;
-        case 'POST':
-        default:
-          response = await this.sendPostRequest(
-            endpoint,
-            requestData,
-            mergedHeaders
+          await new Promise(resolve =>
+            setTimeout(resolve, this.options.retryDelay)
           );
-          break;
+        }
       }
 
       result.requestTime = Date.now() - requestStartTime;
+      result.retryCount = retryCount;
 
       // 处理响应
       if (response) {
@@ -343,316 +402,105 @@ export class PrecheckPlugin implements IPlugin {
   /**
    * 计算文件哈希
    * @param file 文件对象
+   * @param fileId 文件ID，用于进度回调
    * @returns 文件哈希值
    */
-  private async calculateFileHash(file: File): Promise<string> {
-    // 判断是否使用快速哈希
-    const useQuickHash =
-      this.options.quickHash &&
-      file.size > this.options.maxFileSizeForFullHash!;
-
-    try {
-      if (useQuickHash) {
-        return await this.calculateQuickHash(file);
-      } else {
-        return await this.calculateFullHash(file);
-      }
-    } catch (error) {
-      this.logger.error('哈希计算失败，使用文件基本信息作为标识', error);
-      // 降级方案：使用文件名、大小和修改时间的组合
-      return this.generateSimpleHash(file);
-    }
-  }
-
-  /**
-   * 计算完整文件哈希
-   * @param file 文件对象
-   * @returns 完整文件哈希值
-   */
-  private async calculateFullHash(file: File): Promise<string> {
-    this.logger.debug(`计算完整文件哈希: ${file.name}`);
-
-    // 判断是否使用Worker
-    if (this.options.useWorker && EnvUtils.supportsWorker()) {
-      return await this.calculateHashInWorker(file, this.options.algorithm!);
-    } else {
-      // 主线程中计算哈希
-      return await this.calculateHashInMainThread(
-        file,
-        this.options.algorithm!
-      );
-    }
-  }
-
-  /**
-   * 计算快速文件哈希（仅计算文件的一部分）
-   * @param file 文件对象
-   * @returns 快速文件哈希值
-   */
-  private async calculateQuickHash(file: File): Promise<string> {
-    this.logger.debug(`计算快速文件哈希: ${file.name}`);
-
-    const sampleSize = Math.min(this.options.quickHashSize!, file.size / 2);
-
-    // 获取文件头部和尾部的内容
-    let headerChunk, footerChunk;
-
-    try {
-      // 读取文件头部
-      headerChunk = await this.readFileSlice(file, 0, sampleSize);
-
-      // 读取文件尾部
-      if (file.size > sampleSize * 2) {
-        footerChunk = await this.readFileSlice(
-          file,
-          file.size - sampleSize,
-          file.size
-        );
-      } else {
-        footerChunk = new ArrayBuffer(0);
-      }
-
-      // 合并头部和尾部
-      const combinedBuffer = this.concatenateArrayBuffers(
-        headerChunk,
-        footerChunk
-      );
-
-      // 计算哈希
-      const hash = await this.calculateBufferHash(
-        combinedBuffer,
-        this.options.algorithm!
-      );
-
-      // 添加文件大小作为哈希的一部分，以增加唯一性
-      return `${hash}_${file.size}`;
-    } catch (error) {
-      this.logger.error('快速哈希计算失败', error);
-      // 降级到简单哈希
-      return this.generateSimpleHash(file);
-    }
-  }
-
-  /**
-   * 在主线程中计算哈希
-   * @param file 文件对象
-   * @param algorithm 哈希算法
-   * @returns 哈希值
-   */
-  private async calculateHashInMainThread(
+  private async calculateFileHash(
     file: File,
-    algorithm: string
-  ): Promise<string> {
-    try {
-      // 实际实现需要根据环境提供相应的哈希算法
-      // 这里是简化版，实际项目中需要使用专门的哈希库
-
-      // 对于浏览器环境，可以使用 SubtleCrypto API
-      if (window.crypto && window.crypto.subtle) {
-        const buffer = await file.arrayBuffer();
-
-        let hashAlgorithm: AlgorithmIdentifier;
-        switch (algorithm) {
-          case 'sha1':
-            hashAlgorithm = 'SHA-1';
-            break;
-          case 'md5':
-            // 注意：SubtleCrypto 不直接支持 MD5，需要使用第三方库
-            // 这里使用 SHA-256 作为替代
-            hashAlgorithm = 'SHA-256';
-            break;
-          default:
-            hashAlgorithm = 'SHA-256';
+    fileId: string
+  ): Promise<FingerprintResult> {
+    // 配置指纹计算选项
+    const options: FingerprintOptions = {
+      algorithm: this.options.algorithm,
+      quick: this.options.quickHash,
+      sampleSize: this.options.quickHashSize,
+      includeFilename: this.options.includeFilenameInHash,
+      includeLastModified: this.options.includeLastModifiedInHash,
+      onProgress: (progress: number) => {
+        if (this.uploader) {
+          this.uploader.emit('hashProgress', fileId, progress);
         }
+      },
+    };
 
-        const hashBuffer = await window.crypto.subtle.digest(
-          hashAlgorithm,
-          buffer
-        );
-        return this.arrayBufferToHex(hashBuffer);
+    try {
+      // 判断是否使用Worker
+      if (this.options.useWorker && EnvUtils.supportsWorker()) {
+        return await this.calculateHashInWorker(file, options);
       } else {
-        // 如果不支持 SubtleCrypto，则回退到简单哈希
-        return this.generateSimpleHash(file);
+        // 主线程中计算哈希
+        return await FileFingerprint.calculate(file, options);
       }
     } catch (error) {
-      this.logger.error('主线程哈希计算失败', error);
-      return this.generateSimpleHash(file);
+      this.logger.error('哈希计算失败', error);
+      // 降级方案：使用文件基本信息作为标识
+      return {
+        hash: FileFingerprint.generateSimpleHash(file),
+        algorithm: 'simple',
+        isQuickHash: true,
+        size: file.size,
+        time: 0,
+        error: error instanceof Error ? error.message : '哈希计算失败',
+      };
     }
   }
 
   /**
    * 在Worker中计算哈希
    * @param file 文件对象
-   * @param algorithm 哈希算法
-   * @returns 哈希值
+   * @param options 哈希计算选项
+   * @returns 哈希结果
    */
   private async calculateHashInWorker(
     file: File,
-    algorithm: string
-  ): Promise<string> {
-    // 这里需要实现与哈希计算Worker的通信逻辑
-    // 实际实现需要创建Worker，发送文件数据，接收哈希结果
-
-    // 简化版示例
-    return new Promise<string>((resolve, reject) => {
+    options: FingerprintOptions
+  ): Promise<FingerprintResult> {
+    return new Promise<FingerprintResult>((resolve, reject) => {
       try {
         const worker = new Worker('/src/workers/HashWorker.js');
+        const startTime = Date.now();
 
         worker.onmessage = e => {
           if (e.data.error) {
             reject(new Error(e.data.error));
-          } else {
-            resolve(e.data.hash);
+            worker.terminate();
+            return;
           }
+
+          if (e.data.type === 'progress' && options.onProgress) {
+            options.onProgress(e.data.progress);
+            return;
+          }
+
           worker.terminate();
+          resolve({
+            hash: e.data.hash,
+            algorithm: options.algorithm || 'md5',
+            isQuickHash: e.data.isQuickHash || false,
+            size: file.size,
+            time: e.data.hashTime || Date.now() - startTime,
+          });
         };
 
         worker.onerror = e => {
-          reject(new Error('Worker error: ' + e.message));
           worker.terminate();
+          reject(new Error(`Worker error: ${e.message}`));
         };
 
         worker.postMessage({
           file,
-          algorithm,
+          algorithm: options.algorithm,
           action: 'calculateHash',
+          quick: options.quick,
+          sampleSize: options.sampleSize,
         });
       } catch (error) {
         reject(error);
       }
     }).catch(error => {
       this.logger.error('Worker哈希计算失败，降级到主线程', error);
-      return this.calculateHashInMainThread(file, algorithm);
+      return FileFingerprint.calculate(file, options);
     });
-  }
-
-  /**
-   * 计算缓冲区的哈希值
-   * @param buffer 数据缓冲区
-   * @param algorithm 哈希算法
-   * @returns 哈希值
-   */
-  private async calculateBufferHash(
-    buffer: ArrayBuffer,
-    algorithm: string
-  ): Promise<string> {
-    if (window.crypto && window.crypto.subtle) {
-      let hashAlgorithm: AlgorithmIdentifier;
-
-      switch (algorithm) {
-        case 'sha1':
-          hashAlgorithm = 'SHA-1';
-          break;
-        case 'md5':
-          // SubtleCrypto 不直接支持 MD5，使用 SHA-256 作为替代
-          hashAlgorithm = 'SHA-256';
-          break;
-        default:
-          hashAlgorithm = 'SHA-256';
-      }
-
-      const hashBuffer = await window.crypto.subtle.digest(
-        hashAlgorithm,
-        buffer
-      );
-      return this.arrayBufferToHex(hashBuffer);
-    } else {
-      // 如果不支持 SubtleCrypto，返回简单哈希
-      return this.simpleBufferHash(buffer);
-    }
-  }
-
-  /**
-   * 生成简单哈希（基于文件基本信息）
-   * @param file 文件对象
-   * @returns 简单哈希值
-   */
-  private generateSimpleHash(file: File): string {
-    // 使用文件名、大小和最后修改时间生成哈希
-    const str = `${file.name}_${file.size}_${file.lastModified}`;
-    let hash = 0;
-
-    for (let i = 0; i < str.length; i++) {
-      const char = str.charCodeAt(i);
-      hash = (hash << 5) - hash + char;
-      hash = hash & hash; // 转换为32位整数
-    }
-
-    // 转为16进制字符串并确保唯一性
-    return `simple_${hash.toString(16)}_${file.size}`;
-  }
-
-  /**
-   * 对缓冲区进行简单哈希计算
-   * @param buffer 数据缓冲区
-   * @returns 哈希值
-   */
-  private simpleBufferHash(buffer: ArrayBuffer): string {
-    const view = new DataView(buffer);
-    let hash = 0;
-
-    // 采样计算哈希，避免计算太多数据
-    const step = Math.max(1, Math.floor(buffer.byteLength / 1024));
-
-    for (let i = 0; i < buffer.byteLength; i += step) {
-      if (i + 4 <= buffer.byteLength) {
-        const value = view.getUint32(i, true);
-        hash = (hash << 5) - hash + value;
-      } else if (i < buffer.byteLength) {
-        const value = view.getUint8(i);
-        hash = (hash << 5) - hash + value;
-      }
-      hash = hash & hash; // 转换为32位整数
-    }
-
-    return hash.toString(16).padStart(8, '0');
-  }
-
-  /**
-   * 读取文件的指定片段
-   * @param file 文件对象
-   * @param start 起始位置
-   * @param end 结束位置
-   * @returns 文件片段的ArrayBuffer
-   */
-  private async readFileSlice(
-    file: File,
-    start: number,
-    end: number
-  ): Promise<ArrayBuffer> {
-    const slice = file.slice(start, end);
-    return await slice.arrayBuffer();
-  }
-
-  /**
-   * 合并两个ArrayBuffer
-   * @param buffer1 第一个缓冲区
-   * @param buffer2 第二个缓冲区
-   * @returns 合并后的缓冲区
-   */
-  private concatenateArrayBuffers(
-    buffer1: ArrayBuffer,
-    buffer2: ArrayBuffer
-  ): ArrayBuffer {
-    const result = new Uint8Array(buffer1.byteLength + buffer2.byteLength);
-    result.set(new Uint8Array(buffer1), 0);
-    result.set(new Uint8Array(buffer2), buffer1.byteLength);
-    return result.buffer;
-  }
-
-  /**
-   * 将ArrayBuffer转换为十六进制字符串
-   * @param buffer ArrayBuffer数据
-   * @returns 十六进制字符串
-   */
-  private arrayBufferToHex(buffer: ArrayBuffer): string {
-    const view = new Uint8Array(buffer);
-    let hex = '';
-    for (let i = 0; i < view.length; i++) {
-      const value = view[i].toString(16);
-      hex += value.length === 1 ? '0' + value : value;
-    }
-    return hex;
   }
 
   /**
@@ -739,6 +587,12 @@ export class PrecheckPlugin implements IPlugin {
       headers,
       signal: AbortSignal.timeout(this.options.timeout || 10000),
     });
+
+    if (!response.ok) {
+      throw new Error(
+        `预检请求失败: ${response.status} ${response.statusText}`
+      );
+    }
 
     // 从响应头中解析结果
     const exists = response.headers.get('X-File-Exists') === 'true';
