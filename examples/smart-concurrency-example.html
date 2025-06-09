@@ -1,0 +1,698 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fileChunkPro - 智能并发控制示例</title>
+  <style>
+    body {
+      font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif;
+      max-width: 1000px;
+      margin: 0 auto;
+      padding: 20px;
+      color: #333;
+    }
+
+    h1 {
+      text-align: center;
+      color: #2c3e50;
+    }
+
+    .upload-container {
+      border: 1px solid #ddd;
+      padding: 20px;
+      border-radius: 5px;
+      background-color: #f9f9f9;
+      margin-bottom: 20px;
+    }
+
+    .file-selector {
+      margin-bottom: 15px;
+    }
+
+    .upload-btn {
+      padding: 10px 15px;
+      background-color: #3498db;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background-color 0.3s;
+    }
+
+    .upload-btn:hover {
+      background-color: #2980b9;
+    }
+
+    .upload-btn:disabled {
+      background-color: #95a5a6;
+      cursor: not-allowed;
+    }
+
+    .progress-container {
+      margin-top: 20px;
+    }
+
+    .progress-bar {
+      height: 20px;
+      background-color: #ecf0f1;
+      border-radius: 10px;
+      overflow: hidden;
+      margin-bottom: 10px;
+    }
+
+    .progress-inner {
+      height: 100%;
+      background-color: #2ecc71;
+      width: 0%;
+      transition: width 0.3s;
+    }
+
+    .network-info {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #eee;
+      border-radius: 5px;
+      background-color: #fff;
+    }
+
+    .info-box {
+      flex: 1;
+      min-width: 200px;
+      padding: 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #f5f5f5;
+    }
+
+    .info-box h3 {
+      margin-top: 0;
+      font-size: 16px;
+      color: #7f8c8d;
+    }
+
+    .info-value {
+      font-size: 20px;
+      font-weight: bold;
+      color: #2c3e50;
+    }
+
+    .upload-options {
+      margin-top: 20px;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+
+    .option-group {
+      flex: 1;
+      min-width: 200px;
+    }
+
+    .option-group label {
+      display: block;
+      margin-bottom: 5px;
+      font-weight: bold;
+    }
+
+    .log-container {
+      margin-top: 20px;
+      max-height: 200px;
+      overflow-y: auto;
+      border: 1px solid #ddd;
+      padding: 10px;
+      border-radius: 4px;
+      background-color: #f5f5f5;
+      font-family: monospace;
+      font-size: 14px;
+    }
+
+    .log-entry {
+      margin-bottom: 5px;
+      border-bottom: 1px solid #eee;
+      padding-bottom: 5px;
+    }
+
+    .network-quality {
+      display: inline-block;
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-weight: bold;
+      color: white;
+    }
+
+    .quality-unknown {
+      background-color: #95a5a6;
+    }
+
+    .quality-offline {
+      background-color: #e74c3c;
+    }
+
+    .quality-poor {
+      background-color: #e67e22;
+    }
+
+    .quality-low {
+      background-color: #f39c12;
+    }
+
+    .quality-medium {
+      background-color: #3498db;
+    }
+
+    .quality-good {
+      background-color: #2ecc71;
+    }
+
+    .quality-excellent {
+      background-color: #27ae60;
+    }
+
+    .settings-panel {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #fff;
+    }
+
+    .network-simulator {
+      margin-top: 20px;
+      padding: 15px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background-color: #fff;
+    }
+
+    .simulation-btn {
+      margin-right: 10px;
+      padding: 8px 12px;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 14px;
+      color: white;
+    }
+
+    .simulation-btn.poor {
+      background-color: #e67e22;
+    }
+
+    .simulation-btn.good {
+      background-color: #2ecc71;
+    }
+
+    .simulation-btn.offline {
+      background-color: #e74c3c;
+    }
+
+    .simulation-btn.excellent {
+      background-color: #27ae60;
+    }
+  </style>
+</head>
+
+<body>
+  <h1>fileChunkPro - 智能并发控制示例</h1>
+
+  <div class="upload-container">
+    <div class="file-selector">
+      <input type="file" id="file-input" multiple>
+    </div>
+
+    <div class="upload-options">
+      <div class="option-group">
+        <label for="base-concurrency">基础并发数:</label>
+        <input type="number" id="base-concurrency" min="1" max="10" value="3">
+      </div>
+
+      <div class="option-group">
+        <label for="adaptation-enabled">自适应调整:</label>
+        <input type="checkbox" id="adaptation-enabled" checked>
+      </div>
+
+      <div class="option-group">
+        <label for="chunk-size">分片大小 (KB):</label>
+        <input type="number" id="chunk-size" min="64" max="8192" value="1024">
+      </div>
+    </div>
+
+    <button id="upload-btn" class="upload-btn">开始上传</button>
+
+    <div class="progress-container">
+      <div class="progress-bar">
+        <div id="progress-inner" class="progress-inner"></div>
+      </div>
+      <div id="progress-text">等待上传 (0%)</div>
+    </div>
+
+    <div class="network-info">
+      <div class="info-box">
+        <h3>网络质量</h3>
+        <div id="network-quality" class="info-value">
+          <span class="network-quality quality-unknown">未知</span>
+        </div>
+      </div>
+
+      <div class="info-box">
+        <h3>当前速度</h3>
+        <div id="current-speed" class="info-value">0 KB/s</div>
+      </div>
+
+      <div class="info-box">
+        <h3>平均速度</h3>
+        <div id="avg-speed" class="info-value">0 KB/s</div>
+      </div>
+
+      <div class="info-box">
+        <h3>当前并发数</h3>
+        <div id="current-concurrency" class="info-value">0</div>
+      </div>
+    </div>
+
+    <div class="network-simulator">
+      <h3>网络环境模拟</h3>
+      <p>点击按钮模拟不同的网络环境，观察智能并发控制的调整:</p>
+      <button class="simulation-btn offline" onclick="simulateNetwork('offline')">模拟断网</button>
+      <button class="simulation-btn poor" onclick="simulateNetwork('poor')">模拟差网络</button>
+      <button class="simulation-btn good" onclick="simulateNetwork('good')">模拟好网络</button>
+      <button class="simulation-btn excellent" onclick="simulateNetwork('excellent')">模拟极好网络</button>
+    </div>
+
+    <div class="log-container" id="log-container">
+      <div class="log-entry">等待上传操作...</div>
+    </div>
+  </div>
+
+  <!-- 引入fileChunkPro库 -->
+  <script src="../dist/browser/fileChunkPro.min.js"></script>
+
+  <script>
+    // 初始化上传器
+    let uploader
+    let speedUpdateInterval
+    let isSimulatingNetwork = false
+    let networkSimulationTimeout
+
+    // 模拟服务端点
+    const mockEndpoint = 'https://mock-upload-server.example.com/upload'
+
+    // DOM元素
+    const fileInput = document.getElementById('file-input')
+    const uploadBtn = document.getElementById('upload-btn')
+    const progressInner = document.getElementById('progress-inner')
+    const progressText = document.getElementById('progress-text')
+    const networkQuality = document.getElementById('network-quality')
+    const currentSpeed = document.getElementById('current-speed')
+    const avgSpeed = document.getElementById('avg-speed')
+    const currentConcurrency = document.getElementById('current-concurrency')
+    const logContainer = document.getElementById('log-container')
+    const baseConcurrencyInput = document.getElementById('base-concurrency')
+    const adaptationEnabledInput = document.getElementById('adaptation-enabled')
+    const chunkSizeInput = document.getElementById('chunk-size')
+
+    // 添加日志条目
+    function addLogEntry (message)
+    {
+      const entry = document.createElement('div')
+      entry.className = 'log-entry'
+      entry.textContent = `${new Date().toLocaleTimeString()} - ${message}`
+      logContainer.appendChild(entry)
+      logContainer.scrollTop = logContainer.scrollHeight
+
+      // 只保留最近的50条日志
+      while (logContainer.children.length > 50) {
+        logContainer.removeChild(logContainer.firstChild)
+      }
+    }
+
+    // 更新网络质量显示
+    function updateNetworkQualityDisplay (quality)
+    {
+      const qualityMap = {
+        'unknown': '未知',
+        'offline': '离线',
+        'poor': '很差',
+        'low': '较差',
+        'medium': '一般',
+        'good': '良好',
+        'excellent': '极好'
+      }
+
+      networkQuality.innerHTML = `
+        <span class="network-quality quality-${quality}">${qualityMap[quality] || '未知'}</span>
+      `
+    }
+
+    // 格式化速度
+    function formatSpeed (bytesPerSecond)
+    {
+      if (bytesPerSecond < 1024) {
+        return `${bytesPerSecond.toFixed(1)} B/s`
+      } else if (bytesPerSecond < 1024 * 1024) {
+        return `${(bytesPerSecond / 1024).toFixed(1)} KB/s`
+      } else {
+        return `${(bytesPerSecond / (1024 * 1024)).toFixed(1)} MB/s`
+      }
+    }
+
+    // 初始化上传器
+    function initUploader ()
+    {
+      // 获取配置选项
+      const baseConcurrency = parseInt(baseConcurrencyInput.value) || 3
+      const adaptationEnabled = adaptationEnabledInput.checked
+      const chunkSize = (parseInt(chunkSizeInput.value) || 1024) * 1024 // 转换为字节
+
+      // 创建上传器实例
+      uploader = new fileChunkPro.UploaderCore({
+        endpoint: mockEndpoint,
+        chunkSize: chunkSize,
+        concurrency: baseConcurrency,
+        timeout: 30000,
+        retryCount: 3,
+        retryDelay: 1000,
+        headers: {
+          'X-Custom-Header': 'SmartConcurrencyDemo'
+        },
+        // 启用自适应上传
+        enableAdaptiveUploads: true
+      })
+
+      // 注册智能并发控制插件
+      const smartConcurrencyPlugin = new fileChunkPro.SmartConcurrencyPlugin({
+        minConcurrency: 1,
+        maxConcurrency: 8,
+        baseConcurrency: baseConcurrency,
+        adaptationEnabled: adaptationEnabled,
+        targetUtilization: 0.85,
+        sampleInterval: 2000
+      })
+
+      // 添加插件
+      uploader.use('smartConcurrency', smartConcurrencyPlugin)
+
+      // 保存插件引用，以便后续操作
+      window.smartConcurrencyPlugin = smartConcurrencyPlugin
+
+      // 注册事件监听
+      uploader.on('upload:start', (data) =>
+      {
+        addLogEntry(`开始上传文件: ${data.file.name} (${formatFileSize(data.file.size)})`)
+        updateUI('uploading')
+      })
+
+      uploader.on('upload:progress', (data) =>
+      {
+        const percent = Math.round(data.percent)
+        progressInner.style.width = `${percent}%`
+        progressText.textContent = `上传中 (${percent}%)`
+      })
+
+      uploader.on('upload:complete', (data) =>
+      {
+        addLogEntry(`文件上传完成: ${data.result.fileName}`)
+        updateUI('completed')
+      })
+
+      uploader.on('upload:error', (data) =>
+      {
+        addLogEntry(`上传错误: ${data.error.message}`)
+        updateUI('error')
+      })
+
+      // 网络状态相关事件
+      uploader.on('network:quality', (data) =>
+      {
+        if (!isSimulatingNetwork) {
+          updateNetworkQualityDisplay(data.quality)
+          addLogEntry(`网络质量变化: ${data.quality} (稳定性: ${data.stable ? '稳定' : '不稳定'})`)
+        }
+      })
+
+      uploader.on('network:speed', (data) =>
+      {
+        if (!isSimulatingNetwork) {
+          currentSpeed.textContent = formatSpeed(data.current)
+          avgSpeed.textContent = formatSpeed(data.average)
+        }
+      })
+
+      uploader.on('concurrency:adjusted', (data) =>
+      {
+        currentConcurrency.textContent = data.to
+        addLogEntry(`并发数调整: ${data.from} -> ${data.to} (原因: ${data.reason})`)
+      })
+
+      uploader.on('network:offline', (data) =>
+      {
+        addLogEntry(`网络连接断开: ${data.message}`)
+      })
+
+      uploader.on('network:online', (data) =>
+      {
+        addLogEntry(`网络连接恢复: ${data.message}`)
+      })
+
+      // 模拟上传API
+      mockUploadAPI(uploader)
+    }
+
+    // 更新UI状态
+    function updateUI (state)
+    {
+      switch (state) {
+        case 'uploading':
+          uploadBtn.disabled = true
+          fileInput.disabled = true
+          baseConcurrencyInput.disabled = true
+          adaptationEnabledInput.disabled = true
+          chunkSizeInput.disabled = true
+          break
+        case 'completed':
+        case 'error':
+          uploadBtn.disabled = false
+          fileInput.disabled = false
+          baseConcurrencyInput.disabled = false
+          adaptationEnabledInput.disabled = false
+          chunkSizeInput.disabled = false
+          break
+        default:
+          break
+      }
+    }
+
+    // 格式化文件大小
+    function formatFileSize (bytes)
+    {
+      if (bytes < 1024) {
+        return `${bytes} B`
+      } else if (bytes < 1024 * 1024) {
+        return `${(bytes / 1024).toFixed(1)} KB`
+      } else if (bytes < 1024 * 1024 * 1024) {
+        return `${(bytes / (1024 * 1024)).toFixed(1)} MB`
+      } else {
+        return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`
+      }
+    }
+
+    // 模拟不同网络环境
+    function simulateNetwork (quality)
+    {
+      if (networkSimulationTimeout) {
+        clearTimeout(networkSimulationTimeout)
+      }
+
+      isSimulatingNetwork = true
+
+      // 更新UI显示
+      updateNetworkQualityDisplay(quality)
+
+      // 不同网络环境的模拟速度和延迟
+      const networkSettings = {
+        'offline': { speed: 0, concurrency: 0 },
+        'poor': { speed: 40 * 1024, concurrency: 1 }, // 40KB/s
+        'good': { speed: 800 * 1024, concurrency: 4 }, // 800KB/s
+        'excellent': { speed: 5 * 1024 * 1024, concurrency: 6 } // 5MB/s
+      }
+
+      const settings = networkSettings[quality] || { speed: 0, concurrency: 3 }
+
+      // 更新显示的速度
+      currentSpeed.textContent = formatSpeed(settings.speed)
+      avgSpeed.textContent = formatSpeed(settings.speed)
+
+      if (quality === 'offline') {
+        // 模拟网络离线
+        if (uploader) {
+          uploader.getEventBus().emit('network:offline', {
+            message: '网络已断开连接（模拟）'
+          })
+        }
+      } else {
+        // 模拟网络恢复
+        if (uploader && quality !== 'offline') {
+          uploader.getEventBus().emit('network:online', {
+            message: '网络已连接（模拟）'
+          })
+        }
+
+        // 触发网络质量变化事件
+        if (uploader) {
+          uploader.getEventBus().emit('network:quality', {
+            quality: quality,
+            condition: { type: 'wifi', effectiveType: '4g', downlink: settings.speed / (1024 * 1024), rtt: 50 },
+            stable: true
+          })
+
+          // 并发数调整
+          currentConcurrency.textContent = settings.concurrency
+          uploader.getEventBus().emit('concurrency:adjusted', {
+            reason: 'network_simulation',
+            quality: quality,
+            from: parseInt(currentConcurrency.textContent) || 3,
+            to: settings.concurrency,
+            stable: true
+          })
+        }
+      }
+
+      addLogEntry(`模拟${quality}网络环境 (${formatSpeed(settings.speed)})`)
+
+      // 30秒后自动恢复
+      networkSimulationTimeout = setTimeout(() =>
+      {
+        isSimulatingNetwork = false
+        addLogEntry('网络模拟结束，恢复正常监测')
+        if (uploader && window.smartConcurrencyPlugin) {
+          window.smartConcurrencyPlugin.forceNetworkDetection()
+        }
+      }, 30000)
+    }
+
+    // 模拟上传API
+    function mockUploadAPI (uploader)
+    {
+      // 替换实际的上传方法，使用模拟实现
+      const originalAdapter = uploader.getAdapter()
+
+      // 创建模拟适配器
+      const mockAdapter = {
+        // 保留原始的读取分片方法
+        readChunk: originalAdapter.readChunk,
+
+        // 模拟上传分片方法
+        uploadChunk: (url, chunk, headers) =>
+        {
+          return new Promise((resolve, reject) =>
+          {
+            // 模拟上传延迟，根据当前网络质量调整
+            const quality = networkQuality.textContent.trim()
+            let delay = 1000 // 默认延迟
+            let failProbability = 0 // 失败概率
+
+            if (quality.includes('很差')) {
+              delay = 3000 + Math.random() * 2000
+              failProbability = 0.2 // 20%失败概率
+            } else if (quality.includes('较差')) {
+              delay = 1500 + Math.random() * 1500
+              failProbability = 0.1 // 10%失败概率
+            } else if (quality.includes('一般')) {
+              delay = 800 + Math.random() * 700
+              failProbability = 0.05 // 5%失败概率
+            } else if (quality.includes('良好')) {
+              delay = 400 + Math.random() * 300
+              failProbability = 0.01 // 1%失败概率
+            } else if (quality.includes('极好')) {
+              delay = 100 + Math.random() * 200
+              failProbability = 0 // 0%失败概率
+            } else if (quality.includes('离线')) {
+              // 模拟网络离线
+              return reject(new Error('Network Error: Connection lost'))
+            }
+
+            // 随机决定是否模拟失败
+            if (Math.random() < failProbability) {
+              setTimeout(() =>
+              {
+                reject(new Error('Network Error: Request failed'))
+              }, delay)
+              return
+            }
+
+            // 模拟成功响应
+            setTimeout(() =>
+            {
+              resolve({
+                status: 200,
+                data: {
+                  success: true,
+                  chunkIndex: headers['X-Chunk-Index'] || 0,
+                  message: 'Chunk uploaded successfully'
+                }
+              })
+            }, delay)
+          })
+        }
+      }
+
+      // 设置模拟适配器
+      uploader._adapter = mockAdapter
+    }
+
+    // 事件绑定
+    document.addEventListener('DOMContentLoaded', () =>
+    {
+      // 初始化上传器
+      initUploader()
+
+      // 上传按钮点击事件
+      uploadBtn.addEventListener('click', () =>
+      {
+        const files = fileInput.files
+        if (!files || files.length === 0) {
+          alert('请先选择文件')
+          return
+        }
+
+        // 重置进度显示
+        progressInner.style.width = '0%'
+        progressText.textContent = '准备上传 (0%)'
+
+        // 上传文件
+        uploader.upload(files[0])
+      })
+
+      // 基础并发数变更事件
+      baseConcurrencyInput.addEventListener('change', () =>
+      {
+        if (window.smartConcurrencyPlugin) {
+          const value = parseInt(baseConcurrencyInput.value) || 3
+          window.smartConcurrencyPlugin.setBaseConcurrency(value)
+          addLogEntry(`基础并发数已调整为: ${value}`)
+        }
+      })
+
+      // 自适应开关变更事件
+      adaptationEnabledInput.addEventListener('change', () =>
+      {
+        if (window.smartConcurrencyPlugin) {
+          const enabled = adaptationEnabledInput.checked
+          window.smartConcurrencyPlugin.setAdaptationEnabled(enabled)
+          addLogEntry(`自适应调整已${enabled ? '启用' : '禁用'}`)
+        }
+      })
+
+      // 更新初始状态
+      updateNetworkQualityDisplay('unknown')
+    });
+  </script>
+</body>
+
+</html>

@@ -206,6 +206,31 @@ export interface MemoryWarningEvent {
 }
 
 /**
+ * 带宽统计信息
+ */
+export interface BandwidthStats {
+  currentSpeed: number;       // 当前速度 (bytes/s)
+  averageSpeed: number;       // 平均速度 (bytes/s)
+  peakSpeed: number;          // 峰值速度 (bytes/s)
+  samples: number;            // 样本数量
+  networkQuality: NetworkQuality; // 网络质量等级
+  timestamp: number;          // 统计时间戳
+  isStable: boolean;          // 是否稳定
+}
+
+/**
+ * 并发调整事件
+ */
+export interface ConcurrencyAdjustmentEvent {
+  from: number;               // 调整前的并发数
+  to: number;                 // 调整后的并发数
+  reason: string;             // 调整原因
+  quality?: NetworkQuality;   // 当前网络质量
+  stats?: BandwidthStats;     // 带宽统计
+  stable?: boolean;           // 网络是否稳定
+}
+
+/**
  * 分片处理策略接口
  */
 export interface ChunkProcessingStrategy {
