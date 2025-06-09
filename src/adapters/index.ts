@@ -7,6 +7,8 @@ import AlipayAdapter from './AlipayAdapter';
 import BaiduAdapter from './BaiduAdapter';
 import BrowserAdapter from './BrowserAdapter';
 import BytedanceAdapter from './BytedanceAdapter';
+import TaroAdapter from './TaroAdapter';
+import UniAppAdapter from './UniAppAdapter';
 import WechatAdapter from './WechatAdapter';
 
 export {
@@ -15,6 +17,8 @@ export {
   AlipayAdapter,
   BytedanceAdapter,
   BaiduAdapter,
+  TaroAdapter,
+  UniAppAdapter,
 };
 
 export default {
@@ -23,4 +27,6 @@ export default {
   AlipayAdapter,
   BytedanceAdapter,
   BaiduAdapter,
+  TaroAdapter,
+  UniAppAdapter,
 };
