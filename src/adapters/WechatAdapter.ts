@@ -13,6 +13,9 @@ import { UploadError } from '../core/ErrorCenter';
 import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
 import { Logger } from '../utils/Logger';
 
+import { IStorage } from './interfaces';
+import { MiniProgramStorage } from './storage/MiniProgramStorage';
+
 // 微信小程序适配器配置接口
 interface WechatAdapterOptions {
   timeout?: number; // 请求超时时间
@@ -518,6 +521,26 @@ export default class WechatAdapter implements IUploadAdapter {
         },
       });
     });
+  }
+
+  /**
+   * 获取存储接口实现
+   * @returns 微信小程序存储适配器实例
+   */
+  public getStorage(): IStorage {
+    try {
+      return new MiniProgramStorage({
+        storageApi: wx,
+        keyPrefix: 'fileChunkPro_wx_',
+      });
+    } catch (error) {
+      this.logger.error('创建存储适配器失败', error);
+      throw new UploadError(
+        UploadErrorType.STORAGE_ERROR,
+        '初始化微信存储适配器失败',
+        error as Error
+      );
+    }
   }
 
   /**

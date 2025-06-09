@@ -13,6 +13,9 @@ import { UploadError } from '../core/ErrorCenter';
 import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
 import { Logger } from '../utils/Logger';
 
+import { IStorage } from './interfaces';
+import { MiniProgramStorage } from './storage/MiniProgramStorage';
+
 // 字节跳动小程序适配器配置接口
 interface BytedanceAdapterOptions {
   timeout?: number; // 请求超时时间
@@ -475,17 +478,37 @@ export default class BytedanceAdapter implements IUploadAdapter {
   }
 
   /**
-   * 判断存储是否可用
-   * @returns boolean 存储是否可用
+   * 检查是否支持本地存储
+   * @returns 是否支持本地存储
    */
   public isStorageAvailable(): boolean {
     try {
-      const testKey = '__storage_test__';
-      tt.setStorageSync(testKey, 'test');
+      const testKey = '__test__';
+      tt.setStorageSync(testKey, testKey);
       tt.removeStorageSync(testKey);
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /**
+   * 获取存储接口实现
+   * @returns 字节跳动小程序存储适配器实例
+   */
+  public getStorage(): IStorage {
+    try {
+      return new MiniProgramStorage({
+        storageApi: tt,
+        keyPrefix: `fileChunkPro_${this.platform}_`,
+      });
+    } catch (error) {
+      this.logger.error('创建存储适配器失败', error);
+      throw new UploadError(
+        UploadErrorType.STORAGE_ERROR,
+        '初始化字节跳动存储适配器失败',
+        error as Error
+      );
     }
   }
 

@@ -13,6 +13,9 @@ import { UploadError } from '../core/ErrorCenter';
 import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
 import { Logger } from '../utils/Logger';
 
+import { IStorage } from './interfaces';
+import { MiniProgramStorage } from './storage/MiniProgramStorage';
+
 // 支付宝小程序适配器配置接口
 interface AlipayAdapterOptions {
   timeout?: number; // 请求超时时间
@@ -385,15 +388,15 @@ export default class AlipayAdapter implements IUploadAdapter {
   }
 
   /**
-   * 判断存储是否可用
-   * @returns boolean 存储是否可用
+   * 检查是否支持本地存储
+   * @returns 是否支持本地存储
    */
   public isStorageAvailable(): boolean {
     try {
-      const testKey = '__storage_test__';
+      const testKey = '__test__';
       my.setStorageSync({
         key: testKey,
-        data: 'test',
+        data: testKey,
       });
       my.removeStorageSync({
         key: testKey,
@@ -401,6 +404,26 @@ export default class AlipayAdapter implements IUploadAdapter {
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /**
+   * 获取存储接口实现
+   * @returns 支付宝小程序存储适配器实例
+   */
+  public getStorage(): IStorage {
+    try {
+      return new MiniProgramStorage({
+        storageApi: my,
+        keyPrefix: 'fileChunkPro_ali_',
+      });
+    } catch (error) {
+      this.logger.error('创建存储适配器失败', error);
+      throw new UploadError(
+        UploadErrorType.STORAGE_ERROR,
+        '初始化支付宝存储适配器失败',
+        error as Error
+      );
     }
   }
 

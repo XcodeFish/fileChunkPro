@@ -13,6 +13,9 @@ import { UploadError } from '../core/ErrorCenter';
 import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
 import { Logger } from '../utils/Logger';
 
+import { IStorage } from './interfaces';
+import { MiniProgramStorage } from './storage/MiniProgramStorage';
+
 // 百度小程序适配器配置接口
 interface BaiduAdapterOptions {
   timeout?: number; // 请求超时时间
@@ -513,17 +516,37 @@ export default class BaiduAdapter implements IUploadAdapter {
   }
 
   /**
-   * 判断存储是否可用
-   * @returns boolean 存储是否可用
+   * 检查是否支持本地存储
+   * @returns 是否支持本地存储
    */
   public isStorageAvailable(): boolean {
     try {
-      const testKey = '__storage_test__';
-      swan.setStorageSync(testKey, 'test');
+      const testKey = '__test__';
+      swan.setStorageSync(testKey, testKey);
       swan.removeStorageSync(testKey);
       return true;
     } catch (e) {
       return false;
+    }
+  }
+
+  /**
+   * 获取存储接口实现
+   * @returns 百度小程序存储适配器实例
+   */
+  public getStorage(): IStorage {
+    try {
+      return new MiniProgramStorage({
+        storageApi: swan,
+        keyPrefix: 'fileChunkPro_baidu_',
+      });
+    } catch (error) {
+      this.logger.error('创建存储适配器失败', error);
+      throw new UploadError(
+        UploadErrorType.STORAGE_ERROR,
+        '初始化百度存储适配器失败',
+        error as Error
+      );
     }
   }
 
