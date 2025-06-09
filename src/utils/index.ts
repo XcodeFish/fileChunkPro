@@ -17,3 +17,14 @@ export {
   FingerprintOptions,
   FingerprintResult,
 } from './HashUtils';
+
+// 安全相关工具导出
+export { default as SecurityError } from './SecurityError';
+export { default as FileContentDetector } from './FileContentDetector';
+export { default as PermissionChecker } from './PermissionChecker';
+export type { SecurityErrorOptions } from './SecurityError';
+export type { FileContentDetectionResult } from './FileContentDetector';
+export type {
+  PermissionCheckOptions,
+  PermissionCheckResult,
+} from './PermissionChecker';

@@ -599,4 +599,74 @@ export interface ErrorContextData {
   
   /** 其他自定义上下文数据 */
   custom?: Record<string, any>;
+}
+
+/**
+ * 安全错误子类型枚举
+ */
+export enum SecurityErrorSubType {
+  /** 文件类型不允许 */
+  FILE_TYPE_NOT_ALLOWED = 'FILE_TYPE_NOT_ALLOWED',
+  
+  /** 文件大小超过限制 */
+  FILE_SIZE_EXCEEDED = 'FILE_SIZE_EXCEEDED',
+  
+  /** 文件名不合规 */
+  INVALID_FILENAME = 'INVALID_FILENAME',
+  
+  /** 敏感文件类型 */
+  SENSITIVE_FILE_TYPE = 'SENSITIVE_FILE_TYPE',
+  
+  /** 文件扩展名与MIME类型不匹配 */
+  EXTENSION_MISMATCH = 'EXTENSION_MISMATCH',
+  
+  /** 缺少上传权限 */
+  PERMISSION_DENIED = 'PERMISSION_DENIED',
+  
+  /** 文件内容不安全 */
+  UNSAFE_CONTENT = 'UNSAFE_CONTENT',
+  
+  /** 可疑文件特征 */
+  SUSPICIOUS_FILE = 'SUSPICIOUS_FILE',
+  
+  /** 其他安全错误 */
+  OTHER = 'OTHER'
+}
+
+/**
+ * 安全问题严重程度枚举
+ */
+export enum SecurityIssueSeverity {
+  /** 低风险 - 可能存在的安全隐患 */
+  LOW = 'LOW',
+  
+  /** 中风险 - 确定的安全问题，但影响有限 */
+  MEDIUM = 'MEDIUM',
+  
+  /** 高风险 - 严重的安全问题，可能导致系统受损 */
+  HIGH = 'HIGH',
+  
+  /** 紧急风险 - 极其严重的安全问题，必须立即处理 */
+  CRITICAL = 'CRITICAL'
+}
+
+/**
+ * 安全验证结果接口
+ */
+export interface SecurityValidationResult {
+  /** 是否通过验证 */
+  valid: boolean;
+  
+  /** 错误信息 */
+  errors: Array<{
+    code: SecurityErrorSubType;
+    message: string;
+    severity: SecurityIssueSeverity;
+  }>;
+  
+  /** 警告信息 */
+  warnings: Array<{
+    code: string;
+    message: string;
+  }>;
 } 

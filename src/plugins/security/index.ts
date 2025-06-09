@@ -6,6 +6,7 @@
 import { SecurityLevel } from '../../types';
 
 import BasicSecurityPlugin from './BasicSecurityPlugin';
+import type { BasicSecurityPluginOptions } from './BasicSecurityPlugin';
 
 /**
  * 根据安全级别获取对应的安全插件
@@ -31,6 +32,8 @@ export {
   BasicSecurityPlugin,
   // 将来会导出 StandardSecurityPlugin 和 AdvancedSecurityPlugin
 };
+
+export type { BasicSecurityPluginOptions };
 
 export default {
   BasicSecurityPlugin,
