@@ -3,133 +3,78 @@
  * 处理来自主线程的消息并执行对应操作
  */
 
+import { calculateChunks } from './tasks/chunkCalculator';
+import { calculateHash } from './tasks/hashCalculator';
+import { processFile } from './tasks/fileProcessor';
+
 // 任务类型
-type TaskType = 'calculateChunks' | 'calculateHash' | 'processFile';
+type TaskType = 'calculateChunks' | 'calculateHash' | 'processFile' | 'ping';
+
+// Worker状态
+type WorkerState = 'idle' | 'busy' | 'error';
+
+// 当前状态
+let currentState: WorkerState = 'idle';
+let currentTaskId: string | null = null;
+let taskStartTime: number = 0;
+let totalTasksProcessed = 0;
+let totalErrors = 0;
+let lastMemoryUsage = 0;
+
+// 性能监控间隔
+const PERFORMANCE_CHECK_INTERVAL = 10000; // 10秒
 
 /**
- * 任务处理方法
+ * 任务处理方法映射
  */
-const taskHandlers = {
+const taskHandlers: Record<string, (data: any) => Promise<any> | any> = {
   /**
    * 计算文件分片
    */
-  calculateChunks: (data: { fileSize: number; chunkSize: number }) => {
-    const { fileSize, chunkSize } = data;
-    
-    // 参数验证
-    if (typeof fileSize !== 'number' || fileSize <= 0) {
-      throw new Error('无效的文件大小');
-    }
-    
-    if (typeof chunkSize !== 'number' || chunkSize <= 0) {
-      throw new Error('无效的分片大小');
-    }
-    
-    // 计算分片
-    const chunks = [];
-    for (let start = 0; start < fileSize; start += chunkSize) {
-      const end = Math.min(start + chunkSize, fileSize);
-      chunks.push({
-        index: chunks.length,
-        start,
-        end,
-        size: end - start,
-        fileSize
-      });
-    }
-    
-    return chunks;
-  },
+  calculateChunks,
   
   /**
    * 计算文件哈希
    */
-  calculateHash: async (data: { fileData: ArrayBuffer | Uint8Array; algorithm?: string }) => {
-    const { fileData, algorithm = 'SHA-256' } = data;
-    
-    // 参数验证
-    if (!fileData || !(fileData instanceof ArrayBuffer || fileData instanceof Uint8Array)) {
-      throw new Error('无效的文件数据');
-    }
-    
-    try {
-      // 使用Web Crypto API计算哈希
-      if (typeof crypto !== 'undefined' && crypto.subtle) {
-        // 确保数据是正确的类型
-        const buffer = fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData);
-        
-        // 计算哈希
-        const hashBuffer = await crypto.subtle.digest(algorithm, buffer);
-        
-        // 将ArrayBuffer转换为十六进制字符串
-        return Array.from(new Uint8Array(hashBuffer))
-          .map(b => b.toString(16).padStart(2, '0'))
-          .join('');
-      } 
-      // 浏览器不支持Web Crypto API，使用简单哈希算法
-      else {
-        console.warn('Web Crypto API不可用，使用简单哈希算法');
-        return simpleHash(fileData);
-      }
-    } catch (error) {
-      console.error('哈希计算失败:', error);
-      // 回退到简单哈希
-      return simpleHash(fileData);
-    }
-  },
+  calculateHash,
   
   /**
    * 处理文件数据
    */
-  processFile: async (data: { 
-    fileData: ArrayBuffer | Uint8Array;
-    operation: string;
-    options?: Record<string, any>;
-  }) => {
-    const { fileData, operation, options = {} } = data;
-    
-    // 参数验证
-    if (!fileData || !(fileData instanceof ArrayBuffer || fileData instanceof Uint8Array)) {
-      throw new Error('无效的文件数据');
+  processFile,
+  
+  /**
+   * 处理ping请求
+   */
+  ping: () => ({
+    timestamp: Date.now(),
+    state: currentState,
+    memory: getMemoryUsage(),
+    stats: {
+      totalTasksProcessed,
+      totalErrors,
+      uptime: Date.now() - (self as any).startTime,
     }
-    
-    if (!operation) {
-      throw new Error('未指定操作类型');
-    }
-    
-    // 根据操作类型进行不同处理
-    try {
-      switch (operation) {
-        case 'compress': 
-          return {
-            success: true,
-            data: {
-              compressedSize: Math.round((fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData)).length * 0.6),
-              originalSize: (fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData)).length,
-              compressionRatio: 0.6 // 模拟60%的压缩率
-            }
-          };
-          
-        case 'encrypt':
-          return {
-            success: true,
-            data: {
-              encryptedSize: (fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData)).length + 16,
-              originalSize: (fileData instanceof Uint8Array ? fileData : new Uint8Array(fileData)).length
-            }
-          };
-          
-        default:
-          throw new Error(`不支持的操作: ${operation}`);
-      }
-    } catch (error) {
-      return {
-        success: false,
-        error: error instanceof Error ? error.message : '处理文件时出错'
-      };
-    }
-  }
+  })
 };
+
+/**
+ * 获取内存使用情况
+ */
+function getMemoryUsage(): any {
+  if (typeof performance !== 'undefined' && 'memory' in performance) {
+    const memory = (performance as any).memory;
+    lastMemoryUsage = memory?.usedJSHeapSize || 0;
+    return {
+      total: memory?.totalJSHeapSize || 0,
+      used: memory?.usedJSHeapSize || 0,
+      limit: memory?.jsHeapSizeLimit || 0,
+      usageRatio: memory?.usedJSHeapSize ? memory.usedJSHeapSize / memory.jsHeapSizeLimit : 0
+    };
+  }
+  
+  return { used: lastMemoryUsage };
+}
 
 /**
  * 简单哈希算法（当Web Crypto API不可用时的回退方案）
@@ -158,34 +103,153 @@ function simpleHash(data: ArrayBuffer | Uint8Array): string {
 }
 
 /**
+ * 发送状态信息
+ */
+function sendStatus() {
+  self.postMessage({
+    type: 'STATUS',
+    status: currentState,
+    memory: getMemoryUsage(),
+    stats: {
+      totalTasksProcessed,
+      totalErrors,
+      uptime: Date.now() - (self as any).startTime,
+      currentTaskId,
+      taskElapsedTime: currentTaskId ? Date.now() - taskStartTime : 0
+    }
+  });
+}
+
+/**
+ * 设置状态
+ */
+function setState(state: WorkerState) {
+  currentState = state;
+}
+
+/**
+ * 初始化Worker
+ */
+function initWorker() {
+  // 记录启动时间
+  (self as any).startTime = Date.now();
+  
+  // 发送就绪消息
+  self.postMessage({ type: 'READY' });
+  
+  // 设置周期性状态报告
+  setInterval(() => {
+    sendStatus();
+  }, PERFORMANCE_CHECK_INTERVAL);
+  
+  // 处理未捕获异常
+  self.addEventListener('unhandledrejection', event => {
+    totalErrors++;
+    self.postMessage({
+      type: 'ERROR',
+      error: event.reason?.toString() || '未知Promise异常'
+    });
+  });
+}
+
+/**
  * 消息处理函数
  */
 self.onmessage = async function(event) {
-  const { taskId, type, data } = event.data;
-  
   try {
-    // 检查任务类型是否支持
-    if (!type || !(type in taskHandlers)) {
-      throw new Error(`不支持的任务类型: ${type}`);
-    }
-
-    // 执行对应的任务处理器
-    const handler = taskHandlers[type as keyof typeof taskHandlers];
-    const result = await handler(data);
+    const message = event.data;
     
-    // 发送成功响应
-    self.postMessage({
-      taskId,
-      success: true,
-      result
-    });
+    // 处理特殊控制消息
+    if (message.action) {
+      switch (message.action) {
+        case 'ping':
+          self.postMessage({ 
+            type: 'PONG', 
+            timestamp: Date.now(),
+            memory: getMemoryUsage()
+          });
+          return;
+          
+        case 'status':
+          sendStatus();
+          return;
+          
+        case 'terminate':
+          // 清理资源后通知准备终止
+          self.postMessage({ type: 'TERMINATE_ACK' });
+          return;
+          
+        default:
+          break;
+      }
+    }
+    
+    // 处理常规任务
+    const { taskId, type, data } = message;
+    
+    if (!taskId) {
+      throw new Error('缺少任务ID');
+    }
+    
+    if (!type) {
+      throw new Error('缺少任务类型');
+    }
+    
+    // 更新状态
+    setState('busy');
+    currentTaskId = taskId;
+    taskStartTime = Date.now();
+    
+    try {
+      // 检查任务类型是否支持
+      if (!(type in taskHandlers)) {
+        throw new Error(`不支持的任务类型: ${type}`);
+      }
+
+      // 执行对应的任务处理器
+      const handler = taskHandlers[type];
+      const result = await handler(data);
+      
+      // 任务完成
+      totalTasksProcessed++;
+      
+      // 发送成功响应
+      self.postMessage({
+        taskId,
+        success: true,
+        result,
+        performance: {
+          duration: Date.now() - taskStartTime,
+          memory: getMemoryUsage()
+        }
+      });
+    } catch (error) {
+      // 记录错误
+      totalErrors++;
+      
+      // 发送错误响应
+      self.postMessage({
+        taskId,
+        success: false,
+        error: error instanceof Error ? error.message : '未知错误',
+        performance: {
+          duration: Date.now() - taskStartTime,
+          memory: getMemoryUsage()
+        }
+      });
+    } finally {
+      // 重置状态
+      setState('idle');
+      currentTaskId = null;
+    }
   } catch (error) {
-    // 发送错误响应
+    // 处理消息处理器本身的错误
+    totalErrors++;
     self.postMessage({
-      taskId,
-      success: false,
-      error: error instanceof Error ? error.message : '未知错误'
+      type: 'ERROR',
+      error: error instanceof Error ? error.message : '消息处理失败'
     });
+    setState('error');
   }
 };
 
@@ -193,20 +257,20 @@ self.onmessage = async function(event) {
  * 错误处理
  */
 self.onerror = function(error) {
-  console.error('Worker 错误:', error);
+  totalErrors++;
   
   // 由于 onerror 没有消息上下文，
   // 所以我们向主线程发送一个通用错误通知
   self.postMessage({
-    taskId: 'global_error',
-    success: false,
-    error: error instanceof Error ? error.message : '未知Worker错误'
+    type: 'ERROR',
+    error: error instanceof Error ? error.message : '全局错误',
+    detail: error
   });
+  
+  setState('error');
+  
+  return true; // 防止默认处理
 };
 
-// 通知主线程我们已准备就绪
-self.postMessage({
-  taskId: 'worker_init',
-  success: true,
-  result: { initialized: true, supportedTasks: Object.keys(taskHandlers) }
-}); 
+// 初始化Worker
+initWorker(); 

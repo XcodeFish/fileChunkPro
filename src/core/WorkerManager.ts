@@ -116,6 +116,7 @@ export default class WorkerManager {
       data: any;
       resolve: (value: any) => void;
       reject: (reason: any) => void;
+      priority: number;
     }>
   > = new Map();
   private activeTaskCount = 0;
@@ -244,91 +245,183 @@ export default class WorkerManager {
   }
 
   /**
-   * 创建单个Worker
+   * 创建一个新的Worker实例
    * @param type Worker类型
+   * @returns 创建的Worker实例或null（如果创建失败）
    */
   private async createWorker(type: string): Promise<Worker | null> {
     if (!this.isWorkerSupported) {
+      this.logger.warn('当前环境不支持Web Workers');
       return null;
     }
 
+    // 获取Worker配置
     const config = this.workerConfigs[type] || this.workerConfigs.default;
 
     try {
-      // 创建Worker
-      let workerUrl: string;
+      let worker: Worker;
 
-      // 根据环境决定如何加载Worker
-      if (typeof window !== 'undefined' && typeof Blob !== 'undefined') {
-        if (this.options.inlineWorkers) {
-          // 内联模式 - 在实际项目中应该通过构建工具处理
-          const workerScript = this.getInlineWorkerScript(type);
-          const blob = new Blob([workerScript], { type: 'text/javascript' });
-          workerUrl = URL.createObjectURL(blob);
-        } else {
-          // 外部文件模式
-          workerUrl = config.scriptPath;
-        }
+      // 创建Worker实例
+      if (this.options.inlineWorkers) {
+        // 使用内联脚本创建Worker
+        const workerScript = this.getInlineWorkerScript(type);
+        const blob = new Blob([workerScript], {
+          type: 'application/javascript',
+        });
+        const url = URL.createObjectURL(blob);
+        worker = new Worker(url);
 
-        const worker = new Worker(workerUrl);
-
-        // 设置消息处理
-        worker.onmessage = event => this.handleWorkerMessage(event, type);
-        worker.onerror = event => this.handleWorkerError(event, type);
-
-        // 等待Worker就绪
-        const ready = await this.waitForWorkerReady(worker);
-        if (!ready) {
-          throw new Error(`${type} Worker初始化超时`);
-        }
-
-        return worker;
+        // 创建后立即释放URL对象
+        URL.revokeObjectURL(url);
+      } else {
+        // 使用外部脚本创建Worker
+        worker = new Worker(config.scriptPath);
       }
+
+      // 设置Worker错误处理
+      worker.onerror = (event: ErrorEvent) => {
+        this.handleWorkerError(event, type);
+      };
+
+      // 设置Worker消息处理
+      worker.onmessage = (event: MessageEvent) => {
+        this.handleWorkerMessage(event, type);
+      };
+
+      // 等待Worker准备就绪
+      const isReady = await this.waitForWorkerReady(worker).catch(error => {
+        this.logger.error(`Worker(${type})初始化失败: ${error.message}`);
+        return false;
+      });
+
+      if (!isReady) {
+        // Worker初始化失败，尝试清理
+        try {
+          worker.terminate();
+        } catch (e) {
+          // 忽略终止错误
+        }
+        return null;
+      }
+
+      // 将Worker添加到池中
+      this.workers.set(`${type}_${Date.now()}`, {
+        worker,
+        status: 'idle',
+        taskCount: 0,
+        totalTaskTime: 0,
+        errorCount: 0,
+        lastResponseTime: Date.now(),
+        creationTime: Date.now(),
+        unresponsiveCount: 0,
+      });
+
+      // 向Worker发送初始化消息
+      worker.postMessage({
+        action: 'init',
+        config: {
+          type,
+          maxMemory: navigator.deviceMemory
+            ? navigator.deviceMemory * 1024 * 1024 * 1024
+            : undefined,
+          logLevel: this.logger.getLevel(),
+        },
+      });
+
+      this.logger.info(`成功创建Worker(${type})`);
+
+      // 如果启用了事件总线，发布Worker创建事件
+      if (this.eventBus) {
+        this.eventBus.emit('worker:created', { type });
+      }
+
+      return worker;
     } catch (error) {
-      this.logger.error(`创建 ${type} Worker 失败:`, error);
-      this.eventBus?.emit('worker:createError', { type, error });
+      this.logger.error(
+        `创建Worker(${type})失败: ${error instanceof Error ? error.message : String(error)}`
+      );
+
+      // 如果启用了事件总线，发布Worker创建失败事件
+      if (this.eventBus) {
+        this.eventBus.emit('worker:createFailed', { type, error });
+      }
+
       return null;
     }
-
-    return null;
   }
 
   /**
-   * 等待Worker就绪
+   * 等待Worker准备就绪
    * @param worker Worker实例
+   * @param timeout 超时时间(ms)，默认5000ms
+   * @returns Promise，解析为布尔值，表示Worker是否成功初始化
    */
-  private waitForWorkerReady(worker: Worker): Promise<boolean> {
-    return new Promise(resolve => {
+  private waitForWorkerReady(worker: Worker, timeout = 5000): Promise<boolean> {
+    return new Promise<boolean>((resolve, reject) => {
+      let isResolved = false;
+      let messageHandler: ((event: MessageEvent) => void) | null = null;
+      let timeoutId: NodeJS.Timeout | null = null;
+
       // 设置超时
-      const timeout = setTimeout(() => {
-        resolve(false);
-      }, 5000);
+      timeoutId = setTimeout(() => {
+        if (!isResolved) {
+          isResolved = true;
 
-      // 设置临时消息处理函数
-      const originalOnMessage = worker.onmessage;
+          // 清理事件监听器
+          if (messageHandler) {
+            worker.removeEventListener('message', messageHandler);
+          }
 
-      worker.onmessage = event => {
-        // 检查是否是就绪消息
-        if (event.data && event.data.type === 'READY') {
-          clearTimeout(timeout);
-          // 恢复原始消息处理函数
-          worker.onmessage = originalOnMessage;
-          resolve(true);
-        } else {
-          // 传递给原始处理函数
-          if (originalOnMessage) {
-            // @ts-ignore - 因为TS不识别originalOnMessage是一个函数
-            originalOnMessage(event);
+          reject(new Error('Worker初始化超时'));
+        }
+      }, timeout);
+
+      // 监听Worker消息
+      messageHandler = (event: MessageEvent) => {
+        const data = event.data;
+
+        if (data && data.type === 'READY') {
+          if (!isResolved) {
+            isResolved = true;
+
+            // 清理超时定时器
+            if (timeoutId) {
+              clearTimeout(timeoutId);
+            }
+
+            // 移除事件监听
+            worker.removeEventListener('message', messageHandler);
+
+            resolve(true);
           }
         }
       };
 
-      // 发送ping消息
+      // 添加消息监听
+      worker.addEventListener('message', messageHandler);
+
+      // 发送ping消息，检查Worker是否响应
       try {
-        worker.postMessage({ action: 'ping' });
-      } catch (e) {
-        clearTimeout(timeout);
-        resolve(false);
+        worker.postMessage({ action: 'ping', timestamp: Date.now() });
+      } catch (error) {
+        // 如果发送消息失败，说明Worker已经不可用
+        if (!isResolved) {
+          isResolved = true;
+
+          // 清理资源
+          if (timeoutId) {
+            clearTimeout(timeoutId);
+          }
+          if (messageHandler) {
+            worker.removeEventListener('message', messageHandler);
+          }
+
+          reject(
+            new Error(
+              `Worker通信失败: ${error instanceof Error ? error.message : String(error)}`
+            )
+          );
+        }
       }
     });
   }
@@ -710,146 +803,254 @@ export default class WorkerManager {
   }
 
   /**
-   * 发送任务到Worker并等待响应
+   * 发送任务到Worker执行
    * @param type 任务类型
    * @param data 任务数据
    * @param workerType Worker类型
+   * @param priority 任务优先级，值越小优先级越高
+   * @param timeout 任务超时时间，默认使用全局配置
+   * @returns Promise，解析为任务执行结果
    */
   async sendTask(
     type: WorkerTaskType,
     data: any,
-    workerType = 'default'
+    workerType = 'default',
+    priority = 1,
+    timeout?: number
   ): Promise<any> {
-    // 如果正在终止，拒绝新任务
+    // 如果正在终止，拒绝所有新任务
     if (this.isTerminating) {
-      throw new Error('Worker管理器正在终止中，无法接受新任务');
+      throw new Error('WorkerManager正在终止，无法接受新任务');
     }
 
-    // 确保初始化
-    if (!this.initialized) {
-      await this.initialize();
-    }
+    // 生成唯一任务ID
+    const taskId = `${type}_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-    // 如果不支持Worker或初始化失败，则使用主线程处理
-    if (!this.isWorkerSupported || !this.initialized) {
-      return this.fallbackToMainThread(type, data);
-    }
+    // 使用自定义超时或默认超时
+    const taskTimeout = timeout || this.options.workerTaskTimeout;
 
-    // 获取Worker
-    const worker = this.getWorker(workerType);
+    // 记录任务开始时间（用于性能监控）
+    const taskStartTime = Date.now();
 
-    // 如果所有Worker都忙，则将任务添加到等待队列
-    if (!worker) {
-      return new Promise((resolve, reject) => {
-        const taskId = `pending_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-        const pendingTask = { taskId, type, data, resolve, reject };
+    // 创建任务Promise
+    const taskPromise = new Promise<any>((resolve, reject) => {
+      // 如果不支持Worker或Worker创建失败，直接在主线程执行
+      if (!this.isWorkerSupported) {
+        this.logger.info(`环境不支持Worker，任务 ${taskId} 将在主线程执行`);
 
-        const tasks = this.pendingTasks.get(workerType) || [];
-        tasks.push(pendingTask);
-        this.pendingTasks.set(workerType, tasks);
+        return this.fallbackToMainThread(type, data)
+          .then(resolve)
+          .catch(reject);
+      }
 
-        this.logger.debug(`任务 ${taskId} 添加到 ${workerType} 等待队列`);
-      });
-    }
+      // 尝试获取可用的Worker
+      const worker = this.getWorker(workerType);
 
-    // 创建任务ID
-    const taskId = `task_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-
-    // 创建任务消息
-    const message: WorkerTaskMessage = {
-      taskId,
-      type,
-      data,
-    };
-
-    // 增加活动任务计数
-    this.activeTaskCount++;
-
-    // 创建Promise
-    return new Promise((resolve, reject) => {
-      // 设置超时处理
-      const timer = setTimeout(() => {
-        // 标记任务超时
-        this.logger.warn(`任务 ${taskId} 执行超时`);
-
-        // 从回调映射中移除
-        this.taskCallbacks.delete(taskId);
-
-        // 减少活动任务计数
-        this.activeTaskCount = Math.max(0, this.activeTaskCount - 1);
-
-        // 更新Worker状态
-        for (const [id, instance] of this.workers.entries()) {
-          if (id.startsWith(`${workerType}:`)) {
-            // 可能需要标记为无响应
-            const timeSinceResponse =
-              Date.now() - (instance.lastResponseTime || 0);
-            if (timeSinceResponse > 10000) {
-              // 10秒无响应
-              instance.status = 'unresponsive';
-              instance.unresponsiveCount =
-                (instance.unresponsiveCount || 0) + 1;
-
-              // 尝试恢复
-              if (instance.unresponsiveCount >= 3) {
-                this.logger.warn(`Worker ${id} 无响应，将尝试重启`);
-                this.restartWorker(workerType);
-              }
-            }
-          }
-        }
-
-        // 触发超时事件
-        this.eventBus?.emit('worker:taskTimeout', {
+      if (worker) {
+        // 有可用Worker，直接执行任务
+        this.executeTask(
+          worker,
           taskId,
           type,
+          data,
           workerType,
-        });
-
-        // 拒绝Promise
-        reject(
-          new Error(`Worker任务执行超时(${this.options.workerTaskTimeout}ms)`)
+          resolve,
+          reject,
+          taskTimeout
         );
-      }, this.options.workerTaskTimeout);
+      } else {
+        // 没有可用Worker，将任务加入待处理队列
+        this.logger.debug(
+          `没有可用的${workerType} Worker，任务 ${taskId} 加入队列`
+        );
 
-      // 存储回调
-      this.taskCallbacks.set(taskId, {
-        resolve,
-        reject,
-        timer,
-      });
-
-      try {
-        // 更新Worker状态
-        for (const [id, instance] of this.workers.entries()) {
-          if (id.startsWith(`${workerType}:`) && instance.worker === worker) {
-            instance.status = 'busy';
-            instance.lastResponseTime = Date.now();
-          }
+        if (!this.pendingTasks.has(workerType)) {
+          this.pendingTasks.set(workerType, []);
         }
 
-        // 发送消息到Worker
-        worker.postMessage(message);
-      } catch (error) {
-        // 清除超时定时器
-        clearTimeout(timer);
+        // 添加到待处理队列（包括优先级信息）
+        const pendingTasks = this.pendingTasks.get(workerType)!;
 
-        // 从回调映射中移除
-        this.taskCallbacks.delete(taskId);
+        // 根据优先级插入队列
+        const taskItem = {
+          taskId,
+          type,
+          data,
+          resolve,
+          reject,
+          priority,
+        };
 
-        // 减少活动任务计数
-        this.activeTaskCount = Math.max(0, this.activeTaskCount - 1);
+        // 找到合适的位置插入（保持优先级顺序）
+        const insertIndex = pendingTasks.findIndex(
+          task => (task as any).priority > priority
+        );
 
-        // 回退到主线程处理
-        if (this.options.fallbackToMainThread) {
-          this.logger.warn(`发送任务到Worker失败，回退到主线程: ${error}`);
-          return this.fallbackToMainThread(type, data);
+        if (insertIndex === -1) {
+          // 没找到更低优先级的任务，追加到末尾
+          pendingTasks.push(taskItem);
         } else {
-          this.logger.error(`发送任务到Worker失败: ${error}`);
-          reject(error);
+          // 插入到找到的位置
+          pendingTasks.splice(insertIndex, 0, taskItem);
+        }
+
+        // 尝试创建新Worker处理队列任务
+        if (this.options.autoAdjustPool) {
+          this.tryCreateWorkerForPendingTasks(workerType);
         }
       }
     });
+
+    // 增加活跃任务计数
+    this.activeTaskCount++;
+
+    // 监控任务执行情况
+    taskPromise.finally(() => {
+      // 任务完成后减少活跃计数
+      this.activeTaskCount--;
+
+      // 记录任务执行时间
+      const taskTime = Date.now() - taskStartTime;
+
+      // 记录性能数据
+      if (this.options.logPerformance) {
+        this.logger.debug(`任务 ${taskId}(${type}) 执行时间: ${taskTime}ms`);
+
+        // 发送任务执行指标
+        if (this.eventBus) {
+          this.eventBus.emit('worker:taskMetrics', {
+            taskId,
+            type,
+            workerType,
+            executionTime: taskTime,
+            success: true,
+          });
+        }
+      }
+    });
+
+    return taskPromise;
+  }
+
+  /**
+   * 在Worker中执行任务
+   * @private
+   */
+  private executeTask(
+    worker: Worker,
+    taskId: string,
+    type: WorkerTaskType,
+    data: any,
+    workerType: string,
+    resolve: (value: any) => void,
+    reject: (reason: any) => void,
+    timeout?: number
+  ): void {
+    // 设置任务超时
+    const timer = setTimeout(() => {
+      // 检查任务是否仍在处理中
+      if (this.taskCallbacks.has(taskId)) {
+        this.logger.warn(`任务 ${taskId} 执行超时`);
+
+        // 移除回调
+        this.taskCallbacks.delete(taskId);
+
+        // 拒绝Promise
+        reject(new Error(`任务执行超时(${timeout}ms)`));
+
+        // 记录Worker可能出现问题
+        for (const [key, instance] of this.workers.entries()) {
+          if (instance.worker === worker) {
+            instance.unresponsiveCount = (instance.unresponsiveCount || 0) + 1;
+
+            // 如果Worker多次无响应，尝试重启
+            if (instance.unresponsiveCount > 3) {
+              this.logger.warn(`Worker ${key} 多次无响应，尝试重启`);
+              this.restartWorker(workerType);
+            }
+            break;
+          }
+        }
+      }
+    }, timeout || this.options.workerTaskTimeout);
+
+    // 保存任务回调
+    this.taskCallbacks.set(taskId, {
+      resolve,
+      reject,
+      timer,
+    });
+
+    // 发送任务到Worker
+    try {
+      worker.postMessage({
+        taskId,
+        type,
+        data,
+      });
+    } catch (error) {
+      // 发送失败（可能是传输对象过大或Worker已终止）
+      clearTimeout(timer);
+      this.taskCallbacks.delete(taskId);
+
+      this.logger.error(
+        `向Worker发送任务失败: ${error instanceof Error ? error.message : String(error)}`
+      );
+
+      // 如果是因为数据过大，尝试在主线程执行
+      if (
+        error instanceof DOMException &&
+        (error.name === 'DataCloneError' || error.code === 25)
+      ) {
+        this.logger.warn('数据无法被克隆，尝试在主线程执行');
+
+        this.fallbackToMainThread(type, data).then(resolve).catch(reject);
+      } else {
+        // 其他错误直接拒绝
+        reject(
+          new Error(
+            `任务发送失败: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+      }
+    }
+  }
+
+  /**
+   * 尝试为待处理任务创建新Worker
+   */
+  private async tryCreateWorkerForPendingTasks(
+    workerType: string
+  ): Promise<void> {
+    const pendingTasks = this.pendingTasks.get(workerType);
+
+    // 如果没有待处理任务，或者正在终止，则不创建新Worker
+    if (!pendingTasks || pendingTasks.length === 0 || this.isTerminating) {
+      return;
+    }
+
+    // 计算当前此类型的Worker数量
+    let currentWorkerCount = 0;
+    for (const [key, instance] of this.workers.entries()) {
+      if (key.startsWith(workerType)) {
+        currentWorkerCount++;
+      }
+    }
+
+    // 如果当前Worker数量小于配置的池大小，可以创建新Worker
+    const config = this.workerConfigs[workerType] || this.workerConfigs.default;
+
+    if (currentWorkerCount < config.poolSize) {
+      this.logger.debug(`为待处理任务创建新的${workerType} Worker`);
+
+      // 创建新Worker
+      const worker = await this.createWorker(workerType);
+
+      // 如果创建成功且仍有待处理任务，处理它们
+      if (worker) {
+        this.processPendingTasks(workerType);
+      }
+    }
   }
 
   /**
@@ -953,7 +1154,7 @@ export default class WorkerManager {
 
     // 重新提交任务
     this.logger.debug(`处理等待中的任务: ${task.taskId}`);
-    this.sendTask(task.type, task.data, workerType)
+    this.sendTask(task.type, task.data, workerType, task.priority)
       .then(task.resolve)
       .catch(task.reject);
   }
