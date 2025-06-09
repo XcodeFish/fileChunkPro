@@ -1084,6 +1084,74 @@ export class TaskScheduler {
       this.processNextTask();
     }
   }
+
+  /**
+   * 等待所有任务完成
+   * @returns 返回一个 Promise，当所有任务完成时 resolve
+   */
+  waitForAll(): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      // 如果没有任务，直接返回
+      if (this.taskQueue.length === 0 && this.runningTasks.size === 0) {
+        resolve();
+        return;
+      }
+
+      // 如果已中止，直接拒绝
+      if (this.aborted) {
+        reject(new Error('任务调度器已中止'));
+        return;
+      }
+
+      // 自动启动处理
+      if (!this.isProcessing) {
+        this.start();
+      }
+
+      // 监听完成事件
+      const completeHandler = () => {
+        // 确保所有任务都已完成
+        if (this.runningTasks.size === 0 && this.taskQueue.length === 0) {
+          this.eventBus.off('allTasksCompleted', completeHandler);
+          this.eventBus.off('abort', abortHandler);
+          resolve();
+        }
+      };
+
+      // 监听中止事件
+      const abortHandler = () => {
+        this.eventBus.off('allTasksCompleted', completeHandler);
+        this.eventBus.off('abort', abortHandler);
+        reject(new Error('任务调度器已中止'));
+      };
+
+      this.eventBus.on('allTasksCompleted', completeHandler);
+      this.eventBus.on('abort', abortHandler);
+    });
+  }
+
+  /**
+   * 更新任务调度器配置
+   * @param config 任务调度器配置
+   */
+  updateConfig(config: Partial<TaskSchedulerOptions>): void {
+    // 更新配置
+    this.options = {
+      ...this.options,
+      ...config,
+    };
+
+    // 更新动态并发数
+    if (config.concurrency !== undefined) {
+      this.dynamicConcurrency = config.concurrency;
+    }
+
+    // 发出配置变更事件
+    this.eventBus.emit('configChange', {
+      previous: { ...this.options, ...config },
+      current: this.options,
+    });
+  }
 }
 
 export default TaskScheduler;

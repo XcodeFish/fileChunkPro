@@ -16,6 +16,14 @@ export interface UploaderOptions {
   autoRetry?: boolean;         // 是否自动重试
   maxFileSize?: number;        // 最大文件大小限制
   allowFileTypes?: string[];   // 允许的文件类型
+  enableAdaptiveUploads?: boolean; // 是否启用自适应上传
+  maxMemoryUsage?: number;     // 最大内存使用率
+  smartRetry?: boolean;        // 是否启用智能重试
+  autoResume?: boolean;        // 是否自动恢复上传
+  enableMemoryMonitoring?: boolean; // 是否启用内存监控
+  adaptiveStrategies?: AdaptiveStrategyOptions; // 自适应策略选项
+  enablePerformanceMonitoring?: boolean; // 是否启用性能监控
+  performanceCheckInterval?: number; // 性能检查间隔
   [key: string]: any;          // 其他自定义选项
 }
 
@@ -262,4 +270,50 @@ export interface FileValidationResult {
 export interface ContentValidationResult {
   valid: boolean;            // 是否有效
   reason: string;            // 无效原因
+}
+
+/**
+ * 自适应策略选项
+ */
+export interface AdaptiveStrategyOptions {
+  enabled: boolean;            // 是否启用自适应策略
+  adjustChunkSize: boolean;    // 是否调整分片大小
+  adjustConcurrency: boolean;  // 是否调整并发数
+  adjustRetries: boolean;      // 是否调整重试策略
+  minChunkSize: number;        // 最小分片大小 (字节)
+  maxChunkSize: number;        // 最大分片大小 (字节)
+  minConcurrency: number;      // 最小并发数
+  maxConcurrency: number;      // 最大并发数
+  samplingInterval: number;    // 采样间隔 (毫秒)
+}
+
+/**
+ * 设备能力
+ */
+export interface DeviceCapability {
+  memory: 'low' | 'normal' | 'high'; // 内存能力
+  processor: 'low' | 'normal' | 'high'; // 处理器能力
+  network: 'low' | 'normal' | 'high'; // 网络能力
+  storage: 'low' | 'normal' | 'high'; // 存储能力
+  battery: 'low' | 'normal' | 'high'; // 电池状态
+}
+
+/**
+ * 上传性能统计
+ */
+export interface UploadPerformanceStats {
+  fileId: string;              // 文件ID
+  fileSize: number;            // 文件大小
+  startTime: number;           // 开始时间戳
+  endTime: number;             // 结束时间戳
+  duration: number;            // 总耗时 (毫秒)
+  avgSpeed: number;            // 平均速度 (字节/秒)
+  success?: boolean;           // 是否成功上传
+  chunks: {
+    total: number;             // 总分片数
+    completed: number;         // 已完成分片数
+    failed: number;            // 失败分片数
+    retried: number;           // 重试分片数
+  };
+  bytesUploaded: number;       // 已上传字节数
 } 

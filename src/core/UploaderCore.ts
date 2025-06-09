@@ -12,10 +12,15 @@ import {
   NetworkQuality,
   UploadStrategy,
   RetryStrategy,
+  Environment,
+  DeviceCapability,
+  AdaptiveStrategyOptions,
+  UploadPerformanceStats,
 } from '../types';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
 import NetworkDetector from '../utils/NetworkDetector';
+import PerformanceMonitor from '../utils/PerformanceMonitor';
 
 import ErrorCenter, { UploadError } from './ErrorCenter';
 import EventBus from './EventBus';
@@ -39,6 +44,9 @@ export class UploaderCore {
   private isCancelled = false;
   private currentFileId: string | null = null;
   private memoryWatcher: NodeJS.Timeout | null = null;
+  private environment: Environment;
+  private deviceCapabilities: DeviceCapability;
+  private performanceMonitor: PerformanceMonitor;
 
   // 新增属性
   private memoryCheckInterval = 10000; // 10秒检查一次内存使用情况
@@ -47,6 +55,21 @@ export class UploaderCore {
   private networkDetector: NetworkDetector | null = null;
   private activeUploads: Set<string> = new Set(); // 活动上传集合
   private failedChunks: Map<string, number> = new Map(); // 失败分片计数
+  private lastPerformanceCheck = 0;
+  private performanceCheckInterval = 5000; // 5秒检查一次性能
+  private uploadStartTime: Record<string, number> = {}; // 记录上传开始时间
+  private uploadPerformance: Record<string, UploadPerformanceStats> = {}; // 上传性能数据
+  private adaptiveStrategies: AdaptiveStrategyOptions = {
+    enabled: true,
+    adjustChunkSize: true,
+    adjustConcurrency: true,
+    adjustRetries: true,
+    minChunkSize: 256 * 1024, // 最小分片大小 256KB
+    maxChunkSize: 10 * 1024 * 1024, // 最大分片大小 10MB
+    minConcurrency: 1,
+    maxConcurrency: 6,
+    samplingInterval: 5000, // 采样间隔 5秒
+  };
 
   /**
    * 创建UploaderCore实例
@@ -61,9 +84,18 @@ export class UploaderCore {
       );
     }
 
+    // 检测环境
+    this.environment = EnvUtils.detectEnvironment();
+
+    // 检测设备能力
+    this.deviceCapabilities = this.detectDeviceCapabilities();
+
+    // 初始化性能监控器
+    this.performanceMonitor = new PerformanceMonitor();
+
     this.options = {
       ...options,
-      concurrency: options.concurrency || EnvUtils.getRecommendedConcurrency(),
+      concurrency: options.concurrency || this.getOptimalConcurrency(),
       timeout: options.timeout || 30000,
       retryCount: options.retryCount || 3,
       retryDelay: options.retryDelay || 1000,
@@ -75,7 +107,19 @@ export class UploaderCore {
       maxMemoryUsage: options.maxMemoryUsage || 0.9,
       smartRetry: options.smartRetry !== false,
       autoResume: options.autoResume !== false,
+      adaptiveStrategies: {
+        ...this.adaptiveStrategies,
+        ...(options.adaptiveStrategies || {}),
+      },
+      enablePerformanceMonitoring:
+        options.enablePerformanceMonitoring !== false,
+      performanceCheckInterval: options.performanceCheckInterval || 5000,
+      maxFileSize: options.maxFileSize || EnvUtils.getMaxFileSizeSupport(),
     };
+
+    // 保存自适应策略设置
+    this.adaptiveStrategies = this.options
+      .adaptiveStrategies as AdaptiveStrategyOptions;
 
     // 初始化任务调度器
     this.scheduler = new TaskScheduler(
@@ -93,9 +137,6 @@ export class UploaderCore {
       this.emitProgress(progress);
     });
 
-    // 检测环境
-    // this.environment = EnvUtils.detectEnvironment(); // 未使用的变量，移除
-
     // 初始化网络检测器
     if (this.options.enableAdaptiveUploads) {
       // 在测试环境中检查是否有全局MockNetworkDetector
@@ -104,6 +145,9 @@ export class UploaderCore {
       } else if (typeof NetworkDetector !== 'undefined') {
         try {
           this.networkDetector = NetworkDetector.create();
+          this.networkDetector.addQualityCallback(
+            this.handleNetworkQualityChange.bind(this)
+          );
         } catch (error) {
           console.warn('无法初始化NetworkDetector', error);
           this.networkDetector = null;
@@ -121,6 +165,238 @@ export class UploaderCore {
 
     // 初始化上传策略
     this.initializeUploadStrategies();
+
+    // 初始化性能监控
+    if (options.enablePerformanceMonitoring !== false) {
+      this.setupPerformanceMonitoring();
+    }
+
+    // 环境适配
+    this.applyEnvironmentSpecificSettings();
+  }
+
+  /**
+   * 检测设备能力
+   * @returns 设备能力对象
+   */
+  private detectDeviceCapabilities(): DeviceCapability {
+    const capabilities: DeviceCapability = {
+      memory: 'normal',
+      processor: 'normal',
+      network: 'normal',
+      storage: 'normal',
+      battery: 'normal',
+    };
+
+    // 检测处理器能力
+    if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
+      if (navigator.hardwareConcurrency <= 2) {
+        capabilities.processor = 'low';
+      } else if (navigator.hardwareConcurrency >= 8) {
+        capabilities.processor = 'high';
+      }
+    }
+
+    // 检测内存能力
+    if (MemoryManager.isLowMemoryDevice()) {
+      capabilities.memory = 'low';
+    }
+
+    // 检测网络能力 (由于网络状态动态变化，此处仅获取初始状态)
+    if (this.networkDetector) {
+      const quality = this.networkDetector.getNetworkQuality();
+      if (quality === NetworkQuality.POOR || quality === NetworkQuality.LOW) {
+        capabilities.network = 'low';
+      } else if (
+        quality === NetworkQuality.GOOD ||
+        quality === NetworkQuality.EXCELLENT
+      ) {
+        capabilities.network = 'high';
+      }
+    }
+
+    // 检测电池状态
+    if (typeof navigator !== 'undefined' && navigator.getBattery) {
+      navigator
+        .getBattery()
+        .then((battery: any) => {
+          if (battery.charging === false && battery.level < 0.3) {
+            capabilities.battery = 'low';
+          } else if (battery.charging === true || battery.level > 0.7) {
+            capabilities.battery = 'high';
+          }
+        })
+        .catch(() => {
+          // 忽略错误
+        });
+    }
+
+    // 检测存储能力 (仅Web环境)
+    if (
+      typeof navigator !== 'undefined' &&
+      navigator.storage &&
+      navigator.storage.estimate
+    ) {
+      navigator.storage
+        .estimate()
+        .then(estimate => {
+          if (estimate.quota && estimate.usage) {
+            const usageRatio = estimate.usage / estimate.quota;
+            if (usageRatio > 0.8) {
+              capabilities.storage = 'low';
+            } else if (usageRatio < 0.4) {
+              capabilities.storage = 'high';
+            }
+          }
+        })
+        .catch(() => {
+          // 忽略错误
+        });
+    }
+
+    return capabilities;
+  }
+
+  /**
+   * 应用环境特定设置
+   */
+  private applyEnvironmentSpecificSettings(): void {
+    switch (this.environment) {
+      case Environment.WechatMP: {
+        // 微信小程序特定优化
+        this.options.concurrency = Math.min(
+          this.options.concurrency as number,
+          2
+        );
+        this.options.timeout = Math.max(this.options.timeout as number, 60000);
+        break;
+      }
+
+      case Environment.AlipayMP: {
+        // 支付宝小程序特定优化
+        this.options.concurrency = Math.min(
+          this.options.concurrency as number,
+          2
+        );
+        break;
+      }
+
+      case Environment.BytedanceMP: {
+        // 字节跳动小程序特定优化
+        this.options.concurrency = Math.min(
+          this.options.concurrency as number,
+          3
+        );
+        break;
+      }
+
+      case Environment.BaiduMP: {
+        // 百度小程序特定优化
+        this.options.concurrency = Math.min(
+          this.options.concurrency as number,
+          2
+        );
+        break;
+      }
+
+      case Environment.Browser: {
+        // 浏览器环境优化
+        if (EnvUtils.isHttps()) {
+          // HTTPS环境可以使用更多高级功能
+          this.options.useWorker =
+            this.options.useWorker !== false && EnvUtils.isWorkerSupported();
+        } else {
+          // HTTP环境可能受限
+          console.warn('非HTTPS环境可能限制某些功能');
+        }
+
+        // 检测浏览器类型进行特定优化
+        const browserInfo = EnvUtils.getBrowserInfo();
+        if (
+          browserInfo.name === 'ie' ||
+          (browserInfo.name === 'safari' &&
+            parseInt(browserInfo.version, 10) < 11)
+        ) {
+          // 旧浏览器优化
+          this.options.concurrency = Math.min(
+            this.options.concurrency as number,
+            2
+          );
+          this.options.chunkSize = Math.min(
+            typeof this.options.chunkSize === 'number'
+              ? this.options.chunkSize
+              : 2 * 1024 * 1024,
+            2 * 1024 * 1024
+          );
+        }
+        break;
+      }
+
+      default:
+        // 其他环境使用默认设置
+        break;
+    }
+
+    // 应用设备能力特定设置
+    if (this.deviceCapabilities.memory === 'low') {
+      // 低内存设备优化
+      this.options.concurrency = Math.min(
+        this.options.concurrency as number,
+        2
+      );
+      if (typeof this.options.chunkSize === 'number') {
+        this.options.chunkSize = Math.min(
+          this.options.chunkSize,
+          1 * 1024 * 1024
+        );
+      } else {
+        this.options.chunkSize = 1 * 1024 * 1024;
+      }
+    }
+
+    if (this.deviceCapabilities.processor === 'low') {
+      // 低性能处理器设备优化
+      this.options.concurrency = Math.min(
+        this.options.concurrency as number,
+        2
+      );
+    }
+
+    if (this.deviceCapabilities.battery === 'low') {
+      // 低电量设备优化
+      this.options.concurrency = Math.min(
+        this.options.concurrency as number,
+        2
+      );
+    }
+
+    // 重新配置任务调度器
+    this.scheduler.updateConfig({
+      concurrency: this.options.concurrency as number,
+      retryCount: this.options.retryCount as number,
+      retryDelay: this.options.retryDelay as number,
+      timeout: this.options.timeout as number,
+    });
+  }
+
+  /**
+   * 获取最佳并发数
+   */
+  private getOptimalConcurrency(): number {
+    // 基于环境和设备能力选择最佳并发数
+    const defaultConcurrency = EnvUtils.getRecommendedConcurrency();
+
+    // 如果是低内存设备，减少并发数
+    if (MemoryManager.isLowMemoryDevice()) {
+      return Math.max(1, defaultConcurrency - 1);
+    }
+
+    // 如果是低功耗设备，减少并发数
+    if (MemoryManager.isLowPowerDevice()) {
+      return Math.max(1, defaultConcurrency - 1);
+    }
+
+    return defaultConcurrency;
   }
 
   /**
@@ -146,6 +422,7 @@ export class UploaderCore {
       retryCount: 2,
       retryDelay: 500,
       timeout: 30000,
+      prioritizeFirstChunk: true,
     });
 
     // 稳定性策略 - 适用于较差网络
@@ -165,6 +442,194 @@ export class UploaderCore {
       retryDelay: 1000,
       timeout: 45000,
     });
+
+    // 低端设备策略 - 适用于低性能设备
+    this.uploadStrategies.set('lowEndDevice', {
+      concurrency: 1,
+      chunkSize: 512 * 1024, // 512KB
+      retryCount: 4,
+      retryDelay: 1500,
+      timeout: 60000,
+    });
+
+    // 弱网络策略 - 适用于极差网络环境
+    this.uploadStrategies.set('poorNetwork', {
+      concurrency: 1,
+      chunkSize: 256 * 1024, // 256KB
+      retryCount: 8,
+      retryDelay: 3000,
+      timeout: 90000,
+    });
+  }
+
+  /**
+   * 设置性能监控
+   */
+  private setupPerformanceMonitoring(): void {
+    if (this.options.enablePerformanceMonitoring) {
+      this.performanceCheckInterval =
+        this.options.performanceCheckInterval || 5000;
+
+      // 启动性能监控器
+      this.performanceMonitor.start();
+
+      // 监听性能变化
+      this.performanceMonitor.onPerformanceChange(stats => {
+        // 处理性能变化
+        this.handlePerformanceChange(stats);
+      });
+    }
+  }
+
+  /**
+   * 处理性能变化
+   */
+  private handlePerformanceChange(stats: any): void {
+    // 发出性能变化事件
+    this.emit('performanceChange', stats);
+
+    // 根据性能数据调整上传策略
+    if (this.options.enableAdaptiveUploads && this.adaptiveStrategies.enabled) {
+      const now = Date.now();
+      if (now - this.lastPerformanceCheck > this.performanceCheckInterval) {
+        this.lastPerformanceCheck = now;
+        this.adaptUploadStrategy(stats);
+      }
+    }
+  }
+
+  /**
+   * 适应性调整上传策略
+   */
+  private adaptUploadStrategy(performanceStats: any): void {
+    if (!this.adaptiveStrategies.enabled) return;
+
+    const currentStrategy = this.uploadStrategies.get(
+      'default'
+    ) as UploadStrategy;
+    let needsUpdate = false;
+    let newConcurrency = currentStrategy.concurrency;
+    let newChunkSize = currentStrategy.chunkSize;
+
+    // 根据CPU使用率调整
+    if (this.adaptiveStrategies.adjustConcurrency && performanceStats.cpu) {
+      if (performanceStats.cpu.usage > 80) {
+        // CPU负载高，降低并发
+        newConcurrency = Math.max(
+          this.adaptiveStrategies.minConcurrency,
+          currentStrategy.concurrency - 1
+        );
+        needsUpdate = true;
+      } else if (
+        performanceStats.cpu.usage < 30 &&
+        this.deviceCapabilities.processor !== 'low'
+      ) {
+        // CPU负载低，可以提高并发
+        newConcurrency = Math.min(
+          this.adaptiveStrategies.maxConcurrency,
+          currentStrategy.concurrency + 1
+        );
+        needsUpdate = true;
+      }
+    }
+
+    // 根据内存使用率调整分片大小
+    if (this.adaptiveStrategies.adjustChunkSize) {
+      const memoryStats = MemoryManager.getMemoryStats();
+      if (memoryStats.usageRatio > 0.7) {
+        // 内存使用率高，减小分片大小
+        newChunkSize = Math.max(
+          this.adaptiveStrategies.minChunkSize,
+          currentStrategy.chunkSize / 2
+        );
+        needsUpdate = true;
+      } else if (
+        memoryStats.usageRatio < 0.3 &&
+        this.deviceCapabilities.memory !== 'low'
+      ) {
+        // 内存使用率低，可以增大分片大小
+        newChunkSize = Math.min(
+          this.adaptiveStrategies.maxChunkSize,
+          currentStrategy.chunkSize * 1.5
+        );
+        needsUpdate = true;
+      }
+    }
+
+    // 更新策略
+    if (needsUpdate) {
+      const updatedStrategy: UploadStrategy = {
+        ...currentStrategy,
+        concurrency: newConcurrency,
+        chunkSize: newChunkSize,
+      };
+
+      this.uploadStrategies.set('default', updatedStrategy);
+
+      // 更新调度器配置
+      this.scheduler.updateConfig({
+        concurrency: updatedStrategy.concurrency,
+      });
+
+      // 发出策略变更事件
+      this.emit('strategyChange', {
+        previous: currentStrategy,
+        current: updatedStrategy,
+      });
+    }
+  }
+
+  /**
+   * 处理网络质量变化
+   */
+  private handleNetworkQualityChange(quality: NetworkQuality): void {
+    // 发出网络质量变化事件
+    this.emit('networkQualityChange', quality);
+
+    // 根据网络质量调整上传策略
+    if (this.options.enableAdaptiveUploads && this.adaptiveStrategies.enabled) {
+      let strategyName: string;
+
+      switch (quality) {
+        case NetworkQuality.POOR:
+          strategyName = 'poorNetwork';
+          break;
+        case NetworkQuality.LOW:
+          strategyName = 'reliability';
+          break;
+        case NetworkQuality.MEDIUM:
+          strategyName = 'default';
+          break;
+        case NetworkQuality.GOOD:
+        case NetworkQuality.EXCELLENT:
+          strategyName = 'highPerformance';
+          break;
+        default:
+          strategyName = 'default';
+      }
+
+      // 获取对应策略
+      const strategy = this.uploadStrategies.get(strategyName);
+      if (strategy) {
+        // 更新默认策略
+        this.uploadStrategies.set('default', { ...strategy });
+
+        // 更新调度器配置
+        this.scheduler.updateConfig({
+          concurrency: strategy.concurrency,
+          retryCount: strategy.retryCount,
+          retryDelay: strategy.retryDelay,
+          timeout: strategy.timeout,
+        });
+
+        // 发出策略变更事件
+        this.emit('strategyChange', {
+          reason: 'networkChange',
+          quality,
+          strategy: strategyName,
+        });
+      }
+    }
   }
 
   /**
@@ -228,118 +693,173 @@ export class UploaderCore {
 
   /**
    * 上传文件
-   * @param file 待上传的文件
+   * @param file 文件对象
    * @returns 上传结果
    */
   public async upload(file: AnyFile): Promise<UploadResult> {
-    // 重置取消状态
-    this.isCancelled = false;
-
     try {
       // 验证文件
       await this.validateFile(file);
 
-      // 选择上传策略
-      const strategy = await this.selectUploadStrategy(file);
+      // 重置取消状态
+      this.isCancelled = false;
 
-      // 执行前置钩子
-      await this.runPluginHook('beforeUpload', { file, strategy });
+      // 获取文件ID
+      const fileId = await this.generateFileId(file);
+      this.currentFileId = fileId;
 
-      // 生成文件唯一ID
-      this.currentFileId = await this.generateFileId(file);
+      // 添加到活动上传集合
+      this.activeUploads.add(fileId);
 
-      // 添加到活动上传
-      this.activeUploads.add(this.currentFileId);
+      // 获取网络质量
+      const networkQuality = this.networkDetector
+        ? this.networkDetector.getNetworkQuality()
+        : NetworkQuality.MEDIUM;
 
-      // 创建文件分片
-      const chunks = await this.createChunks(file, strategy.chunkSize);
+      // 动态确定分片大小
+      const chunkSize = this.getDynamicChunkSize(file.size, networkQuality);
 
-      // 初始化上传（可能包含与服务器的交互）
-      await this.initializeUpload(file, this.currentFileId, chunks.length);
-
-      // 更新调度器设置
-      this.scheduler.updateSettings({
-        concurrency: strategy.concurrency,
-        retryCount: strategy.retryCount,
-        retryDelay: strategy.retryDelay,
-        timeout: strategy.timeout,
+      // 触发上传开始事件
+      this.emit('uploadStart', {
+        fileId,
+        fileName: file.name,
+        fileSize: file.size,
+        chunkSize,
+        networkQuality,
       });
 
-      // 添加所有分片上传任务
-      chunks.forEach((chunk, index) => {
+      // 创建分片
+      const chunks = await this.createChunks(file, chunkSize);
+
+      // 初始化性能监控
+      if (this.options.enablePerformanceMonitoring) {
+        this.startPerformanceTracking(fileId, file.size);
+      }
+
+      // 调用插件钩子
+      await this.runPluginHook('beforeUpload', {
+        file,
+        fileId,
+        chunks,
+        options: this.options,
+      });
+
+      // 初始化上传
+      await this.initializeUpload(file, fileId, chunks.length);
+
+      // 使用调度器上传所有分片
+      for (let i = 0; i < chunks.length; i++) {
+        if (this.isCancelled) {
+          throw new UploadError(UploadErrorType.CANCEL_ERROR, '上传已取消');
+        }
+
+        const chunk = chunks[i];
+
+        // 决定任务优先级
+        let priority = TaskPriority.NORMAL;
+
+        // 对于高性能策略，可以优先上传第一个和最后一个分片
+        const strategy = this.uploadStrategies.get('default');
+        if (strategy) {
+          if (strategy.prioritizeFirstChunk && i === 0) {
+            priority = TaskPriority.HIGH;
+          } else if (strategy.prioritizeLastChunk && i === chunks.length - 1) {
+            priority = TaskPriority.HIGH;
+          }
+        }
+
+        // 添加上传任务到调度器
         this.scheduler.addTask(
           async () => {
-            if (this.isCancelled) {
-              throw new Error('上传已取消');
-            }
-
-            await this.uploadChunk(chunk, index, this.currentFileId!);
-
-            // 调用分片上传成功钩子
-            await this.runPluginHook('chunkUploaded', {
-              chunkIndex: index,
-              chunkCount: chunks.length,
-              fileId: this.currentFileId,
-            });
+            return this.uploadChunk(chunk, i, fileId);
           },
-          index === 0 || index === chunks.length - 1
-            ? TaskPriority.HIGH
-            : TaskPriority.NORMAL,
-          { fileId: this.currentFileId || undefined, chunkIndex: index }
+          {
+            priority,
+            metadata: {
+              fileId,
+              chunkIndex: i,
+              size: chunk.size,
+              fileName: file.name,
+            },
+          }
         );
-      });
+      }
 
-      // 执行所有任务
-      await this.scheduler.run();
+      // 等待所有分片完成
+      await this.scheduler.waitForAll();
 
-      // 如果上传被取消，则抛出错误
+      // 检查是否已取消
       if (this.isCancelled) {
-        throw new UploadError(
-          UploadErrorType.UNKNOWN_ERROR,
-          '上传已被用户取消'
-        );
+        throw new UploadError(UploadErrorType.CANCEL_ERROR, '上传已取消');
       }
 
       // 合并分片
-      const result = await this.mergeChunks(
-        this.currentFileId,
-        file.name,
-        chunks.length
-      );
+      const result = await this.mergeChunks(fileId, file.name, chunks.length);
 
-      // 执行后置钩子
-      await this.runPluginHook('afterUpload', {
-        result,
-        fileId: this.currentFileId,
+      // 更新性能统计
+      if (this.options.enablePerformanceMonitoring) {
+        this.finishPerformanceTracking(fileId, true);
+      }
+
+      // 从活动上传集合移除
+      this.activeUploads.delete(fileId);
+
+      // 触发上传完成事件
+      this.emit('uploadComplete', {
+        ...result,
+        fileId,
+        fileName: file.name,
+        fileSize: file.size,
       });
 
-      // 发送完成事件
-      this.emit('complete', result);
-
-      // 同时触发uploadComplete事件，确保ProgressPlugin能接收到
-      this.emit('uploadComplete', this.currentFileId);
-
-      // 从活动上传中移除
-      this.activeUploads.delete(this.currentFileId);
+      // 调用插件钩子
+      await this.runPluginHook('afterUpload', {
+        file,
+        fileId,
+        result,
+        options: this.options,
+      });
 
       return result;
     } catch (error) {
-      const uploadError = this.errorCenter.handle(error);
+      // 处理错误
+      let uploadError: UploadError;
 
-      // 如果不是因取消造成的错误，才发送错误事件
-      if (!this.isCancelled) {
-        this.emit('error', uploadError);
+      if (error instanceof UploadError) {
+        uploadError = error;
+      } else {
+        uploadError = new UploadError(
+          UploadErrorType.UNKNOWN_ERROR,
+          error.message || '上传失败',
+          error
+        );
       }
 
-      // 如果有当前文件ID，从活动上传中移除
+      // 更新性能统计
+      if (this.options.enablePerformanceMonitoring && this.currentFileId) {
+        this.finishPerformanceTracking(this.currentFileId, false);
+      }
+
+      // 从活动上传集合移除
       if (this.currentFileId) {
         this.activeUploads.delete(this.currentFileId);
       }
 
-      throw uploadError;
-    } finally {
-      // 清理资源
+      // 发出错误事件
+      this.emit('error', uploadError);
+
+      // 调用插件钩子
+      await this.runPluginHook('onError', {
+        error: uploadError,
+        file,
+        fileId: this.currentFileId,
+        options: this.options,
+      });
+
+      // 清理
       this.cleanup();
+
+      throw uploadError;
     }
   }
 
@@ -407,13 +927,18 @@ export class UploaderCore {
    * @returns 文件分片信息
    */
   public async prepareFile(file: AnyFile): Promise<ChunkInfo[]> {
-    this.validateFile(file);
+    await this.validateFile(file);
 
-    // 选择上传策略
-    const strategy = await this.selectUploadStrategy(file);
+    // 获取网络质量
+    const networkQuality = this.networkDetector
+      ? this.networkDetector.getNetworkQuality()
+      : NetworkQuality.MEDIUM;
+
+    // 动态确定分片大小
+    const chunkSize = this.getDynamicChunkSize(file.size, networkQuality);
 
     // 创建分片
-    return this.createChunks(file, strategy.chunkSize);
+    return this.createChunks(file, chunkSize);
   }
 
   /**
@@ -1146,6 +1671,314 @@ export class UploaderCore {
   private cleanup(): void {
     // 清空当前文件ID
     this.currentFileId = null;
+  }
+
+  /**
+   * 动态调整分片大小
+   * @param fileSize 文件大小
+   * @param networkQuality 网络质量
+   */
+  private getDynamicChunkSize(
+    fileSize: number,
+    networkQuality: NetworkQuality
+  ): number {
+    // 如果用户明确设置了分片大小且不是'auto'，则使用用户设置
+    if (typeof this.options.chunkSize === 'number') {
+      return this.options.chunkSize;
+    }
+
+    // 获取当前默认策略的分片大小
+    const defaultStrategy = this.uploadStrategies.get('default');
+    const baseChunkSize = defaultStrategy
+      ? defaultStrategy.chunkSize
+      : 2 * 1024 * 1024;
+
+    // 基于文件大小的基本调整
+    let chunkSize = baseChunkSize;
+
+    // 大文件使用较大分片
+    if (fileSize > 1024 * 1024 * 1024) {
+      // 1GB
+      chunkSize = Math.max(chunkSize, 8 * 1024 * 1024); // 8MB
+    } else if (fileSize > 100 * 1024 * 1024) {
+      // 100MB
+      chunkSize = Math.max(chunkSize, 4 * 1024 * 1024); // 4MB
+    } else if (fileSize < 10 * 1024 * 1024) {
+      // 10MB
+      chunkSize = Math.min(chunkSize, 1 * 1024 * 1024); // 1MB
+    }
+
+    // 基于网络质量的调整
+    switch (networkQuality) {
+      case NetworkQuality.POOR:
+        chunkSize = Math.min(chunkSize, 256 * 1024); // 最大256KB
+        break;
+      case NetworkQuality.LOW:
+        chunkSize = Math.min(chunkSize, 512 * 1024); // 最大512KB
+        break;
+      case NetworkQuality.MEDIUM:
+        // 保持原来的大小
+        break;
+      case NetworkQuality.GOOD:
+        chunkSize = Math.min(chunkSize * 1.5, 8 * 1024 * 1024); // 增加50%但不超过8MB
+        break;
+      case NetworkQuality.EXCELLENT:
+        chunkSize = Math.min(chunkSize * 2, 10 * 1024 * 1024); // 翻倍但不超过10MB
+        break;
+    }
+
+    // 基于内存状态调整
+    const memoryStats = MemoryManager.getMemoryStats();
+    if (memoryStats.usageRatio > 0.8) {
+      // 高内存使用率，减小分片
+      chunkSize = Math.min(chunkSize, 1 * 1024 * 1024); // 最大1MB
+    } else if (
+      memoryStats.usageRatio < 0.3 &&
+      this.deviceCapabilities.memory !== 'low'
+    ) {
+      // 低内存使用率，可以适当增加
+      chunkSize = Math.min(chunkSize * 1.2, 10 * 1024 * 1024); // 增加20%但不超过10MB
+    }
+
+    // 确保分片大小在合理范围内
+    chunkSize = Math.max(this.adaptiveStrategies.minChunkSize, chunkSize);
+    chunkSize = Math.min(this.adaptiveStrategies.maxChunkSize, chunkSize);
+
+    // 确保分片数量合理 (避免过多分片)
+    const maxChunks = 10000; // 最大分片数量
+    const minChunkSize = Math.max(fileSize / maxChunks, 16 * 1024); // 至少16KB
+    chunkSize = Math.max(chunkSize, minChunkSize);
+
+    return Math.floor(chunkSize);
+  }
+
+  /**
+   * 开始统计文件上传性能
+   * @param fileId 文件ID
+   */
+  private startPerformanceTracking(fileId: string, fileSize: number): void {
+    this.uploadStartTime[fileId] = Date.now();
+    this.uploadPerformance[fileId] = {
+      fileId,
+      fileSize,
+      startTime: this.uploadStartTime[fileId],
+      endTime: 0,
+      duration: 0,
+      avgSpeed: 0,
+      chunks: {
+        total: 0,
+        completed: 0,
+        failed: 0,
+        retried: 0,
+      },
+      bytesUploaded: 0,
+    };
+  }
+
+  /**
+   * 更新文件上传性能统计
+   * @param fileId 文件ID
+   * @param chunkInfo 分片信息
+   * @param status 状态：'completed'|'failed'|'retried'
+   */
+  private updatePerformanceStats(
+    fileId: string,
+    chunkInfo: ChunkInfo,
+    status: 'completed' | 'failed' | 'retried'
+  ): void {
+    if (!this.uploadPerformance[fileId]) return;
+
+    const stats = this.uploadPerformance[fileId];
+
+    // 更新分片计数
+    if (status === 'completed') {
+      stats.chunks.completed += 1;
+      stats.bytesUploaded += chunkInfo.size;
+    } else if (status === 'failed') {
+      stats.chunks.failed += 1;
+    } else if (status === 'retried') {
+      stats.chunks.retried += 1;
+    }
+
+    // 计算当前上传速度
+    const now = Date.now();
+    const elapsed = now - stats.startTime;
+    if (elapsed > 0) {
+      stats.avgSpeed = (stats.bytesUploaded / elapsed) * 1000; // 字节/秒
+    }
+
+    // 发出性能更新事件
+    this.emit('performanceUpdate', {
+      fileId,
+      ...stats,
+      currentTime: now,
+    });
+  }
+
+  /**
+   * 完成文件上传性能统计
+   * @param fileId 文件ID
+   * @param success 是否成功
+   */
+  private finishPerformanceTracking(fileId: string, success: boolean): void {
+    if (!this.uploadPerformance[fileId]) return;
+
+    const stats = this.uploadPerformance[fileId];
+    const now = Date.now();
+
+    stats.endTime = now;
+    stats.duration = now - stats.startTime;
+    stats.success = success;
+
+    if (stats.duration > 0) {
+      stats.avgSpeed = (stats.bytesUploaded / stats.duration) * 1000; // 字节/秒
+    }
+
+    // 发出性能报告事件
+    this.emit('performanceReport', stats);
+  }
+
+  /**
+   * 设置上传策略
+   * @param name 策略名称
+   * @param strategy 上传策略
+   */
+  public setUploadStrategy(name: string, strategy: UploadStrategy): this {
+    this.uploadStrategies.set(name, { ...strategy });
+    return this;
+  }
+
+  /**
+   * 获取上传策略
+   * @param name 策略名称
+   */
+  public getUploadStrategy(name = 'default'): UploadStrategy | undefined {
+    return this.uploadStrategies.get(name);
+  }
+
+  /**
+   * 切换上传策略
+   * @param name 策略名称
+   */
+  public switchUploadStrategy(name: string): boolean {
+    const strategy = this.uploadStrategies.get(name);
+    if (!strategy) return false;
+
+    // 更新默认策略
+    this.uploadStrategies.set('default', { ...strategy });
+
+    // 更新调度器配置
+    this.scheduler.updateConfig({
+      concurrency: strategy.concurrency,
+      retryCount: strategy.retryCount,
+      retryDelay: strategy.retryDelay,
+      timeout: strategy.timeout,
+    });
+
+    // 发出策略变更事件
+    this.emit('strategyChange', {
+      reason: 'manual',
+      strategy: name,
+    });
+
+    return true;
+  }
+
+  /**
+   * 配置自适应策略选项
+   * @param options 自适应策略选项
+   */
+  public configureAdaptiveStrategy(
+    options: Partial<AdaptiveStrategyOptions>
+  ): this {
+    this.adaptiveStrategies = {
+      ...this.adaptiveStrategies,
+      ...options,
+    };
+
+    return this;
+  }
+
+  /**
+   * 启用自适应上传
+   */
+  public enableAdaptiveUploads(): this {
+    this.options.enableAdaptiveUploads = true;
+    this.adaptiveStrategies.enabled = true;
+    return this;
+  }
+
+  /**
+   * 禁用自适应上传
+   */
+  public disableAdaptiveUploads(): this {
+    this.options.enableAdaptiveUploads = false;
+    this.adaptiveStrategies.enabled = false;
+    return this;
+  }
+
+  /**
+   * 获取上传性能统计
+   * @param fileId 文件ID，如果不提供则返回所有文件的统计
+   */
+  public getUploadPerformanceStats(
+    fileId?: string
+  ): UploadPerformanceStats | Record<string, UploadPerformanceStats> {
+    if (fileId) {
+      return this.uploadPerformance[fileId] || {};
+    }
+    return this.uploadPerformance;
+  }
+
+  /**
+   * 获取环境信息
+   */
+  public getEnvironmentInfo(): {
+    environment: Environment;
+    capabilities: DeviceCapability;
+    browser?: { name: string; version: string };
+  } {
+    const info: any = {
+      environment: this.environment,
+      capabilities: this.deviceCapabilities,
+    };
+
+    if (this.environment === Environment.Browser) {
+      info.browser = EnvUtils.getBrowserInfo();
+    }
+
+    return info;
+  }
+
+  /**
+   * 获取当前内存使用情况
+   */
+  public getMemoryUsage(): {
+    usageRatio: number;
+    used: number;
+    total: number;
+    limit: number;
+  } {
+    return MemoryManager.getMemoryInfo();
+  }
+
+  /**
+   * 获取当前网络状态
+   */
+  public getNetworkStatus(): {
+    status: string;
+    quality: NetworkQuality;
+    condition?: any;
+  } {
+    if (!this.networkDetector) {
+      return { status: 'unknown', quality: NetworkQuality.UNKNOWN };
+    }
+
+    return {
+      status: this.networkDetector.getNetworkStatus(),
+      quality: this.networkDetector.getNetworkQuality(),
+      condition: this.networkDetector.getNetworkCondition(),
+    };
   }
 }
 
