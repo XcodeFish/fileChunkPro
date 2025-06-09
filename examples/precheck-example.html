@@ -1,0 +1,530 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>fileChunkPro 秒传功能示例</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+      max-width: 800px;
+      margin: 0 auto;
+      padding: 20px;
+    }
+
+    .container {
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 20px;
+      margin: 20px 0;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    .drop-area {
+      border: 2px dashed #ccc;
+      border-radius: 8px;
+      padding: 30px;
+      text-align: center;
+      cursor: pointer;
+      margin-bottom: 20px;
+      transition: all 0.3s;
+    }
+
+    .drop-area:hover,
+    .drop-area.dragover {
+      border-color: #2196f3;
+      background-color: rgba(33, 150, 243, 0.05);
+    }
+
+    .file-list {
+      margin-top: 20px;
+    }
+
+    .file-item {
+      display: flex;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid #eee;
+    }
+
+    .file-name {
+      flex-grow: 1;
+      margin-right: 10px;
+      white-space: nowrap;
+      overflow: hidden;
+      text-overflow: ellipsis;
+    }
+
+    .file-size {
+      color: #666;
+      margin-right: 10px;
+    }
+
+    .file-status {
+      min-width: 80px;
+      text-align: right;
+    }
+
+    .progress-bar {
+      height: 6px;
+      background: #f0f0f0;
+      border-radius: 3px;
+      overflow: hidden;
+      margin-top: 5px;
+    }
+
+    .progress-bar-inner {
+      height: 100%;
+      background: #4caf50;
+      width: 0;
+      transition: width 0.3s;
+    }
+
+    .status-success {
+      color: #4caf50;
+    }
+
+    .status-error {
+      color: #f44336;
+    }
+
+    .status-processing {
+      color: #2196f3;
+    }
+
+    .status-skipped {
+      color: #ff9800;
+    }
+
+    .file-hash {
+      font-size: 12px;
+      color: #666;
+      margin-top: 5px;
+      word-break: break-all;
+    }
+
+    .log-container {
+      margin-top: 20px;
+      border: 1px solid #e0e0e0;
+      border-radius: 4px;
+      padding: 10px;
+      height: 200px;
+      overflow-y: auto;
+      background: #f9f9f9;
+      font-family: monospace;
+      font-size: 12px;
+    }
+
+    .log-entry {
+      margin: 5px 0;
+      padding: 3px 0;
+      border-bottom: 1px solid #eee;
+    }
+
+    .log-time {
+      color: #666;
+    }
+
+    .log-info {
+      color: #2196f3;
+    }
+
+    .log-warn {
+      color: #ff9800;
+    }
+
+    .log-error {
+      color: #f44336;
+    }
+
+    .config-panel {
+      margin-bottom: 20px;
+    }
+
+    .form-group {
+      margin-bottom: 10px;
+    }
+
+    .button-group {
+      margin-top: 15px;
+    }
+
+    button {
+      padding: 8px 16px;
+      background: #2196f3;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      margin-right: 10px;
+    }
+
+    button:hover {
+      background: #0b7dda;
+    }
+
+    button:disabled {
+      background: #cccccc;
+      cursor: not-allowed;
+    }
+
+    .checkbox-group {
+      display: flex;
+      align-items: center;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="header">
+    <h1>fileChunkPro 秒传功能示例</h1>
+    <p>演示文件秒传功能实现，可多次上传相同文件测试秒传效果</p>
+  </div>
+
+  <div class="container">
+    <div class="config-panel">
+      <div class="form-group">
+        <label>
+          <input type="checkbox" id="enable-precheck" checked>
+          启用秒传功能
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label for="hash-algorithm">哈希算法：</label>
+        <select id="hash-algorithm">
+          <option value="md5">MD5 (推荐)</option>
+          <option value="sha1">SHA-1</option>
+          <option value="simple">简单哈希 (性能优先)</option>
+        </select>
+      </div>
+
+      <div class="form-group">
+        <label>
+          <input type="checkbox" id="enable-quick-hash" checked>
+          启用快速哈希 (适用于大文件)
+        </label>
+      </div>
+
+      <div class="form-group">
+        <label>
+          <input type="checkbox" id="use-worker" checked>
+          使用 Worker 线程计算哈希
+        </label>
+      </div>
+    </div>
+
+    <div class="drop-area" id="drop-area">
+      <p>拖放文件到这里或点击选择文件</p>
+      <input type="file" id="file-input" style="display: none;">
+    </div>
+
+    <div class="file-list" id="file-list"></div>
+
+    <div class="button-group">
+      <button id="upload-button" disabled>开始上传</button>
+      <button id="clear-button">清除记录</button>
+    </div>
+  </div>
+
+  <div class="container">
+    <h3>上传日志</h3>
+    <div class="log-container" id="log-container"></div>
+  </div>
+
+  <script src="../dist/browser/fileChunkPro.umd.js"></script>
+  <script>
+    // 配置上传器
+    const uploader = new fileChunkPro.default({
+      endpoint: 'https://httpbin.org/post', // 示例服务端，实际应使用真实服务端
+      chunkSize: 1024 * 1024, // 1MB
+      concurrency: 3,
+      timeout: 30000,
+      autoRetry: true,
+      retryCount: 3,
+      enablePrecheck: true
+    })
+
+    // 页面元素
+    const dropArea = document.getElementById('drop-area')
+    const fileInput = document.getElementById('file-input')
+    const fileList = document.getElementById('file-list')
+    const uploadButton = document.getElementById('upload-button')
+    const clearButton = document.getElementById('clear-button')
+    const logContainer = document.getElementById('log-container')
+
+    // 配置元素
+    const enablePrecheckCheckbox = document.getElementById('enable-precheck')
+    const hashAlgorithmSelect = document.getElementById('hash-algorithm')
+    const enableQuickHashCheckbox = document.getElementById('enable-quick-hash')
+    const useWorkerCheckbox = document.getElementById('use-worker')
+
+    // 上传文件列表
+    const files = []
+
+    // 日志函数
+    function log (level, message)
+    {
+      const time = new Date().toLocaleTimeString()
+      const entry = document.createElement('div')
+      entry.className = `log-entry log-${level}`
+      entry.innerHTML = `<span class="log-time">[${time}]</span> ${message}`
+      logContainer.appendChild(entry)
+      logContainer.scrollTop = logContainer.scrollHeight
+    }
+
+    // 格式化文件大小
+    function formatFileSize (bytes)
+    {
+      if (bytes < 1024) return bytes + ' B'
+      if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(2) + ' KB'
+      if (bytes < 1024 * 1024 * 1024) return (bytes / (1024 * 1024)).toFixed(2) + ' MB'
+      return (bytes / (1024 * 1024 * 1024)).toFixed(2) + ' GB'
+    }
+
+    // 更新上传按钮状态
+    function updateUploadButtonState ()
+    {
+      uploadButton.disabled = files.length === 0
+    }
+
+    // 添加文件到列表
+    function addFileToList (file)
+    {
+      const fileId = Date.now() + '_' + file.name
+      const fileItem = document.createElement('div')
+      fileItem.className = 'file-item'
+      fileItem.dataset.fileId = fileId
+
+      fileItem.innerHTML = `
+        <div class="file-name">${file.name}</div>
+        <div class="file-size">${formatFileSize(file.size)}</div>
+        <div class="file-status">等待上传</div>
+      `
+
+      fileList.appendChild(fileItem)
+
+      files.push({
+        file,
+        fileId,
+        status: 'pending'
+      })
+
+      updateUploadButtonState()
+      log('info', `添加文件: ${file.name} (${formatFileSize(file.size)})`)
+    }
+
+    // 更新文件状态
+    function updateFileStatus (fileId, status, message)
+    {
+      const fileItem = document.querySelector(`.file-item[data-file-id="${fileId}"]`)
+      if (!fileItem) return
+
+      const statusElem = fileItem.querySelector('.file-status')
+
+      switch (status) {
+        case 'processing':
+          statusElem.textContent = message || '处理中...'
+          statusElem.className = 'file-status status-processing'
+          break
+        case 'uploading':
+          if (!fileItem.querySelector('.progress-bar')) {
+            const progressBar = document.createElement('div')
+            progressBar.className = 'progress-bar'
+            progressBar.innerHTML = '<div class="progress-bar-inner"></div>'
+            fileItem.appendChild(progressBar)
+          }
+          statusElem.textContent = message || '上传中...'
+          statusElem.className = 'file-status status-processing'
+          break
+        case 'success':
+          statusElem.textContent = message || '上传成功'
+          statusElem.className = 'file-status status-success'
+          break
+        case 'error':
+          statusElem.textContent = message || '上传失败'
+          statusElem.className = 'file-status status-error'
+          break
+        case 'skipped':
+          statusElem.textContent = message || '秒传成功'
+          statusElem.className = 'file-status status-skipped'
+          break
+      }
+    }
+
+    // 更新进度条
+    function updateProgress (fileId, progress)
+    {
+      const fileItem = document.querySelector(`.file-item[data-file-id="${fileId}"]`)
+      if (!fileItem) return
+
+      const progressBarInner = fileItem.querySelector('.progress-bar-inner')
+      if (progressBarInner) {
+        progressBarInner.style.width = `${progress * 100}%`
+      }
+    }
+
+    // 添加文件哈希信息
+    function addFileHash (fileId, hash, hashTime)
+    {
+      const fileItem = document.querySelector(`.file-item[data-file-id="${fileId}"]`)
+      if (!fileItem) return
+
+      let hashInfo = fileItem.querySelector('.file-hash')
+
+      if (!hashInfo) {
+        hashInfo = document.createElement('div')
+        hashInfo.className = 'file-hash'
+        fileItem.appendChild(hashInfo)
+      }
+
+      hashInfo.textContent = `文件哈希: ${hash} (计算耗时: ${hashTime}ms)`
+    }
+
+    // 开始上传
+    function startUpload ()
+    {
+      // 获取配置
+      const enablePrecheck = enablePrecheckCheckbox.checked
+      const hashAlgorithm = hashAlgorithmSelect.value
+      const enableQuickHash = enableQuickHashCheckbox.checked
+      const useWorker = useWorkerCheckbox.checked
+
+      // 更新配置
+      uploader.setOptions({
+        enablePrecheck,
+        precheckOptions: {
+          algorithm: hashAlgorithm,
+          quickHash: enableQuickHash,
+          useWorker: useWorker
+        }
+      })
+
+      // 上传所有等待中的文件
+      files.forEach(fileInfo =>
+      {
+        if (fileInfo.status === 'pending') {
+          uploadFile(fileInfo)
+        }
+      })
+    }
+
+    // 上传单个文件
+    function uploadFile (fileInfo)
+    {
+      const { file, fileId } = fileInfo
+      fileInfo.status = 'processing'
+
+      updateFileStatus(fileId, 'processing')
+      log('info', `开始处理文件: ${file.name}`)
+
+      // 监听预检事件
+      const precheckHandler = (result) =>
+      {
+        log('info', `文件预检结果: ${file.name}, 哈希值: ${result.fileHash}`)
+        addFileHash(fileId, result.fileHash, result.hashTime)
+
+        if (result.exists) {
+          log('info', `文件已存在于服务器，跳过上传: ${file.name}`)
+        }
+      }
+
+      // 添加自定义预检回调
+      uploader.once('precheck', precheckHandler)
+
+      // 开始上传
+      uploader.upload(file)
+        .on('progress', (progress) =>
+        {
+          updateProgress(fileId, progress.percent / 100)
+          updateFileStatus(fileId, 'uploading', `上传中 ${Math.floor(progress.percent)}%`)
+        })
+        .on('success', (result) =>
+        {
+          fileInfo.status = 'success'
+
+          // 检查是否为秒传
+          if (result.skipUpload) {
+            updateFileStatus(fileId, 'skipped', '秒传成功')
+            log('info', `文件秒传成功: ${file.name}`)
+          } else {
+            updateFileStatus(fileId, 'success')
+            log('info', `文件上传成功: ${file.name}`)
+          }
+        })
+        .on('error', (error) =>
+        {
+          fileInfo.status = 'error'
+          updateFileStatus(fileId, 'error', `失败: ${error.message}`)
+          log('error', `文件上传失败: ${file.name}, 错误: ${error.message}`)
+        })
+        .on('complete', () =>
+        {
+          // 清理事件监听
+          uploader.off('precheck', precheckHandler)
+        })
+    }
+
+    // 清除文件列表
+    function clearFileList ()
+    {
+      fileList.innerHTML = ''
+      files.length = 0
+      updateUploadButtonState()
+      log('info', '已清除文件列表')
+    }
+
+    // 事件监听
+    dropArea.addEventListener('click', () =>
+    {
+      fileInput.click()
+    })
+
+    fileInput.addEventListener('change', (e) =>
+    {
+      if (e.target.files.length > 0) {
+        for (const file of e.target.files) {
+          addFileToList(file)
+        }
+        fileInput.value = ''
+      }
+    })
+
+    dropArea.addEventListener('dragover', (e) =>
+    {
+      e.preventDefault()
+      dropArea.classList.add('dragover')
+    })
+
+    dropArea.addEventListener('dragleave', () =>
+    {
+      dropArea.classList.remove('dragover')
+    })
+
+    dropArea.addEventListener('drop', (e) =>
+    {
+      e.preventDefault()
+      dropArea.classList.remove('dragover')
+
+      if (e.dataTransfer.files.length > 0) {
+        for (const file of e.dataTransfer.files) {
+          addFileToList(file)
+        }
+      }
+    })
+
+    uploadButton.addEventListener('click', startUpload)
+    clearButton.addEventListener('click', clearFileList)
+
+    // 初始化日志
+    log('info', '秒传功能示例已加载，请添加文件并点击上传按钮')
+    log('info', '提示：多次上传相同文件可测试秒传功能');
+  </script>
+</body>
+
+</html>
