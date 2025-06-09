@@ -318,8 +318,17 @@ export class ChunkPlugin implements IPlugin {
 
     // 获取网络质量
     let networkQuality: NetworkQuality = 'unknown';
-    if (this.networkDetector) {
-      networkQuality = await this.networkDetector.detectNetworkQuality();
+    if (
+      this.networkDetector &&
+      typeof this.networkDetector.detectNetworkQuality === 'function'
+    ) {
+      try {
+        networkQuality = await this.networkDetector.detectNetworkQuality();
+      } catch (error) {
+        // 如果网络检测失败，使用默认的网络质量
+        console.error('网络质量检测失败', error);
+        networkQuality = 'unknown';
+      }
     }
 
     // 根据网络质量调整基础分片大小

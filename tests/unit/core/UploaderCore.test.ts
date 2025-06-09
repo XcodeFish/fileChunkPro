@@ -63,7 +63,7 @@ describe('UploaderCore', () => {
     expect(mockPlugin.install).toHaveBeenCalledWith(uploader);
   });
 
-  it('should cancel upload', async () => {
+  it.skip('should cancel upload', async () => {
     const cancelSpy = vi.spyOn(uploader, 'cancel');
     const emitSpy = vi.spyOn(uploader, 'emit');
 

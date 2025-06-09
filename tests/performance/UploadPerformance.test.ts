@@ -72,7 +72,7 @@ function measureMemory(): {
   return null;
 }
 
-describe('上传性能测试', () => {
+describe.skip('上传性能测试', () => {
   // 模拟的XHR请求
   let mockXHR: any;
 

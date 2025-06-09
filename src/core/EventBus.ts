@@ -227,6 +227,13 @@ export class EventBus {
   }
 
   /**
+   * 清除所有事件监听器（与removeAllListeners功能相同）
+   */
+  public clear(): void {
+    this.removeAllListeners();
+  }
+
+  /**
    * 获取指定事件的监听器数量
    * @param event 事件名称
    * @returns 监听器数量
