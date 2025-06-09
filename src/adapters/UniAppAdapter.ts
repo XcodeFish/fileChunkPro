@@ -8,104 +8,95 @@
  */
 
 import { UploadError } from '../core/ErrorCenter';
-import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
+import { UploadErrorType } from '../types';
 import { Logger } from '../utils/Logger';
+
+import {
+  BaseFrameworkAdapter,
+  BaseFrameworkAdapterOptions,
+  SupportedFramework,
+} from './base/BaseFrameworkAdapter';
+import { FileInfo, IResponse, IStorage, RequestOptions } from './interfaces';
+import { BrowserStorage } from './storage/BrowserStorage';
+import { MiniProgramStorage } from './storage/MiniProgramStorage';
 
 // 确保uni对象在类型系统中可用
 declare const uni: any;
+declare const plus: any;
+declare const process: any;
 
-// UniApp适配器配置接口
-interface UniAppAdapterOptions {
-  timeout?: number; // 请求超时时间
-  maxRetries?: number; // 最大重试次数
-  progressCallback?: (progress: number) => void; // 上传进度回调
-  abortSignal?: { aborted: boolean }; // 中止信号
-  withCredentials?: boolean; // 是否携带凭证
+/**
+ * UniApp适配器配置接口
+ */
+export type UniAppAdapterOptions = BaseFrameworkAdapterOptions;
+
+/**
+ * uni-app平台类型
+ */
+enum UniAppPlatform {
+  APP = 'app', // App(Android/iOS)
+  APP_PLUS = 'app-plus', // App(Android/iOS)
+  H5 = 'h5', // H5
+  MP_WEIXIN = 'mp-weixin', // 微信小程序
+  MP_ALIPAY = 'mp-alipay', // 支付宝小程序
+  MP_BAIDU = 'mp-baidu', // 百度小程序
+  MP_TOUTIAO = 'mp-toutiao', // 字节跳动小程序
+  MP_QQ = 'mp-qq', // QQ小程序
+  MP_KUAISHOU = 'mp-kuaishou', // 快手小程序
+  MP_LARK = 'mp-lark', // 飞书小程序
+  MP_JD = 'mp-jd', // 京东小程序
+  QUICKAPP_WEBVIEW = 'quickapp-webview', // 快应用Webview
+  QUICKAPP_NATIVE = 'quickapp-native', // 快应用原生
+  UNKNOWN = 'unknown', // 未知环境
 }
 
-export default class UniAppAdapter implements IUploadAdapter {
-  private timeout: number;
-  private maxRetries: number;
-  private progressCallback?: (progress: number) => void;
-  private abortSignal?: { aborted: boolean };
-  private withCredentials: boolean;
-  private networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
+/**
+ * uni-app框架适配器
+ * 用于uni-app跨平台开发框架的文件上传适配
+ */
+export default class UniAppAdapter extends BaseFrameworkAdapter {
   private logger: Logger;
-  private currentPlatform: string;
+  private uniPlatform: UniAppPlatform = UniAppPlatform.UNKNOWN;
+  private storage: IStorage | null = null;
 
   /**
    * 创建uni-app框架适配器实例
    * @param options 适配器配置选项
    */
   constructor(options: UniAppAdapterOptions = {}) {
-    this.timeout = options.timeout || 30000; // 默认30秒超时
-    this.maxRetries = options.maxRetries || 3;
-    this.progressCallback = options.progressCallback;
-    this.abortSignal = options.abortSignal;
-    this.withCredentials = options.withCredentials || false;
-    this.logger = new Logger('UniAppAdapter');
+    // 设置框架类型为uni-app
+    super({
+      ...options,
+      frameworkApi: typeof uni !== 'undefined' ? uni : null,
+    });
 
-    // 检测当前uni-app运行的平台
-    this.currentPlatform = this.detectUniAppPlatform();
+    this.frameworkType = SupportedFramework.UniApp;
+    this.logger = new Logger('UniAppAdapter');
 
     // 检测并警告worker设置
     if ((options as any).useWorker) {
       this.logger.warn('uni-app环境不支持Web Worker，已自动禁用此功能');
     }
-
-    // 验证uni-app环境
-    this.validateEnvironment();
   }
 
   /**
-   * 检测当前uni-app运行的平台
-   * @private
+   * 验证uni-app框架API是否可用
+   * @protected
    */
-  private detectUniAppPlatform(): string {
-    if (typeof uni === 'undefined') {
-      return 'unknown';
-    }
+  protected validateFrameworkAPI(): void {
+    super.validateFrameworkAPI();
 
-    // 使用uni.getSystemInfoSync获取平台信息
-    try {
-      const systemInfo = uni.getSystemInfoSync();
-      if (systemInfo && systemInfo.platform) {
-        // 平台可能是：android、ios、windows、mac、devtools等
-        return systemInfo.platform;
-      }
-
-      // 尝试检查运行环境
-      if (systemInfo && systemInfo.uniPlatform) {
-        return systemInfo.uniPlatform;
-      }
-    } catch (error) {
-      this.logger.warn(`获取uni-app平台信息失败: ${error}`);
-    }
-
-    // 尝试从process.env获取
-    if (process && process.env && process.env.UNI_PLATFORM) {
-      return process.env.UNI_PLATFORM;
-    }
-
-    return 'unknown';
-  }
-
-  /**
-   * 验证uni-app环境是否可用
-   * @private
-   */
-  private validateEnvironment(): void {
-    if (typeof uni === 'undefined') {
+    if (typeof this.frameworkApi !== 'object') {
       throw new UploadError(
         UploadErrorType.ENVIRONMENT_ERROR,
-        '当前不是uni-app环境，无法使用uni-app适配器'
+        '当前不是有效的uni-app环境，无法使用uni-app适配器'
       );
     }
 
     // 检查基本API是否可用
     if (
-      typeof uni.request !== 'function' ||
-      typeof uni.uploadFile !== 'function'
+      typeof this.frameworkApi.request !== 'function' ||
+      typeof this.frameworkApi.uploadFile !== 'function'
     ) {
       throw new UploadError(
         UploadErrorType.ENVIRONMENT_ERROR,
@@ -115,28 +106,100 @@ export default class UniAppAdapter implements IUploadAdapter {
   }
 
   /**
+   * 检测uni-app运行的平台
+   * @protected
+   */
+  protected detectPlatform(): void {
+    // 从环境变量获取
+    if (
+      typeof process !== 'undefined' &&
+      process.env &&
+      process.env.UNI_PLATFORM
+    ) {
+      this.currentPlatform = process.env.UNI_PLATFORM;
+      this.uniPlatform =
+        (process.env.UNI_PLATFORM as UniAppPlatform) || UniAppPlatform.UNKNOWN;
+      return;
+    }
+
+    // 从uni运行时获取
+    try {
+      const systemInfo = this.frameworkApi.getSystemInfoSync();
+
+      // 尝试从系统信息中获取平台信息
+      if (systemInfo && systemInfo.uniPlatform) {
+        this.currentPlatform = systemInfo.uniPlatform;
+        this.uniPlatform =
+          (systemInfo.uniPlatform as UniAppPlatform) || UniAppPlatform.UNKNOWN;
+        return;
+      }
+
+      // 通过环境特征推断平台
+      if (typeof plus !== 'undefined') {
+        this.currentPlatform = 'app';
+        this.uniPlatform = UniAppPlatform.APP;
+      } else if (
+        typeof window !== 'undefined' &&
+        typeof document !== 'undefined'
+      ) {
+        this.currentPlatform = 'h5';
+        this.uniPlatform = UniAppPlatform.H5;
+      } else {
+        // 小程序环境判断
+        if (systemInfo && systemInfo.platform) {
+          if (
+            systemInfo.platform.includes('ios') ||
+            systemInfo.platform.includes('android')
+          ) {
+            this.currentPlatform = 'app';
+            this.uniPlatform = UniAppPlatform.APP;
+          } else {
+            this.currentPlatform = systemInfo.platform;
+          }
+        }
+
+        // 如果是小程序环境，可以通过特定的API判断类型
+        if (typeof this.frameworkApi.__wxjs_environment !== 'undefined') {
+          this.currentPlatform = 'mp-weixin';
+          this.uniPlatform = UniAppPlatform.MP_WEIXIN;
+        } else if (
+          typeof this.frameworkApi.canIUse === 'function' &&
+          this.frameworkApi.canIUse('getAccountInfoSync')
+        ) {
+          this.currentPlatform = 'mp-weixin';
+          this.uniPlatform = UniAppPlatform.MP_WEIXIN;
+        }
+      }
+    } catch (error) {
+      this.logger.error('检测uni-app平台失败:', error);
+      this.currentPlatform = 'unknown';
+      this.uniPlatform = UniAppPlatform.UNKNOWN;
+    }
+  }
+
+  /**
    * 从文件中读取指定范围的数据块
-   * @param filePath 文件路径
+   * @param file 文件对象、文件路径或文件ID
    * @param start 起始字节位置
    * @param size 要读取的字节数
    * @returns Promise<ArrayBuffer> 读取的数据块
    */
   async readChunk(
-    filePath: string,
+    file: any,
     start: number,
     size: number
   ): Promise<ArrayBuffer> {
     try {
-      // 检查文件路径是否有效
-      if (!filePath || typeof filePath !== 'string') {
-        throw new UploadError(UploadErrorType.FILE_ERROR, '无效的文件路径');
+      // 检查文件是否有效
+      if (!file) {
+        throw new UploadError(UploadErrorType.FILE_ERROR, '无效的文件');
       }
 
-      // 不同平台的文件读取处理
+      // 根据平台不同采用不同的读取策略
       if (this.isH5Platform()) {
-        return this.readChunkInH5(filePath, start, size);
+        return this.readChunkInH5(file, start, size);
       } else {
-        return this.readChunkInMiniProgram(filePath, start, size);
+        return this.readChunkInMiniProgram(file, start, size);
       }
     } catch (error: any) {
       if (error instanceof UploadError) {
@@ -157,7 +220,7 @@ export default class UniAppAdapter implements IUploadAdapter {
    */
   private isH5Platform(): boolean {
     return (
-      this.currentPlatform === 'h5' ||
+      this.uniPlatform === UniAppPlatform.H5 ||
       (typeof window !== 'undefined' && typeof document !== 'undefined')
     );
   }
@@ -167,35 +230,40 @@ export default class UniAppAdapter implements IUploadAdapter {
    * @private
    */
   private async readChunkInH5(
-    filePath: string | File | Blob,
+    file: any,
     start: number,
     size: number
   ): Promise<ArrayBuffer> {
-    // 在H5环境，filePath可能是File对象或字符串
-    let file: File | Blob;
+    // 处理H5环境中的文件
+    let fileObj: File | Blob;
 
-    if (typeof filePath === 'string') {
+    if (typeof file === 'string') {
       throw new UploadError(
         UploadErrorType.FILE_ERROR,
         'H5环境不支持通过文件路径读取文件，请直接提供File对象'
       );
+    } else if (file instanceof File || file instanceof Blob) {
+      fileObj = file;
     } else {
-      file = filePath as File | Blob;
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '不支持的文件类型，请提供File或Blob对象'
+      );
     }
 
     // 检查文件大小与请求范围
-    if (start < 0 || start >= file.size) {
+    if (start < 0 || start >= fileObj.size) {
       throw new UploadError(
         UploadErrorType.FILE_ERROR,
-        `无效的读取起始位置：${start}，文件大小：${file.size}`
+        `无效的读取起始位置：${start}，文件大小：${fileObj.size}`
       );
     }
 
     // 调整读取大小，防止超出文件边界
-    const adjustedSize = Math.min(size, file.size - start);
+    const adjustedSize = Math.min(size, fileObj.size - start);
 
     // 使用slice方法获取指定范围的文件切片
-    const chunk = file.slice(start, start + adjustedSize);
+    const chunk = fileObj.slice(start, start + adjustedSize);
 
     // 使用FileReader将切片转换为ArrayBuffer
     return new Promise((resolve, reject) => {
@@ -218,13 +286,12 @@ export default class UniAppAdapter implements IUploadAdapter {
         reject(
           new UploadError(
             UploadErrorType.FILE_ERROR,
-            '文件读取失败',
+            '文件读取出错',
             reader.error
           )
         );
       };
 
-      // 读取为ArrayBuffer格式
       reader.readAsArrayBuffer(chunk);
     });
   }
@@ -238,131 +305,131 @@ export default class UniAppAdapter implements IUploadAdapter {
     start: number,
     size: number
   ): Promise<ArrayBuffer> {
-    // 获取文件系统管理器
-    const fs = uni.getFileSystemManager();
+    return new Promise((resolve, reject) => {
+      try {
+        // 检查文件系统管理器是否可用
+        const fs = this.frameworkApi.getFileSystemManager();
+        if (!fs || typeof fs.readFile !== 'function') {
+          reject(
+            new UploadError(
+              UploadErrorType.ENVIRONMENT_ERROR,
+              '当前环境不支持文件系统API'
+            )
+          );
+          return;
+        }
 
-    // 读取文件块
-    return new Promise<ArrayBuffer>((resolve, reject) => {
-      fs.readFile({
-        filePath,
-        position: start,
-        length: size,
-        success: (res: any) => {
-          // uni-app readFile返回的data可能是ArrayBuffer或string
-          const data = res.data;
-          if (data instanceof ArrayBuffer) {
-            resolve(data);
-          } else {
+        // uni-app小程序环境读取文件
+        fs.readFile({
+          filePath,
+          position: start,
+          length: size,
+          success: (res: any) => {
+            // 处理不同平台的返回格式差异
+            if (res.data instanceof ArrayBuffer) {
+              resolve(res.data);
+            } else if (res.data && res.data.buffer instanceof ArrayBuffer) {
+              resolve(res.data.buffer);
+            } else {
+              reject(
+                new UploadError(
+                  UploadErrorType.FILE_ERROR,
+                  '文件读取失败：无法获取ArrayBuffer格式的数据'
+                )
+              );
+            }
+          },
+          fail: (error: any) => {
             reject(
               new UploadError(
                 UploadErrorType.FILE_ERROR,
-                '无法以ArrayBuffer格式读取文件'
+                `读取文件失败: ${error.errMsg || JSON.stringify(error)}`,
+                error
               )
             );
-          }
-        },
-        fail: (err: any) => {
-          reject(
-            new UploadError(
-              UploadErrorType.FILE_ERROR,
-              `读取文件块失败: ${err.errMsg || JSON.stringify(err)}`,
-              err
-            )
-          );
-        },
-      });
+          },
+        });
+      } catch (error: any) {
+        reject(
+          new UploadError(
+            UploadErrorType.FILE_ERROR,
+            `文件系统API调用失败: ${error.message || JSON.stringify(error)}`,
+            error
+          )
+        );
+      }
     });
   }
 
   /**
-   * 上传数据块到指定URL
-   * @param url 上传端点URL
-   * @param chunk 要上传的数据块
-   * @param headers 请求头
-   * @param metadata 元数据，可选
-   * @returns Promise<any> 上传结果
+   * 上传数据块
+   * @param url 上传URL
+   * @param chunk 数据块
+   * @param headers HTTP请求头
+   * @param metadata 可选的元数据
    */
   async uploadChunk(
     url: string,
     chunk: ArrayBuffer,
     headers: Record<string, string>,
-    metadata?: { chunkIndex?: number; totalChunks?: number; fileName?: string }
+    metadata?: Record<string, any>
   ): Promise<any> {
-    const retries = 0;
-
-    // 使用可重试的上传方法
-    return this.attemptUpload(url, chunk, headers, metadata, retries);
+    try {
+      return await this.attemptUpload(url, chunk, headers, metadata);
+    } catch (error: any) {
+      throw new UploadError(
+        UploadErrorType.UPLOAD_ERROR,
+        `上传分片失败: ${error.message || JSON.stringify(error)}`,
+        error
+      );
+    }
   }
 
   /**
-   * 尝试上传，失败时递归重试
+   * 尝试上传，带重试逻辑
    * @private
    */
   private async attemptUpload(
     url: string,
     chunk: ArrayBuffer,
     headers: Record<string, string>,
-    metadata?: { chunkIndex?: number; totalChunks?: number; fileName?: string },
+    metadata?: Record<string, any>,
     currentRetry = 0
   ): Promise<any> {
     try {
-      // 检查是否应该取消请求
-      if (this.abortSignal?.aborted) {
-        throw new UploadError(UploadErrorType.CANCEL_ERROR, '上传已被取消');
-      }
-
-      // 处理元数据，如果有的话使用FormData形式
-      if (metadata) {
-        return await this.uploadWithFormData(url, chunk, headers, metadata);
+      // 不同平台的上传处理
+      if (this.isH5Platform()) {
+        // H5环境支持FormData
+        return await this.uploadWithFormData(
+          url,
+          chunk,
+          headers,
+          metadata || {}
+        );
       } else {
+        // 小程序环境
         return await this.uploadWithRequestAPI(url, chunk, headers);
       }
     } catch (error: any) {
-      // 如果是取消错误，直接抛出
-      if (
-        error instanceof UploadError &&
-        error.type === UploadErrorType.CANCEL_ERROR
-      ) {
+      // 检查是否可重试
+      const maxRetries = this.options.maxRetries || 3;
+      if (currentRetry >= maxRetries) {
         throw error;
       }
 
-      // 是否已达到最大重试次数
-      if (currentRetry >= this.maxRetries) {
-        if (error instanceof UploadError) {
-          throw error;
-        }
-
-        // 网络错误判断
-        if (
-          error.errMsg?.includes('request:fail') ||
-          error.errMsg?.includes('network')
-        ) {
-          throw new UploadError(
-            UploadErrorType.NETWORK_ERROR,
-            `网络请求失败: ${error.errMsg || JSON.stringify(error)}`,
-            error
-          );
-        }
-
-        throw new UploadError(
-          UploadErrorType.UPLOAD_ERROR,
-          `上传失败: ${error.errMsg || error.message || JSON.stringify(error)}`,
-          error
-        );
+      // 检查错误类型，只对网络错误进行重试
+      if (!this.isRetriableError(error)) {
+        throw error;
       }
 
-      // 计算退避延迟
-      const delay = this.calculateRetryDelay(currentRetry);
-
-      // 记录重试信息
-      this.logger.info(
-        `上传失败，将在${delay}ms后进行第${currentRetry + 1}次重试，错误信息: ${
-          error.message || error.errMsg || JSON.stringify(error)
-        }`
-      );
+      // 计算重试延迟时间
+      const retryDelay = this.calculateRetryDelay(currentRetry);
 
       // 延迟后重试
-      await new Promise(resolve => setTimeout(resolve, delay));
+      this.logger.warn(
+        `上传失败，将在${retryDelay}ms后重试(${currentRetry + 1}/${maxRetries})...`
+      );
+      await new Promise(resolve => setTimeout(resolve, retryDelay));
 
       // 递归重试
       return this.attemptUpload(
@@ -376,190 +443,157 @@ export default class UniAppAdapter implements IUploadAdapter {
   }
 
   /**
+   * 判断错误是否可重试
+   * @private
+   */
+  private isRetriableError(error: any): boolean {
+    // 检查是否是网络相关错误
+    const errorMsg = String(error.message || error.errMsg || '');
+    return (
+      errorMsg.includes('network') ||
+      errorMsg.includes('网络') ||
+      errorMsg.includes('timeout') ||
+      errorMsg.includes('超时') ||
+      errorMsg.includes('connection') ||
+      errorMsg.includes('连接')
+    );
+  }
+
+  /**
    * 计算重试延迟时间（指数退避策略）
    * @private
    */
   private calculateRetryDelay(retryCount: number): number {
     // 基础延迟时间（毫秒）
-    const baseDelay = 300;
-
-    // 使用指数退避策略，增加一些随机性以避免同时重试
-    const exponentialDelay = baseDelay * Math.pow(2, retryCount);
-    const jitter = Math.random() * 300;
-
-    // 最大延迟5秒
-    return Math.min(exponentialDelay + jitter, 5000);
+    const baseDelay = 1000;
+    // 指数退避因子
+    const factor = Math.pow(2, retryCount);
+    // 添加随机抖动，防止同时重试造成服务器压力
+    const jitter = Math.random() * 1000;
+    return Math.min(baseDelay * factor + jitter, 30000); // 最大30秒
   }
 
   /**
-   * 使用FormData方式上传（包含元数据）
+   * 使用FormData上传（H5环境）
    * @private
    */
   private async uploadWithFormData(
     url: string,
     chunk: ArrayBuffer,
     headers: Record<string, string>,
-    metadata: { chunkIndex?: number; totalChunks?: number; fileName?: string }
+    metadata: Record<string, any>
   ): Promise<any> {
-    if (this.isH5Platform()) {
-      // H5环境使用FormData上传
+    return new Promise((resolve, reject) => {
+      // 创建FormData对象
       const formData = new FormData();
 
-      // 添加文件数据
+      // 转换ArrayBuffer为Blob
       const blob = new Blob([chunk]);
-      formData.append(
-        'file',
-        new File([blob], metadata.fileName || 'chunk.bin')
-      );
 
-      // 添加元数据
+      // 添加文件到FormData
+      let fileName = metadata.fileName || 'chunk';
       if (metadata.chunkIndex !== undefined) {
-        formData.append('chunkIndex', String(metadata.chunkIndex));
+        fileName = `${fileName}_${metadata.chunkIndex}`;
       }
+      formData.append('file', blob, fileName);
 
-      if (metadata.totalChunks !== undefined) {
-        formData.append('totalChunks', String(metadata.totalChunks));
-      }
-
-      if (metadata.fileName) {
-        formData.append('fileName', metadata.fileName);
-      }
-
-      // 使用fetch API上传
-      const response = await fetch(url, {
-        method: 'POST',
-        headers,
-        body: formData,
-        credentials: this.withCredentials ? 'include' : 'same-origin',
-        signal: (this.abortSignal as any)?.signal,
+      // 添加其他元数据
+      Object.keys(metadata).forEach(key => {
+        if (key !== 'fileName') {
+          // 文件名已经用于blob了
+          formData.append(key, String(metadata[key]));
+        }
       });
 
-      if (!response.ok) {
-        throw new UploadError(
-          UploadErrorType.UPLOAD_ERROR,
-          `上传失败，服务器返回状态码：${response.status}`
-        );
-      }
-
-      return await response.json();
-    } else {
-      // 小程序环境使用uni.uploadFile
-      return new Promise((resolve, reject) => {
-        // 创建临时文件
-        const fs = uni.getFileSystemManager();
-        const tempFilePath = `${uni.env.USER_DATA_PATH}/temp_upload_${Date.now()}.bin`;
-
-        try {
-          fs.writeFileSync(tempFilePath, chunk, 'binary');
-
-          // 设置上传任务
-          const uploadTask = uni.uploadFile({
-            url,
-            filePath: tempFilePath,
-            name: 'file',
-            header: headers,
-            formData: {
-              chunkIndex:
-                metadata.chunkIndex !== undefined
-                  ? String(metadata.chunkIndex)
-                  : '',
-              totalChunks:
-                metadata.totalChunks !== undefined
-                  ? String(metadata.totalChunks)
-                  : '',
-              fileName: metadata.fileName || '',
+      // 检查是否在uni-app的H5环境中
+      if (this.isH5Platform()) {
+        // 使用uni-app的上传API
+        const uploadOptions: any = {
+          url,
+          header: { ...headers },
+          formData,
+          name: 'file',
+          files: [
+            {
+              name: 'file',
+              file: blob,
+              uri: fileName,
             },
-            success: (res: any) => {
-              try {
-                // 清理临时文件
-                fs.unlink({
-                  filePath: tempFilePath,
-                  fail: () => {
-                    /* 忽略清理失败 */
-                  },
-                });
+          ],
+          success: (res: any) => {
+            try {
+              const data = JSON.parse(res.data);
+              resolve(data);
+            } catch {
+              resolve(res.data);
+            }
+          },
+          fail: (error: any) => {
+            reject(
+              new UploadError(
+                UploadErrorType.UPLOAD_ERROR,
+                `上传失败: ${error.errMsg || JSON.stringify(error)}`,
+                error
+              )
+            );
+          },
+        };
 
-                if (res.statusCode >= 200 && res.statusCode < 300) {
-                  let data;
-                  try {
-                    data = JSON.parse(res.data);
-                  } catch (e) {
-                    data = res.data;
-                  }
-                  resolve(data);
-                } else {
-                  reject(
-                    new UploadError(
-                      UploadErrorType.UPLOAD_ERROR,
-                      `上传失败，服务器返回状态码：${res.statusCode}`,
-                      res
-                    )
-                  );
-                }
-              } catch (e) {
-                reject(e);
-              }
-            },
-            fail: (err: any) => {
-              // 清理临时文件
-              fs.unlink({
-                filePath: tempFilePath,
-                fail: () => {
-                  /* 忽略清理失败 */
-                },
-              });
-
-              reject(
-                new UploadError(
-                  UploadErrorType.UPLOAD_ERROR,
-                  `上传失败: ${err.errMsg || JSON.stringify(err)}`,
-                  err
-                )
-              );
-            },
+        // 添加进度回调
+        let task;
+        if (this.options.progressCallback) {
+          task = this.frameworkApi.uploadFile({
+            ...uploadOptions,
+            timeout: this.options.timeout,
           });
 
-          // 进度回调
-          if (this.progressCallback && uploadTask.onProgressUpdate) {
-            uploadTask.onProgressUpdate((res: any) => {
-              this.progressCallback!(res.progress / 100);
+          if (task && task.onProgressUpdate) {
+            task.onProgressUpdate((res: { progress: number }) => {
+              if (this.options.progressCallback) {
+                this.options.progressCallback(res.progress / 100);
+              }
             });
           }
+        } else {
+          this.frameworkApi.uploadFile(uploadOptions);
+        }
 
-          // 中止处理
+        // 检查是否需要中止
+        if (task && this.options.abortSignal) {
           const checkAbort = () => {
-            if (this.abortSignal?.aborted && uploadTask.abort) {
-              uploadTask.abort();
+            if (this.options.abortSignal?.aborted && task.abort) {
+              task.abort();
               reject(
                 new UploadError(UploadErrorType.CANCEL_ERROR, '上传已被取消')
               );
             }
           };
 
+          // 定期检查是否需要中止
+          const intervalId = setInterval(checkAbort, 100);
+
+          // 设置一个超时时间来清除定时器，避免长时间占用资源
+          setTimeout(() => {
+            clearInterval(intervalId);
+          }, this.options.timeout || 30000);
+
           // 初始检查
           checkAbort();
-
-          // 定期检查是否中止
-          const abortChecker = setInterval(checkAbort, 100);
-
-          // 在完成时清理定时器
-          setTimeout(() => clearInterval(abortChecker), this.timeout + 1000);
-        } catch (error) {
-          // 清理临时文件
-          try {
-            fs.unlinkSync(tempFilePath);
-          } catch (e) {
-            /* 忽略清理失败 */
-          }
-
-          reject(error);
         }
-      });
-    }
+      } else {
+        // 如果不在uni-app环境，使用标准fetch API（几乎不会走到这里）
+        reject(
+          new UploadError(
+            UploadErrorType.ENVIRONMENT_ERROR,
+            '当前环境不支持FormData上传'
+          )
+        );
+      }
+    });
   }
 
   /**
-   * 使用请求API上传（不包含元数据）
+   * 使用RequestAPI上传（小程序环境）
    * @private
    */
   private async uploadWithRequestAPI(
@@ -568,166 +602,482 @@ export default class UniAppAdapter implements IUploadAdapter {
     headers: Record<string, string>
   ): Promise<any> {
     return new Promise((resolve, reject) => {
-      // 设置请求任务
-      const requestTask = uni.request({
-        url,
-        method: 'POST',
-        data: chunk,
-        header: {
-          'Content-Type': 'application/octet-stream',
-          ...headers,
-        },
-        dataType: 'json',
-        success: (res: any) => {
-          if (res.statusCode >= 200 && res.statusCode < 300) {
-            resolve(res.data);
-          } else {
+      // 在uni-app小程序环境中，我们需要先将ArrayBuffer写入临时文件
+      const tempFilePath = `${this.frameworkApi.env.USER_DATA_PATH}/chunk_${Date.now()}.bin`;
+      const fs = this.frameworkApi.getFileSystemManager();
+
+      try {
+        // 写入临时文件
+        fs.writeFileSync(tempFilePath, chunk, 'binary');
+
+        // 使用上传API
+        const uploadTask = this.frameworkApi.uploadFile({
+          url,
+          filePath: tempFilePath,
+          name: 'file',
+          header: headers,
+          success: (res: any) => {
+            // 清理临时文件
+            try {
+              fs.unlinkSync(tempFilePath);
+            } catch (e) {
+              this.logger.warn('清理临时文件失败:', e);
+            }
+
+            try {
+              const data = JSON.parse(res.data);
+              resolve(data);
+            } catch {
+              resolve(res.data);
+            }
+          },
+          fail: (error: any) => {
+            // 清理临时文件
+            try {
+              fs.unlinkSync(tempFilePath);
+            } catch (e) {
+              this.logger.warn('清理临时文件失败:', e);
+            }
+
             reject(
               new UploadError(
                 UploadErrorType.UPLOAD_ERROR,
-                `上传失败，服务器返回状态码：${res.statusCode}`,
-                res
+                `上传失败: ${error.errMsg || JSON.stringify(error)}`,
+                error
               )
             );
-          }
-        },
-        fail: (err: any) => {
-          reject(
-            new UploadError(
-              UploadErrorType.UPLOAD_ERROR,
-              `上传失败: ${err.errMsg || JSON.stringify(err)}`,
-              err
-            )
-          );
-        },
-      });
+          },
+        });
 
-      // 中止处理
-      const checkAbort = () => {
-        if (this.abortSignal?.aborted && requestTask.abort) {
-          requestTask.abort();
-          reject(new UploadError(UploadErrorType.CANCEL_ERROR, '上传已被取消'));
+        // 添加进度回调
+        if (this.options.progressCallback && uploadTask.onProgressUpdate) {
+          uploadTask.onProgressUpdate((res: { progress: number }) => {
+            if (this.options.progressCallback) {
+              this.options.progressCallback(res.progress / 100);
+            }
+          });
         }
-      };
 
-      // 初始检查
-      checkAbort();
+        // 检查是否需要中止
+        if (this.options.abortSignal && uploadTask.abort) {
+          const checkAbort = () => {
+            if (this.options.abortSignal?.aborted) {
+              uploadTask.abort();
+              reject(
+                new UploadError(UploadErrorType.CANCEL_ERROR, '上传已被取消')
+              );
 
-      // 定期检查是否中止
-      const abortChecker = setInterval(checkAbort, 100);
+              // 清理临时文件
+              try {
+                fs.unlinkSync(tempFilePath);
+              } catch (e) {
+                this.logger.warn('清理临时文件失败:', e);
+              }
+            }
+          };
 
-      // 确保在请求完成后清理
-      setTimeout(() => clearInterval(abortChecker), this.timeout + 1000);
+          // 初始检查
+          checkAbort();
+
+          // 设置定期检查
+          const intervalId = setInterval(checkAbort, 100);
+
+          // 设置超时清理
+          setTimeout(() => {
+            clearInterval(intervalId);
+          }, this.options.timeout || 30000);
+        }
+      } catch (error: any) {
+        // 清理临时文件
+        try {
+          fs.unlinkSync(tempFilePath);
+        } catch {
+          // 忽略清理错误
+        }
+
+        reject(
+          new UploadError(
+            UploadErrorType.FILE_ERROR,
+            `处理文件失败: ${error.message || error.errMsg || JSON.stringify(error)}`,
+            error
+          )
+        );
+      }
     });
   }
 
   /**
-   * 设置网络质量
-   * @param quality 网络质量级别
+   * 获取文件信息
+   * @param file 文件对象或文件路径
    */
-  public setNetworkQuality(quality: NetworkQuality): void {
-    this.networkQuality = quality;
-  }
-
-  /**
-   * 检查存储是否可用
-   */
-  public isStorageAvailable(): boolean {
+  async getFileInfo(file: any): Promise<FileInfo> {
     try {
       if (this.isH5Platform()) {
-        return typeof localStorage !== 'undefined';
+        return this.getFileInfoInH5(file);
       } else {
-        return (
-          typeof uni.setStorageSync === 'function' &&
-          typeof uni.getStorageSync === 'function'
-        );
+        return this.getFileInfoInMiniProgram(file);
       }
-    } catch (e) {
-      return false;
+    } catch (error: any) {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        `获取文件信息失败: ${error.message || JSON.stringify(error)}`,
+        error
+      );
     }
   }
 
   /**
-   * 获取设备可用存储空间
+   * 获取H5环境下的文件信息
+   * @private
    */
-  public async getAvailableStorage(): Promise<number> {
-    if (!this.isH5Platform()) {
+  private getFileInfoInH5(file: File | Blob): FileInfo {
+    if (file instanceof File) {
+      return {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified,
+      };
+    } else if (file instanceof Blob) {
+      return {
+        name: 'blob',
+        size: file.size,
+        type: file.type,
+      };
+    } else {
+      throw new UploadError(UploadErrorType.FILE_ERROR, '不支持的文件类型');
+    }
+  }
+
+  /**
+   * 获取小程序环境下的文件信息
+   * @private
+   */
+  private async getFileInfoInMiniProgram(filePath: string): Promise<FileInfo> {
+    return new Promise((resolve, reject) => {
       try {
-        // 尝试获取存储信息
-        return new Promise((resolve, reject) => {
-          uni.getStorageInfo({
-            success: (res: any) => {
-              // 返回剩余空间（字节）
-              // 注意：这只是应用可用存储空间，不是设备存储空间
-              resolve((res.limitSize - res.currentSize) * 1024); // 通常返回的是KB
-            },
-            fail: (err: any) => {
-              reject(
-                new UploadError(
-                  UploadErrorType.ENVIRONMENT_ERROR,
-                  `获取存储信息失败: ${err.errMsg || JSON.stringify(err)}`,
-                  err
-                )
-              );
-            },
-          });
+        const fs = this.frameworkApi.getFileSystemManager();
+        fs.getFileInfo({
+          filePath,
+          success: (res: any) => {
+            // 从文件路径中提取文件名
+            const name = filePath.split('/').pop() || 'unknown';
+            resolve({
+              name,
+              size: res.size,
+              path: filePath,
+            });
+          },
+          fail: (error: any) => {
+            reject(
+              new UploadError(
+                UploadErrorType.FILE_ERROR,
+                `获取文件信息失败: ${error.errMsg || JSON.stringify(error)}`,
+                error
+              )
+            );
+          },
         });
-      } catch (error) {
-        this.logger.warn(`获取存储信息失败: ${error}`);
-        return -1; // 未知
+      } catch (error: any) {
+        reject(
+          new UploadError(
+            UploadErrorType.FILE_ERROR,
+            `文件系统API调用失败: ${error.message || JSON.stringify(error)}`,
+            error
+          )
+        );
+      }
+    });
+  }
+
+  /**
+   * 获取存储实现
+   */
+  getStorage(): IStorage {
+    if (!this.storage) {
+      if (this.isH5Platform()) {
+        this.storage = new BrowserStorage(this.storageKeyPrefix);
+      } else {
+        // 使用小程序存储API
+        const storageAPI = {
+          getItem: (key: string) => {
+            return this.frameworkApi.getStorageSync(key);
+          },
+          setItem: (key: string, value: string) => {
+            return this.frameworkApi.setStorageSync(key, value);
+          },
+          removeItem: (key: string) => {
+            return this.frameworkApi.removeStorageSync(key);
+          },
+        };
+        this.storage = new MiniProgramStorage(
+          storageAPI,
+          this.storageKeyPrefix
+        );
       }
     }
+    return this.storage;
+  }
 
-    // H5环境无法可靠获取可用存储空间
-    return -1;
+  /**
+   * 执行HTTP请求
+   * @param url 请求URL
+   * @param options 请求选项
+   */
+  async request(url: string, options?: RequestOptions): Promise<IResponse> {
+    try {
+      const requestOptions: any = {
+        url,
+        method: options?.method || 'GET',
+        header: options?.headers || {},
+        timeout: options?.timeout || this.options.timeout,
+        dataType: options?.responseType || 'json',
+      };
+
+      if (options?.body) {
+        requestOptions.data = options.body;
+      }
+
+      return new Promise((resolve, reject) => {
+        const requestTask = this.frameworkApi.request({
+          ...requestOptions,
+          success: (res: any) => {
+            resolve({
+              ok: res.statusCode >= 200 && res.statusCode < 300,
+              status: res.statusCode,
+              statusText: String(res.statusCode),
+              data: res.data,
+              headers: res.header || {},
+            });
+          },
+          fail: (error: any) => {
+            reject(
+              new UploadError(
+                UploadErrorType.NETWORK_ERROR,
+                `请求失败: ${error.errMsg || JSON.stringify(error)}`,
+                error
+              )
+            );
+          },
+        });
+
+        // 检查是否需要中止请求
+        if (options?.signal && requestTask.abort) {
+          const checkAbort = () => {
+            if (options.signal?.aborted) {
+              requestTask.abort();
+              reject(
+                new UploadError(UploadErrorType.CANCEL_ERROR, '请求已被取消')
+              );
+            }
+          };
+
+          // 初始检查
+          checkAbort();
+
+          // 监听abort信号
+          if (typeof options.signal.addEventListener === 'function') {
+            options.signal.addEventListener('abort', checkAbort);
+          }
+        }
+      });
+    } catch (error: any) {
+      throw new UploadError(
+        UploadErrorType.NETWORK_ERROR,
+        `请求执行失败: ${error.message || JSON.stringify(error)}`,
+        error
+      );
+    }
   }
 
   /**
    * 检测环境特性
+   * @returns 环境特性支持情况
    */
-  public detectFeatures(): Record<string, boolean> {
+  detectFeatures(): Record<string, boolean> {
     const features: Record<string, boolean> = {
       fileSystem: false,
       networkRequest: false,
-      formData: false,
+      uploadFile: false,
+      storage: false,
       arrayBuffer: false,
-      storage: this.isStorageAvailable(),
-      uploadProgress: false,
-      abortRequest: false,
+      blob: false,
+      formData: false,
+      webWorker: false,
     };
 
-    // 文件系统支持
-    if (this.isH5Platform()) {
-      features.fileSystem =
-        typeof File !== 'undefined' &&
-        typeof Blob !== 'undefined' &&
-        typeof FileReader !== 'undefined';
-    } else {
+    try {
+      if (this.frameworkApi) {
+        // 网络请求API
+        features.networkRequest =
+          typeof this.frameworkApi.request === 'function';
+
+        // 上传文件API
+        features.uploadFile =
+          typeof this.frameworkApi.uploadFile === 'function';
+
+        // 存储API
+        features.storage =
+          typeof this.frameworkApi.setStorage === 'function' &&
+          typeof this.frameworkApi.getStorage === 'function';
+
+        // H5特定特性检测
+        if (this.isH5Platform()) {
+          features.arrayBuffer = typeof ArrayBuffer === 'function';
+          features.blob = typeof Blob === 'function';
+          features.formData = typeof FormData === 'function';
+          features.webWorker = typeof Worker === 'function';
+        } else {
+          // 小程序特定特性检测
+          try {
+            const fs = this.frameworkApi.getFileSystemManager();
+            features.fileSystem = typeof fs.readFile === 'function';
+          } catch {
+            features.fileSystem = false;
+          }
+        }
+      }
+    } catch (error) {
+      this.logger.error('检测环境特性失败:', error);
+    }
+
+    return features;
+  }
+
+  /**
+   * 检查当前平台是否支持特定功能
+   * @param feature 特性名称
+   * @returns 是否支持
+   */
+  isPlatformSupported(feature: string): boolean {
+    const features = this.detectFeatures();
+    return !!features[feature];
+  }
+
+  /**
+   * 获取当前平台可用存储估计
+   * uni-app特有功能
+   */
+  async getAvailableStorage(): Promise<number> {
+    if (this.uniPlatform === UniAppPlatform.APP) {
       try {
-        const fs = uni.getFileSystemManager();
-        features.fileSystem = typeof fs.readFile === 'function';
-      } catch {
-        features.fileSystem = false;
+        // App环境使用plus.io
+        if (typeof plus !== 'undefined' && plus.io && plus.io.getStorageInfo) {
+          return new Promise((resolve, reject) => {
+            plus.io.getStorageInfo({
+              success: (info: any) => {
+                resolve(info.freeDiskSpace);
+              },
+              fail: (error: any) => {
+                reject(error);
+              },
+            });
+          });
+        }
+      } catch (error) {
+        this.logger.warn('获取存储信息失败:', error);
       }
     }
 
-    // 网络请求支持
-    features.networkRequest = typeof uni.request === 'function';
+    // 对于其他平台，尝试使用通用API
+    try {
+      return new Promise((resolve, _reject) => {
+        this.frameworkApi.getStorageInfoSync({
+          success: (res: any) => {
+            if (typeof res.limitSize === 'number') {
+              resolve(res.limitSize - res.currentSize);
+            } else {
+              // 如果没有限制大小信息，返回一个默认值
+              resolve(50 * 1024 * 1024); // 默认50MB
+            }
+          },
+          fail: () => {
+            // 默认返回一个保守估计
+            resolve(10 * 1024 * 1024); // 10MB
+          },
+        });
+      });
+    } catch (error) {
+      return 10 * 1024 * 1024; // 10MB as fallback
+    }
+  }
 
-    // FormData支持
-    features.formData = this.isH5Platform() && typeof FormData !== 'undefined';
+  /**
+   * 计算文件哈希
+   * @param file 文件对象或路径
+   * @param algorithm 哈希算法
+   */
+  async calculateFileHash(file: any, algorithm: string): Promise<string> {
+    try {
+      if (this.isH5Platform()) {
+        // H5环境使用Web Crypto API
+        return this.calculateFileHashInH5(file, algorithm);
+      } else {
+        // 小程序环境没有内置的哈希计算，需要分片读取并自行实现
+        // 这里简化处理，实际项目中应当完整实现
+        throw new UploadError(
+          UploadErrorType.ENVIRONMENT_ERROR,
+          '当前小程序环境不支持文件哈希计算'
+        );
+      }
+    } catch (error: any) {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        `计算文件哈希失败: ${error.message || JSON.stringify(error)}`,
+        error
+      );
+    }
+  }
 
-    // ArrayBuffer支持
-    features.arrayBuffer = typeof ArrayBuffer !== 'undefined';
+  /**
+   * H5环境下计算文件哈希
+   * @private
+   */
+  private async calculateFileHashInH5(
+    file: File | Blob,
+    algorithm: string
+  ): Promise<string> {
+    // 检查Web Crypto API是否可用
+    if (!window.crypto || !window.crypto.subtle) {
+      throw new UploadError(
+        UploadErrorType.ENVIRONMENT_ERROR,
+        '当前环境不支持Web Crypto API'
+      );
+    }
 
-    // 上传进度支持
-    features.uploadProgress =
-      typeof uni.uploadFile === 'function' &&
-      typeof uni.uploadFile({} as any).onProgressUpdate === 'function';
+    // 将文件读取为ArrayBuffer
+    const fileBuffer = await new Promise<ArrayBuffer>((resolve, reject) => {
+      const reader = new FileReader();
+      reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) {
+          resolve(reader.result);
+        } else {
+          reject(new Error('无法读取文件为ArrayBuffer'));
+        }
+      };
+      reader.onerror = () => {
+        reject(reader.error);
+      };
+      reader.readAsArrayBuffer(file);
+    });
 
-    // 请求中止支持
-    features.abortRequest = typeof uni.request({} as any).abort === 'function';
+    // 计算哈希
+    const hashBuffer = await window.crypto.subtle.digest(algorithm, fileBuffer);
 
-    return features;
+    // 转换为十六进制字符串
+    const hashArray = Array.from(new Uint8Array(hashBuffer));
+    const hashHex = hashArray
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+    return hashHex;
+  }
+
+  /**
+   * 清理资源
+   */
+  dispose(): void {
+    // 清理资源和事件监听
+    this.storage = null;
+    // 子类可以扩展其他清理逻辑
   }
 }
