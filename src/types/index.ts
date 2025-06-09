@@ -128,6 +128,95 @@ export enum NetworkQuality {
   EXCELLENT = 'excellent'
 }
 
+/**
+ * 内存使用趋势枚举
+ */
+export enum MemoryTrend {
+  /** 内存使用稳定 */
+  STABLE = 'stable',
+  
+  /** 内存使用增长 */
+  GROWING = 'growing',
+  
+  /** 内存使用减少 */
+  DECREASING = 'decreasing'
+}
+
+/**
+ * 设备内存容量级别枚举
+ */
+export enum DeviceMemoryCapacity {
+  /** 极低内存 (<1GB) */
+  VERY_LOW = 'very_low',
+  
+  /** 低内存 (1-2GB) */
+  LOW = 'low',
+  
+  /** 中等内存 (2-4GB) */
+  MEDIUM = 'medium',
+  
+  /** 高内存 (4-8GB) */
+  HIGH = 'high',
+  
+  /** 极高内存 (>8GB) */
+  VERY_HIGH = 'very_high'
+}
+
+/**
+ * 内存警告级别枚举
+ */
+export enum MemoryWarningLevel {
+  /** 正常内存使用 */
+  NORMAL = 'normal',
+  
+  /** 内存警告级别 */
+  WARNING = 'warning',
+  
+  /** 内存临界级别 */
+  CRITICAL = 'critical'
+}
+
+/**
+ * 内存统计信息接口
+ */
+export interface MemoryStats {
+  used: number;          // 已使用内存 (bytes)
+  total: number;         // 总内存 (bytes)
+  limit: number;         // 内存限制 (bytes)
+  usageRatio: number;    // 内存使用率 (0-1)
+  growthRate?: number;   // 内存增长率 (bytes/s)
+  trend?: MemoryTrend;   // 内存趋势
+  capacity?: DeviceMemoryCapacity; // 设备内存容量级别
+  availableForUploading?: number;  // 可用于上传的内存估计值 (bytes)
+  isLowMemoryEnvironment?: boolean; // 是否为低内存环境
+}
+
+/**
+ * 内存预警事件详情接口
+ */
+export interface MemoryWarningEvent {
+  level: MemoryWarningLevel;
+  stats: MemoryStats;
+  recommendations: {
+    chunkSize?: number;  // 推荐的分片大小
+    concurrency?: number; // 推荐的并发数
+    shouldPause?: boolean; // 是否应该暂停上传
+    shouldReleaseMemory?: boolean; // 是否应该释放内存
+  };
+}
+
+/**
+ * 分片处理策略接口
+ */
+export interface ChunkProcessingStrategy {
+  chunkSize: number;     // 推荐的分片大小
+  concurrency: number;   // 推荐的并发数
+  processingMode: 'sequential' | 'parallel' | 'hybrid'; // 处理模式
+  useStreaming: boolean; // 是否使用流式处理
+  prioritizeMetadata: boolean; // 是否优先处理元数据
+  preloadChunks: number; // 预加载分片数量
+}
+
 // 任务优先级枚举
 export enum TaskPriority {
   LOW = 0,                    // 低优先级

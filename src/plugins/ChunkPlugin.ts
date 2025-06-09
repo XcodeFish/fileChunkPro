@@ -4,7 +4,7 @@
  */
 
 import { UploaderCore } from '../core/UploaderCore';
-import { IPlugin, ChunkInfo, NetworkQuality } from '../types';
+import { IPlugin, ChunkInfo, NetworkQuality, MemoryTrend } from '../types';
 import { Logger } from '../utils/Logger';
 import { MemoryManager } from '../utils/MemoryManager';
 import { NetworkDetector } from '../utils/NetworkDetector';
@@ -40,13 +40,14 @@ interface ChunkPluginOptions {
   useStreams?: boolean; // 是否使用流式处理
   adaptiveStrategy?: 'performance' | 'memory' | 'network' | 'balanced'; // 自适应策略类型
   enableOptimization?: boolean; // 是否启用优化
+  enableMemoryMonitoring?: boolean; // 是否启用内存监控
 }
 
 /**
  * 分片处理插件，实现文件分片策略
  */
 export class ChunkPlugin implements IPlugin {
-  public readonly version = '1.1.0';
+  public readonly version = '2.0.0';
   private core: UploaderCore | null = null;
   private chunkSize: number | 'auto';
   private useStreams: boolean;
@@ -54,8 +55,10 @@ export class ChunkPlugin implements IPlugin {
   private readonly MAX_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
   private readonly MIN_CHUNK_SIZE = 512 * 1024; // 512KB
   private enableOptimization: boolean;
+  private enableMemoryMonitoring: boolean;
   private networkDetector: NetworkDetector | null = null;
   private logger: Logger;
+  private memoryEventHandler: ((event: any) => void) | null = null;
 
   /**
    * 创建分片处理插件实例
@@ -69,6 +72,16 @@ export class ChunkPlugin implements IPlugin {
         : typeof ReadableStream !== 'undefined'; // 如果支持流API则默认启用
     this.logger = new Logger('ChunkPlugin');
     this.enableOptimization = options.enableOptimization !== false;
+    this.enableMemoryMonitoring = options.enableMemoryMonitoring !== false;
+
+    // 确保MemoryManager初始化
+    if (this.enableMemoryMonitoring) {
+      try {
+        MemoryManager.initialize();
+      } catch (error) {
+        this.logger.warn('无法初始化MemoryManager', error);
+      }
+    }
 
     if (this.enableOptimization) {
       try {
@@ -102,7 +115,16 @@ export class ChunkPlugin implements IPlugin {
         'networkQualityChanged',
         this.handleNetworkQualityChanged.bind(this)
       );
-      uploader.hook('memoryWarning', this.handleMemoryWarning.bind(this));
+    }
+
+    // 启用内存监控
+    if (this.enableMemoryMonitoring) {
+      // 开始内存监控
+      MemoryManager.startMonitoring();
+
+      // 注册内存警告处理函数
+      this.memoryEventHandler = this.handleMemoryWarning.bind(this);
+      MemoryManager.addEventListener('memoryWarning', this.memoryEventHandler);
     }
   }
 
@@ -170,21 +192,46 @@ export class ChunkPlugin implements IPlugin {
   /**
    * 处理内存警告事件
    */
-  private handleMemoryWarning(data: { usageRatio: number }): void {
-    if (!this.core || !this.enableOptimization) return;
+  private handleMemoryWarning(data: any): void {
+    if (!this.core || !this.enableMemoryMonitoring) return;
 
-    const { usageRatio } = data;
+    const warningEvent = data;
     this.logger.warn(
-      `内存使用率较高(${(usageRatio * 100).toFixed(1)}%)，调整分片策略`
+      `内存警告(${warningEvent.level}): 使用率${(warningEvent.stats.usageRatio * 100).toFixed(1)}%`
     );
 
-    // 当内存使用率高时，减小分片大小和并发数
-    if (usageRatio > 0.8) {
-      this.core.emit('suggestChunkSizeChange', {
-        reason: 'highMemory',
-        suggestedChunkSize: Math.max(this.MIN_CHUNK_SIZE, 1 * 1024 * 1024), // 1MB
-        suggestedConcurrency: 2, // 降低并发数
-      });
+    // 获取优化建议
+    const recommendations = warningEvent.recommendations;
+
+    // 应用推荐的优化设置
+    if (recommendations) {
+      if (recommendations.chunkSize) {
+        this.core.emit('suggestChunkSizeChange', {
+          reason: 'memoryWarning',
+          suggestedChunkSize: recommendations.chunkSize,
+        });
+      }
+
+      if (recommendations.concurrency) {
+        this.core.emit('suggestConcurrencyChange', {
+          reason: 'memoryWarning',
+          suggestedConcurrency: recommendations.concurrency,
+        });
+      }
+
+      // 如果内存极度紧张，建议暂停上传
+      if (recommendations.shouldPause) {
+        this.logger.warn('内存极度紧张，建议暂停上传');
+        this.core.emit('memoryPressurePause', {
+          reason: 'criticalMemory',
+          shouldPause: true,
+        });
+      }
+
+      // 如果需要释放内存，尝试执行垃圾回收
+      if (recommendations.shouldReleaseMemory) {
+        MemoryManager.suggestGarbageCollection();
+      }
     }
   }
 
@@ -199,39 +246,62 @@ export class ChunkPlugin implements IPlugin {
       throw new Error('文件大小无效');
     }
 
-    // 确定分片大小
-    const optimalChunkSize = await this.getOptimalChunkSize(file);
+    // 如果文件尺寸较大，预先计算最佳分片策略
+    if (file.size > 10 * 1024 * 1024) {
+      // 10MB
+      // 获取基于内存的优化分片策略
+      const strategy = MemoryManager.getChunkProcessingStrategy(file.size);
 
-    // 将分片大小保存到文件元数据
-    file.meta = {
-      ...file.meta,
-      chunkSize: optimalChunkSize,
-      totalChunks: Math.ceil(file.size / optimalChunkSize),
-      useStreams: this.shouldUseStreams(file),
-    };
+      // 将策略应用到文件元数据
+      if (!file.meta) {
+        file.meta = {};
+      }
+
+      file.meta.chunkSize = strategy.chunkSize;
+      file.meta.useStreams = strategy.useStreaming;
+      file.meta.processingMode = strategy.processingMode;
+      file.meta.preloadChunks = strategy.preloadChunks;
+
+      // 记录日志
+      this.logger.info(
+        `为大文件设置优化策略: 分片大小=${strategy.chunkSize}字节, 处理模式=${strategy.processingMode}`
+      );
+
+      // 如果是超大文件，考虑使用分部处理策略
+      if (file.size > 500 * 1024 * 1024) {
+        // 500MB
+        const largeFileStrategy = MemoryManager.getLargeFileStrategy(file.size);
+        file.meta.useParts = largeFileStrategy.shouldUseParts;
+        file.meta.partSize = largeFileStrategy.partSize;
+        file.meta.maxPartsInMemory = largeFileStrategy.maxPartsInMemory;
+        file.meta.offloadCalculation =
+          largeFileStrategy.shouldOffloadCalculation;
+
+        this.logger.info(
+          `为超大文件设置分部处理策略: 分部大小=${largeFileStrategy.partSize}字节`
+        );
+      }
+    }
 
     return file;
   }
 
   /**
-   * 处理分片前钩子
-   * @param file 上传文件
-   * @returns 文件分片数据
+   * 处理分片钩子
    */
   private async handleBeforeChunk(file: IFileObject): Promise<ChunkData[]> {
-    if (!file.size) {
-      throw new Error('文件大小无效');
-    }
-
-    const chunkSize =
-      file.meta?.chunkSize || (await this.getOptimalChunkSize(file));
-    const useStreams = this.shouldUseStreams(file);
-
-    // 根据使用流还是常规分片方式进行处理
-    if (useStreams && typeof ReadableStream !== 'undefined') {
-      return this.createStreamChunks(file, chunkSize);
+    // 使用优化的分片计划
+    if (file.meta?.useParts) {
+      // 对于超大文件，使用分部处理
+      this.logger.info('使用大文件分部处理策略');
+      return this.createLargeFileChunks(file);
+    } else if (this.shouldUseStreams(file)) {
+      // 使用流式处理
+      this.logger.info('使用流式处理分片');
+      return this.createStreamChunks(file, this.determineChunkSize(file));
     } else {
-      return this.createRegularChunks(file, chunkSize);
+      // 常规分片处理
+      return this.createRegularChunks(file, this.determineChunkSize(file));
     }
   }
 
@@ -239,48 +309,70 @@ export class ChunkPlugin implements IPlugin {
    * 处理插件销毁
    */
   private handleDispose(): void {
-    if (this.networkDetector) {
-      this.networkDetector.dispose();
-      this.networkDetector = null;
+    // 清理资源
+    if (this.enableMemoryMonitoring && this.memoryEventHandler) {
+      MemoryManager.removeEventListener(
+        'memoryWarning',
+        this.memoryEventHandler
+      );
+      this.memoryEventHandler = null;
+      MemoryManager.stopMonitoring();
     }
+
     this.core = null;
   }
 
   /**
-   * 创建文件分片
-   * @param file 待分片文件
-   * @returns 分片信息数组
+   * 创建分片信息
    */
   public async createChunks(file: IFileObject): Promise<ChunkInfo[]> {
+    const chunkSize = this.determineChunkSize(file);
     const fileSize = file.size;
-    // 获取最优分片大小
-    const chunkSize = await this.getOptimalChunkSize(file);
-
     const chunks: ChunkInfo[] = [];
-    const chunkCount = Math.ceil(fileSize / chunkSize);
 
-    // 创建分片信息
-    for (let i = 0; i < chunkCount; i++) {
-      const start = i * chunkSize;
-      const end = Math.min(fileSize, start + chunkSize);
+    // 对于大文件，使用内存优化的分片计划
+    if (fileSize > 100 * 1024 * 1024) {
+      // 100MB
+      const chunkPlan = MemoryManager.getMemoryEfficientChunkPlan(
+        fileSize,
+        chunkSize
+      );
+
+      // 使用优化的分片计划
+      return chunkPlan.chunks.map(chunk => ({
+        index: chunk.index,
+        start: chunk.start,
+        end: chunk.end,
+        size: chunk.size,
+        fileSize,
+      }));
+    }
+
+    // 常规分片计算
+    let start = 0;
+    let index = 0;
+
+    while (start < fileSize) {
+      const end = Math.min(start + chunkSize, fileSize);
+      const size = end - start;
 
       chunks.push({
-        index: i,
+        index,
         start,
         end,
-        size: end - start,
+        size,
         fileSize,
       });
+
+      start = end;
+      index++;
     }
 
     return chunks;
   }
 
   /**
-   * 获取文件分片
-   * @param file 文件对象
-   * @param chunkInfo 分片信息
-   * @returns 文件分片数据
+   * 获取分片数据
    */
   public async getChunkData(
     file: IFileObject,
@@ -288,220 +380,234 @@ export class ChunkPlugin implements IPlugin {
   ): Promise<ArrayBuffer | Blob> {
     const { start, end } = chunkInfo;
 
-    // 浏览器环境
-    if (file instanceof File || file instanceof Blob) {
+    // 如果是浏览器File对象
+    if (file.slice && typeof file.slice === 'function') {
       return file.slice(start, end);
     }
-
-    // 小程序环境或其他环境，通过适配器读取
-    if (this.core && (this.core as any).adapter?.readChunk) {
-      return await (this.core as any).adapter.readChunk(
-        file.path || file.name,
-        start,
-        chunkInfo.size
-      );
+    // 如果是小程序文件对象
+    else if (file.path && typeof file.path === 'string') {
+      // 需要上层适配器支持readChunk
+      if (this.core && typeof this.core.readChunk === 'function') {
+        return this.core.readChunk(file.path, start, end - start);
+      }
+      throw new Error('当前环境不支持文件分片读取');
     }
 
-    throw new Error('无法读取文件分片，不支持的文件类型或缺少适配器');
+    throw new Error('无法获取文件分片数据');
   }
 
   /**
    * 获取最优分片大小
-   * @param fileSize 文件大小
-   * @returns 最优分片大小
    */
   private async getOptimalChunkSize(file: IFileObject): Promise<number> {
-    // 如果指定了chunkSize且不是'auto'，则使用指定值
-    if (this.chunkSize !== 'auto') {
-      return Math.max(
-        this.MIN_CHUNK_SIZE,
-        Math.min(this.chunkSize as number, this.MAX_CHUNK_SIZE)
+    // 如果文件元数据中已有分片大小，则优先使用
+    if (file.meta && file.meta.chunkSize && file.meta.chunkSize > 0) {
+      return Math.min(
+        Math.max(file.meta.chunkSize, this.MIN_CHUNK_SIZE),
+        this.MAX_CHUNK_SIZE
       );
     }
 
-    // 如果不启用优化，使用基础的内存管理计算分片大小
-    if (!this.enableOptimization) {
-      try {
-        // 尝试调用MemoryManager的方法，如果方法不存在则使用默认值
-        if (typeof MemoryManager.getOptimalChunkSize === 'function') {
-          return MemoryManager.getOptimalChunkSize(file.size);
-        }
-        // 默认值，根据文件大小选择合适的分片大小
-        return Math.min(
-          Math.max(2 * 1024 * 1024, file.size / 100),
-          this.MAX_CHUNK_SIZE
-        );
-      } catch (error) {
-        // 出错时使用默认值
-        console.error('无法获取最优分片大小', error);
-        return 2 * 1024 * 1024; // 默认2MB
-      }
+    // 如果设置了固定分片大小且不是auto，则使用设置的值
+    if (this.chunkSize !== 'auto' && typeof this.chunkSize === 'number') {
+      return Math.min(
+        Math.max(this.chunkSize, this.MIN_CHUNK_SIZE),
+        this.MAX_CHUNK_SIZE
+      );
     }
 
-    // 根据策略类型计算最优分片大小
-    let baseChunkSize = 2 * 1024 * 1024; // 默认2MB
+    // 获取当前内存和网络情况
+    const memoryStats = MemoryManager.getMemoryStats();
+    let networkQuality = NetworkQuality.MEDIUM;
 
-    // 获取网络质量
-    let networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
-    if (
-      this.networkDetector &&
-      typeof this.networkDetector.getNetworkQuality === 'function'
-    ) {
-      try {
-        networkQuality = this.networkDetector.getNetworkQuality();
-      } catch (error) {
-        // 如果网络检测失败，使用默认的网络质量
-        console.error('网络质量检测失败', error);
-        networkQuality = NetworkQuality.UNKNOWN;
-      }
+    if (this.networkDetector) {
+      networkQuality = await this.networkDetector.detectNetworkQuality();
     }
 
-    // 根据网络质量调整基础分片大小
+    // 使用MemoryManager获取最优分片大小
+    let optimalSize = MemoryManager.getOptimalChunkSize(file.size);
+
+    // 根据网络质量进一步调整
     switch (networkQuality) {
       case NetworkQuality.POOR:
-        baseChunkSize = 1 * 1024 * 1024; // 1MB
+        optimalSize = Math.min(optimalSize, 1 * 1024 * 1024); // 最大1MB
         break;
-      case NetworkQuality.MEDIUM:
-        baseChunkSize = 2 * 1024 * 1024; // 2MB
-        break;
-      case NetworkQuality.GOOD:
-        baseChunkSize = 4 * 1024 * 1024; // 4MB
+      case NetworkQuality.LOW:
+        optimalSize = Math.min(optimalSize, 2 * 1024 * 1024); // 最大2MB
         break;
       case NetworkQuality.EXCELLENT:
-        baseChunkSize = 8 * 1024 * 1024; // 8MB
+        optimalSize = Math.min(
+          Math.max(optimalSize, 5 * 1024 * 1024), // 至少5MB
+          this.MAX_CHUNK_SIZE
+        );
         break;
     }
 
-    // 根据文件大小进一步调整
-    if (file.size < 10 * 1024 * 1024) {
-      // 小于10MB
-      baseChunkSize = Math.min(baseChunkSize, 1 * 1024 * 1024);
-    } else if (file.size > 1 * 1024 * 1024 * 1024) {
-      // 大于1GB
-      baseChunkSize = Math.max(baseChunkSize, 4 * 1024 * 1024);
+    // 内存增长趋势监控，如果内存增长迅速，降低分片大小
+    if (
+      memoryStats.trend === MemoryTrend.GROWING &&
+      memoryStats.growthRate &&
+      memoryStats.growthRate > 2 * 1024 * 1024
+    ) {
+      optimalSize = Math.min(optimalSize, 2 * 1024 * 1024); // 最大2MB
     }
 
     // 确保分片大小在有效范围内
-    return Math.max(
-      this.MIN_CHUNK_SIZE,
-      Math.min(baseChunkSize, this.MAX_CHUNK_SIZE)
+    return Math.min(
+      Math.max(optimalSize, this.MIN_CHUNK_SIZE),
+      this.MAX_CHUNK_SIZE
     );
   }
 
   /**
    * 判断是否应该使用流式处理
-   * @param file 上传文件
    */
   private shouldUseStreams(file: IFileObject): boolean {
-    // 如果显式设置了useStreams，则遵循设置
-    if (typeof this.useStreams === 'boolean') {
+    // 如果文件元数据中明确指定了是否使用流，则遵循设置
+    if (file.meta && file.meta.useStreams !== undefined) {
+      return file.meta.useStreams;
+    }
+
+    // 如果配置中明确指定了是否使用流，则遵循配置
+    if (this.useStreams !== undefined) {
       return this.useStreams;
     }
 
-    // 检查环境是否支持流式处理
-    const supportsStreams = typeof ReadableStream !== 'undefined';
-    if (!supportsStreams) {
-      return false;
+    // 默认大文件使用流处理，小文件不使用
+    const largeFile = file.size > 50 * 1024 * 1024; // 50MB
+    return largeFile && typeof ReadableStream !== 'undefined';
+  }
+
+  /**
+   * 确定使用的分片大小
+   */
+  private determineChunkSize(file: IFileObject): number {
+    // 如果文件元数据中已有分片大小，则优先使用
+    if (file.meta && file.meta.chunkSize && file.meta.chunkSize > 0) {
+      return Math.min(
+        Math.max(file.meta.chunkSize, this.MIN_CHUNK_SIZE),
+        this.MAX_CHUNK_SIZE
+      );
     }
 
-    // 根据文件大小判断
-    // 只有大文件才使用流式处理，小文件使用普通方式更简单高效
-    return file.size > 100 * 1024 * 1024; // 大于100MB使用流
+    // 如果设置了固定分片大小且不是auto，则使用设置的值
+    if (this.chunkSize !== 'auto' && typeof this.chunkSize === 'number') {
+      return Math.min(
+        Math.max(this.chunkSize, this.MIN_CHUNK_SIZE),
+        this.MAX_CHUNK_SIZE
+      );
+    }
+
+    // 使用MemoryManager获取最优分片大小
+    const optimalSize = MemoryManager.getOptimalChunkSize(file.size);
+
+    // 确保分片大小在有效范围内
+    return Math.min(
+      Math.max(optimalSize, this.MIN_CHUNK_SIZE),
+      this.MAX_CHUNK_SIZE
+    );
   }
 
   /**
    * 创建常规分片
-   * @param file 文件对象
-   * @param chunkSize 分片大小
    */
   private async createRegularChunks(
     file: IFileObject,
     chunkSize: number
   ): Promise<ChunkData[]> {
-    const chunks: ChunkData[] = [];
-    const chunkCount = Math.ceil(file.size / chunkSize);
+    const fileSize = file.size;
+    const result: ChunkData[] = [];
+    let start = 0;
+    let index = 0;
 
-    for (let i = 0; i < chunkCount; i++) {
-      const start = i * chunkSize;
-      const end = Math.min(file.size, start + chunkSize);
+    while (start < fileSize) {
+      const end = Math.min(start + chunkSize, fileSize);
+      const chunkData = await this.getChunkData(file, {
+        index,
+        start,
+        end,
+        size: end - start,
+        fileSize,
+      });
 
-      // 对于浏览器环境
-      if (file instanceof Blob) {
-        chunks.push({
-          index: i,
-          data: file.slice(start, end),
-          size: end - start,
-          start,
-          end,
-        });
-      }
-      // 对于其他环境，例如小程序
-      else if (this.core && (this.core as any).adapter?.readChunk) {
-        const buffer = await (this.core as any).adapter.readChunk(
-          file.path || file.name,
-          start,
-          end - start
-        );
+      result.push({
+        index,
+        data: chunkData,
+        size: end - start,
+        start,
+        end,
+      });
 
-        chunks.push({
-          index: i,
-          data: buffer,
-          size: end - start,
-          start,
-          end,
-        });
-      } else {
-        throw new Error('无法创建文件分片：不支持的文件类型或缺少适配器');
-      }
+      start = end;
+      index++;
     }
 
-    return chunks;
+    return result;
   }
 
   /**
    * 创建流式分片
-   * @param file 文件对象
-   * @param suggestedChunkSize 建议的分片大小
    */
   private async createStreamChunks(
     file: IFileObject,
     suggestedChunkSize: number
   ): Promise<ChunkData[]> {
-    // 使用更小的分片大小进行流式处理
-    const chunkSize = Math.min(suggestedChunkSize, this.streamChunkSize);
+    // 在实际开发中实现流式处理
+    // 这里简化为普通分片处理
+    return this.createRegularChunks(file, suggestedChunkSize);
+  }
 
-    // 流式处理当前仅在浏览器环境下支持
-    if (!(file instanceof Blob) || !('stream' in Blob.prototype)) {
-      // 回退到常规分片
-      return this.createRegularChunks(file, chunkSize);
-    }
+  /**
+   * 创建大文件分片处理
+   */
+  private async createLargeFileChunks(file: IFileObject): Promise<ChunkData[]> {
+    // 获取大文件处理策略
+    const strategy = MemoryManager.getLargeFileStrategy(file.size);
+    const chunkSize = strategy.partSize;
 
-    // 在实际项目中，这里应该实现真正的流式处理
-    // 这里为了示例，仍使用常规分片
+    // 使用分片策略创建分片
     return this.createRegularChunks(file, chunkSize);
   }
 
   /**
-   * 动态调整分片大小
-   * @param reason 调整原因
-   * @param suggestion 建议值
+   * 调整分片大小
    */
   public adjustChunkSize(reason: string, suggestion?: number): void {
-    if (!this.enableOptimization) return;
+    this.logger.info(`调整分片大小，原因: ${reason}`);
 
-    if (
-      suggestion &&
-      suggestion >= this.MIN_CHUNK_SIZE &&
-      suggestion <= this.MAX_CHUNK_SIZE
-    ) {
-      this.logger.info(`根据${reason}调整分片大小为${suggestion}字节`);
-      if (this.chunkSize === 'auto') {
-        // 仍保持自动模式，但记录建议值供下次计算使用
-        this.streamChunkSize = suggestion; // 用streamChunkSize存储上次建议值
-      } else {
-        // 直接修改固定分片大小
-        this.chunkSize = suggestion;
+    if (suggestion && suggestion > 0) {
+      // 将建议的分片大小限制在合理范围内
+      const newChunkSize = Math.min(
+        Math.max(suggestion, this.MIN_CHUNK_SIZE),
+        this.MAX_CHUNK_SIZE
+      );
+
+      this.chunkSize = newChunkSize;
+      this.logger.info(`新的分片大小: ${newChunkSize} 字节`);
+    } else {
+      // 如果没有提供具体建议，则根据原因自动调整
+      if (reason === 'memoryWarning' || reason === 'poorNetwork') {
+        // 内存警告或网络差，减小分片大小
+        this.chunkSize = Math.max(
+          typeof this.chunkSize === 'number'
+            ? this.chunkSize / 2
+            : 1 * 1024 * 1024,
+          this.MIN_CHUNK_SIZE
+        );
+      } else if (
+        reason === 'excellentNetwork' ||
+        reason === 'memoryAvailable'
+      ) {
+        // 网络良好或内存充足，增大分片大小
+        this.chunkSize = Math.min(
+          typeof this.chunkSize === 'number'
+            ? this.chunkSize * 1.5
+            : 5 * 1024 * 1024,
+          this.MAX_CHUNK_SIZE
+        );
       }
+
+      this.logger.info(`自动调整后的分片大小: ${this.chunkSize} 字节`);
     }
   }
 }
