@@ -4,9 +4,11 @@
  */
 
 import BrowserAdapter from './BrowserAdapter';
+import WechatAdapter from './WechatAdapter';
 
-export { BrowserAdapter };
+export { BrowserAdapter, WechatAdapter };
 
 export default {
   BrowserAdapter,
+  WechatAdapter,
 };
