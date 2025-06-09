@@ -315,8 +315,17 @@ export interface IPlugin {
 
 // 上传适配器接口
 export interface IUploadAdapter {
-  readChunk: (filePath: string, start: number, size: number) => Promise<ArrayBuffer>;
-  uploadChunk: (url: string, chunk: ArrayBuffer, headers: Record<string, string>) => Promise<any>;
+  readChunk: (filePath: string | File | Blob | any, start: number, size: number) => Promise<ArrayBuffer>;
+  uploadChunk: (url: string, chunk: ArrayBuffer, headers: Record<string, string>, metadata?: Record<string, any>) => Promise<any>;
+  getFileInfo?: (file: any) => Promise<{ name: string; size: number; type?: string; path?: string; lastModified?: number }>;
+  getStorage?: () => any;
+  detectFeatures?: () => Record<string, boolean>;
+  setNetworkQuality?: (quality: NetworkQuality) => void;
+  getNetworkQuality?: () => NetworkQuality;
+  request?: (url: string, options?: any) => Promise<any>;
+  supportsFeature?: (feature: string) => boolean;
+  calculateFileHash?: (file: any, algorithm: string) => Promise<string>;
+  dispose?: () => void;
 }
 
 // 安全级别枚举
