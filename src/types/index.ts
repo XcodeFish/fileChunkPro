@@ -166,6 +166,8 @@ export enum UploadErrorType {
   VALIDATION_ERROR = 'VALIDATION_ERROR', // 验证错误
   CANCEL_ERROR = 'CANCEL_ERROR',         // 取消错误
   SECURITY_ERROR = 'SECURITY_ERROR',      // 安全错误
+  DATA_CORRUPTION_ERROR = 'DATA_CORRUPTION_ERROR', // 数据损坏错误
+  API_ERROR = 'API_ERROR',               // API错误
   UNKNOWN_ERROR = 'UNKNOWN_ERROR'         // 未知错误
 }
 
