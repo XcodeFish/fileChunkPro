@@ -282,7 +282,14 @@ export enum UploadErrorType {
   SECURITY_ERROR = 'SECURITY_ERROR',      // 安全错误
   DATA_CORRUPTION_ERROR = 'DATA_CORRUPTION_ERROR', // 数据损坏错误
   API_ERROR = 'API_ERROR',               // API错误
-  UNKNOWN_ERROR = 'UNKNOWN_ERROR'         // 未知错误
+  UNKNOWN_ERROR = 'UNKNOWN_ERROR',         // 未知错误
+  RATE_LIMIT_ERROR = 'RATE_LIMIT_ERROR',   // 请求速率限制错误
+  CONNECTION_RESET_ERROR = 'CONNECTION_RESET_ERROR', // 连接重置错误
+  SERVER_UNREACHABLE_ERROR = 'SERVER_UNREACHABLE_ERROR', // 服务器不可达错误
+  DNS_RESOLUTION_ERROR = 'DNS_RESOLUTION_ERROR', // DNS解析错误
+  AUTHENTICATION_ERROR = 'AUTHENTICATION_ERROR', // 认证失败错误
+  CONTENT_ENCODING_ERROR = 'CONTENT_ENCODING_ERROR', // 内容编码错误
+  DATA_PROCESSING_ERROR = 'DATA_PROCESSING_ERROR' // 数据处理错误
 }
 
 // 环境类型枚举
@@ -441,4 +448,155 @@ export interface UploadPerformanceStats {
     retried: number;           // 重试分片数
   };
   bytesUploaded: number;       // 已上传字节数
+}
+
+/**
+ * 错误严重程度枚举
+ */
+export enum ErrorSeverity {
+  /** 低严重度，不影响核心功能 */
+  LOW = 1,
+  
+  /** 中等严重度，会影响部分功能但系统仍可运行 */
+  MEDIUM = 2,
+  
+  /** 高严重度，会导致关键功能失败 */
+  HIGH = 3,
+  
+  /** 致命错误，导致整个系统不可用 */
+  CRITICAL = 4
+}
+
+/**
+ * 错误分组枚举，用于对错误进行分类
+ */
+export enum ErrorGroup {
+  /** 网络相关错误 */
+  NETWORK = 'network',
+  
+  /** 文件操作相关错误 */
+  FILE = 'file',
+  
+  /** 服务器响应相关错误 */
+  SERVER = 'server',
+  
+  /** 环境相关错误 */
+  ENVIRONMENT = 'environment',
+  
+  /** 系统资源相关错误 */
+  RESOURCE = 'resource',
+  
+  /** 权限相关错误 */
+  PERMISSION = 'permission',
+  
+  /** 安全相关错误 */
+  SECURITY = 'security',
+  
+  /** 用户操作相关错误 */
+  USER = 'user',
+  
+  /** 数据处理相关错误 */
+  DATA = 'data',
+  
+  /** 其他未分类错误 */
+  OTHER = 'other'
+}
+
+/**
+ * 错误恢复策略枚举
+ */
+export enum ErrorRecoveryStrategy {
+  /** 立即重试 */
+  RETRY_IMMEDIATELY = 'retry_immediately',
+  
+  /** 延迟重试 */
+  RETRY_WITH_DELAY = 'retry_with_delay',
+  
+  /** 增加延迟重试 */
+  RETRY_WITH_BACKOFF = 'retry_with_backoff',
+  
+  /** 降级处理 */
+  FALLBACK = 'fallback',
+  
+  /** 暂停后重试 */
+  PAUSE_AND_RETRY = 'pause_and_retry',
+  
+  /** 等待网络连接 */
+  WAIT_FOR_NETWORK = 'wait_for_network',
+  
+  /** 等待用户操作 */
+  WAIT_FOR_USER_ACTION = 'wait_for_user_action',
+  
+  /** 放弃 */
+  ABORT = 'abort',
+  
+  /** 重新初始化 */
+  REINITIALIZE = 'reinitialize'
+}
+
+/**
+ * 错误上下文数据接口
+ */
+export interface ErrorContextData {
+  /** 错误发生时间戳 */
+  timestamp: number;
+  
+  /** 网络状态信息 */
+  network?: {
+    online: boolean;
+    type?: string;
+    downlink?: number;
+    rtt?: number;
+  };
+  
+  /** 文件信息 */
+  file?: {
+    name?: string;
+    size?: number;
+    type?: string;
+    lastModified?: number;
+  };
+  
+  /** 分片信息 */
+  chunk?: {
+    index: number;
+    start: number;
+    end: number;
+    size: number;
+    attempts: number;
+  };
+  
+  /** 请求信息 */
+  request?: {
+    url: string;
+    method: string;
+    headers?: Record<string, string>;
+    timeout?: number;
+  };
+  
+  /** 响应信息 */
+  response?: {
+    status?: number;
+    statusText?: string;
+    headers?: Record<string, string>;
+    data?: any;
+  };
+  
+  /** 运行环境信息 */
+  environment?: {
+    type: Environment;
+    userAgent?: string;
+    platform?: string;
+    memory?: MemoryStats;
+  };
+  
+  /** 恢复历史 */
+  recoveryHistory?: Array<{
+    strategy: ErrorRecoveryStrategy;
+    timestamp: number;
+    successful: boolean;
+  }>;
+  
+  /** 其他自定义上下文数据 */
+  custom?: Record<string, any>;
 } 
