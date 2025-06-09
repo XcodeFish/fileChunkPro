@@ -198,6 +198,14 @@ export default class WorkerManager {
    * 初始化Worker池
    */
   public async initialize(): Promise<boolean> {
+    /* #if TARGET!=browser */
+    // 非浏览器环境，如小程序等不支持Web Worker
+    if (!this.isWorkerSupported && this.options.fallbackToMainThread) {
+      this.logger.warn('当前环境不支持Web Worker，将使用主线程处理任务');
+      this.initialized = true;
+      return true;
+    }
+    /* #endif */
     if (this.initialized || !this.isWorkerSupported) {
       return this.initialized;
     }
@@ -257,10 +265,19 @@ export default class WorkerManager {
    * @returns 创建的Worker实例或null（如果创建失败）
    */
   private async createWorker(type: string): Promise<Worker | null> {
+    /* #if TARGET!=browser */
+    // 非浏览器环境，如小程序等不支持Web Worker
+    this.logger.warn('当前环境不支持Web Workers，将使用主线程处理');
+    return null;
+    /* #endif */
+
     if (!this.isWorkerSupported) {
       this.logger.warn('当前环境不支持Web Workers');
       return null;
     }
+
+    /* #if TARGET=browser */
+    // 浏览器环境 - 支持Web Worker
 
     // 获取Worker配置
     const config = this.workerConfigs[type] || this.workerConfigs.default;
@@ -363,6 +380,7 @@ export default class WorkerManager {
 
       return null;
     }
+    /* #endif */
   }
 
   /**
@@ -1083,6 +1101,11 @@ export default class WorkerManager {
       type,
       reason: 'Worker不可用或任务发送失败',
     });
+
+    /* #if TARGET!=browser */
+    // 非浏览器环境，如小程序等不支持Web Worker
+    this.logger.info(`在非浏览器环境中执行任务: ${type}`);
+    /* #endif */
 
     try {
       // 根据任务类型在主线程中执行

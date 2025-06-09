@@ -2,18 +2,19 @@
  * SmartConcurrencyPlugin 单元测试
  */
 
+import { vi } from 'vitest';
+
 import EventBus from '../../src/core/EventBus';
-import { UploaderCore } from '../../src/core/UploaderCore';
-import { SmartConcurrencyPlugin } from '../../src/plugins/SmartConcurrencyPlugin';
+import SmartConcurrencyPlugin from '../../src/plugins/SmartConcurrencyPlugin';
 import { NetworkQuality } from '../../src/types';
 
 // 模拟UploaderCore
-jest.mock('../../src/core/UploaderCore');
-jest.mock('../../src/core/TaskScheduler');
+vi.mock('../../src/core/UploaderCore');
+vi.mock('../../src/core/TaskScheduler');
 
 describe('SmartConcurrencyPlugin', () => {
   let plugin: SmartConcurrencyPlugin;
-  let mockUploader: jest.Mocked<UploaderCore>;
+  let mockUploader: any;
   let mockEventBus: EventBus;
   let mockTaskScheduler: any;
   let mockPluginManager: any;
@@ -22,24 +23,24 @@ describe('SmartConcurrencyPlugin', () => {
     // 创建模拟对象
     mockEventBus = new EventBus();
     mockTaskScheduler = {
-      getConcurrency: jest.fn().mockReturnValue(3),
-      setConcurrency: jest.fn(),
-      updateConfig: jest.fn(),
-      isPaused: jest.fn().mockReturnValue(false),
-      pause: jest.fn(),
-      resume: jest.fn(),
+      getConcurrency: vi.fn().mockReturnValue(3),
+      setConcurrency: vi.fn(),
+      updateConfig: vi.fn(),
+      isPaused: vi.fn().mockReturnValue(false),
+      pause: vi.fn(),
+      resume: vi.fn(),
     };
 
     mockPluginManager = {
-      registerHook: jest.fn(),
-      removePluginHooks: jest.fn(),
+      registerHook: vi.fn(),
+      removePluginHooks: vi.fn(),
     };
 
     mockUploader = {
-      getEventBus: jest.fn().mockReturnValue(mockEventBus),
-      getTaskScheduler: jest.fn().mockReturnValue(mockTaskScheduler),
-      getPluginManager: jest.fn().mockReturnValue(mockPluginManager),
-    } as unknown as jest.Mocked<UploaderCore>;
+      getEventBus: vi.fn().mockReturnValue(mockEventBus),
+      getTaskScheduler: vi.fn().mockReturnValue(mockTaskScheduler),
+      getPluginManager: vi.fn().mockReturnValue(mockPluginManager),
+    };
 
     // 创建插件实例
     plugin = new SmartConcurrencyPlugin({
@@ -83,7 +84,7 @@ describe('SmartConcurrencyPlugin', () => {
       plugin.install(mockUploader);
 
       // 模拟设置一些定时器
-      const mockClearInterval = jest.spyOn(global, 'clearInterval');
+      const mockClearInterval = vi.spyOn(global, 'clearInterval');
 
       // 调用销毁方法
       plugin.destroy();
@@ -188,7 +189,7 @@ describe('SmartConcurrencyPlugin', () => {
       expect(mockTaskScheduler.setConcurrency).toHaveBeenCalledWith(3);
 
       // 清除模拟计数
-      mockTaskScheduler.setConcurrency.mockClear();
+      vi.resetAllMocks();
 
       // 重新开启自适应
       plugin.setAdaptationEnabled(true);
@@ -224,7 +225,7 @@ describe('SmartConcurrencyPlugin', () => {
 
     test('forceNetworkDetection应触发网络检测', () => {
       // 创建一个带有Spy的插件实例
-      const detectSpy = jest.spyOn(plugin as any, 'detectNetworkCondition');
+      const detectSpy = vi.spyOn(plugin as any, 'detectNetworkCondition');
 
       // 调用方法
       plugin.forceNetworkDetection();

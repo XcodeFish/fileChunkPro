@@ -115,7 +115,7 @@ export interface ResumeOptions {
  * 断点续传插件
  * 实现断点续传功能增强
  */
-export class ResumePlugin implements IPlugin {
+class ResumePlugin implements IPlugin {
   public readonly version = '2.0.0';
   private options: ResumeOptions;
   private storage: IStorage;
@@ -1518,3 +1518,5 @@ export class ResumePlugin implements IPlugin {
     }
   }
 }
+
+export default ResumePlugin;

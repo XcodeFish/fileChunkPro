@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { ChunkPlugin } from '../../../src/plugins/ChunkPlugin';
+import ChunkPlugin from '../../../src/plugins/ChunkPlugin';
 import { MemoryManager } from '../../../src/utils/MemoryManager';
 import { NetworkDetector } from '../../../src/utils/NetworkDetector';
 import { NetworkQuality } from '../../../src/utils/NetworkQuality';

@@ -95,7 +95,7 @@ const DEFAULT_PRIORITY_CONFIG: PriorityConfig = {
   maxPriority: TaskPriority.CRITICAL,
 };
 
-export class SmartConcurrencyPlugin implements IPlugin {
+class SmartConcurrencyPlugin implements IPlugin {
   public version = '2.0.0';
   private core: UploaderCore | null = null;
   private taskScheduler: TaskScheduler | null = null;
@@ -1654,3 +1654,5 @@ export class SmartConcurrencyPlugin implements IPlugin {
     }
   }
 }
+
+export default SmartConcurrencyPlugin;

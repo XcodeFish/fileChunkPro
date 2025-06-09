@@ -46,7 +46,7 @@ interface ChunkPluginOptions {
 /**
  * 分片处理插件，实现文件分片策略
  */
-export class ChunkPlugin implements IPlugin {
+class ChunkPlugin implements IPlugin {
   public readonly version = '2.0.0';
   private core: UploaderCore | null = null;
   private chunkSize: number | 'auto';

@@ -4,8 +4,11 @@
  */
 
 import { UploadError } from '../core/ErrorCenter';
-import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
+import { UploadErrorType, NetworkQuality, EnvironmentType } from '../types';
 import { Logger } from '../utils/Logger';
+
+import { IAdapter, RequestOptions, IStorage } from './interfaces';
+import { BrowserStorage } from './storage/BrowserStorage';
 
 // 扩展适配器配置接口
 interface BrowserAdapterOptions {
@@ -17,7 +20,7 @@ interface BrowserAdapterOptions {
   withCredentials?: boolean;
 }
 
-export class BrowserAdapter implements IUploadAdapter {
+export class BrowserAdapter implements IAdapter {
   private supportsFetchAPI: boolean;
   private supportsXHR2: boolean;
   private timeout: number;
@@ -28,6 +31,7 @@ export class BrowserAdapter implements IUploadAdapter {
   private withCredentials: boolean;
   private networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
   private logger: Logger;
+  private storage: IStorage;
 
   /**
    * 创建浏览器适配器实例
@@ -45,9 +49,366 @@ export class BrowserAdapter implements IUploadAdapter {
     this.abortSignal = options.abortSignal;
     this.withCredentials = options.withCredentials || false;
     this.logger = new Logger('BrowserAdapter');
+    this.storage = new BrowserStorage();
 
     // 验证浏览器环境
     this.validateEnvironment();
+  }
+
+  /**
+   * 获取环境类型
+   * @returns 环境类型
+   */
+  getEnvironmentType(): EnvironmentType {
+    return 'browser';
+  }
+
+  /**
+   * 获取存储实例
+   * @returns 存储实例
+   */
+  getStorage(): IStorage {
+    return this.storage;
+  }
+
+  /**
+   * 获取存储提供者（别名，兼容旧接口）
+   * @returns 存储实例
+   */
+  getStorageProvider(): IStorage {
+    return this.getStorage();
+  }
+
+  /**
+   * 创建HTTP请求对象
+   * @param options 请求配置
+   * @returns 请求对象
+   */
+  createRequest(options: RequestOptions): {
+    send: (data?: {
+      data?: any;
+      headers?: Record<string, string>;
+    }) => Promise<any>;
+    abort: () => void;
+    on: (event: string, callback: (...args: any[]) => void) => void;
+  } {
+    const signal = options.signal || this.abortSignal;
+    const controller = new AbortController();
+    const listeners: Record<string, Array<(...args: any[]) => void>> = {};
+
+    const request = {
+      send: async (data?: { data?: any; headers?: Record<string, string> }) => {
+        try {
+          const response = await this.request(options.url, {
+            method: options.method || 'GET',
+            headers: { ...options.headers, ...(data?.headers || {}) },
+            body: data?.data,
+            timeout: options.timeout || this.timeout,
+            signal: controller.signal,
+            onProgress: options.onProgress || this.progressCallback,
+            withCredentials: options.withCredentials || this.withCredentials,
+          });
+
+          // 触发成功事件
+          if (listeners['success']) {
+            listeners['success'].forEach(callback => callback(response));
+          }
+
+          return response;
+        } catch (error) {
+          // 触发错误事件
+          if (listeners['error']) {
+            listeners['error'].forEach(callback => callback(error));
+          }
+          throw error;
+        }
+      },
+      abort: () => {
+        controller.abort();
+        // 触发中止事件
+        if (listeners['abort']) {
+          listeners['abort'].forEach(callback => callback());
+        }
+      },
+      on: (event: string, callback: (...args: any[]) => void) => {
+        if (!listeners[event]) {
+          listeners[event] = [];
+        }
+        listeners[event].push(callback);
+      },
+    };
+
+    // 如果提供了外部信号，监听它的中止事件
+    if (signal) {
+      signal.addEventListener('abort', () => request.abort());
+    }
+
+    return request;
+  }
+
+  /**
+   * 读取文件
+   * @param file 文件对象
+   * @param start 开始位置
+   * @param size 读取大小
+   * @returns Promise<ArrayBuffer>
+   */
+  async readFile(file: any, start: number, size: number): Promise<ArrayBuffer> {
+    return this.readChunk(file, start, size);
+  }
+
+  /**
+   * 创建文件读取器
+   * @returns 文件读取器
+   */
+  createFileReader(): {
+    readAsArrayBuffer: (blob: Blob) => void;
+    onload: ((this: FileReader, ev: ProgressEvent<FileReader>) => any) | null;
+    onerror: ((this: FileReader, ev: ProgressEvent<FileReader>) => any) | null;
+  } {
+    return new FileReader();
+  }
+
+  /**
+   * 获取文件信息
+   * @param file 文件对象
+   * @returns 文件信息
+   */
+  async getFileInfo(file: any): Promise<{
+    name: string;
+    size: number;
+    type?: string;
+    lastModified?: number;
+  }> {
+    if (file instanceof File) {
+      return {
+        name: file.name,
+        size: file.size,
+        type: file.type,
+        lastModified: file.lastModified,
+      };
+    } else if (file instanceof Blob) {
+      // Blob没有name和lastModified属性
+      return {
+        name: 'blob',
+        size: file.size,
+        type: file.type,
+      };
+    } else {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '浏览器适配器仅支持File或Blob类型的文件'
+      );
+    }
+  }
+
+  /**
+   * 执行HTTP请求
+   * @param url 请求URL
+   * @param options 请求选项
+   */
+  async request(url: string, options: RequestOptions = {}): Promise<any> {
+    if (this.supportsFetchAPI) {
+      return this.requestWithFetch(url, options);
+    } else if (this.supportsXHR2) {
+      return this.requestWithXhr(url, options);
+    } else {
+      throw new UploadError(
+        UploadErrorType.ENVIRONMENT_ERROR,
+        '当前浏览器不支持现代HTTP请求API'
+      );
+    }
+  }
+
+  /**
+   * 使用Fetch API发送请求
+   * @private
+   */
+  private async requestWithFetch(
+    url: string,
+    options: RequestOptions
+  ): Promise<any> {
+    const {
+      method = 'GET',
+      headers = {},
+      body,
+      timeout = this.timeout,
+      signal,
+      withCredentials,
+    } = options;
+
+    try {
+      const controller = new AbortController();
+      const timeoutId = timeout
+        ? setTimeout(() => controller.abort(), timeout)
+        : null;
+
+      // 合并外部信号和内部信号
+      if (signal) {
+        signal.addEventListener('abort', () => controller.abort());
+      }
+
+      const response = await fetch(url, {
+        method,
+        headers,
+        body,
+        credentials: withCredentials ? 'include' : 'same-origin',
+        signal: controller.signal,
+      });
+
+      if (timeoutId) clearTimeout(timeoutId);
+
+      let responseData;
+      const contentType = response.headers.get('content-type');
+
+      // 根据响应类型解析响应
+      if (options.responseType === 'arraybuffer') {
+        responseData = await response.arrayBuffer();
+      } else if (options.responseType === 'blob') {
+        responseData = await response.blob();
+      } else if (contentType?.includes('application/json')) {
+        responseData = await response.json();
+      } else {
+        responseData = await response.text();
+      }
+
+      return {
+        ok: response.ok,
+        status: response.status,
+        statusText: response.statusText,
+        data: responseData,
+        headers: this.parseHeaders(response.headers),
+      };
+    } catch (error: any) {
+      if (error.name === 'AbortError') {
+        throw new UploadError(UploadErrorType.TIMEOUT_ERROR, '请求超时', error);
+      }
+      throw new UploadError(UploadErrorType.NETWORK_ERROR, '请求失败', error);
+    }
+  }
+
+  /**
+   * 使用XMLHttpRequest发送请求
+   * @private
+   */
+  private requestWithXhr(url: string, options: RequestOptions): Promise<any> {
+    return new Promise((resolve, reject) => {
+      const xhr = new XMLHttpRequest();
+      const {
+        method = 'GET',
+        headers = {},
+        body,
+        timeout = this.timeout,
+        onProgress,
+        withCredentials,
+      } = options;
+
+      xhr.open(method, url, true);
+
+      // 设置响应类型
+      if (options.responseType) {
+        xhr.responseType = options.responseType;
+      }
+
+      // 设置请求头
+      Object.keys(headers).forEach(key => {
+        xhr.setRequestHeader(key, headers[key]);
+      });
+
+      // 设置超时
+      xhr.timeout = timeout;
+
+      // 设置是否携带凭证
+      xhr.withCredentials = withCredentials ?? this.withCredentials;
+
+      // 设置进度回调
+      if (onProgress && xhr.upload) {
+        xhr.upload.addEventListener('progress', event => {
+          if (event.lengthComputable) {
+            onProgress(event.loaded / event.total);
+          }
+        });
+      }
+
+      // 设置中止信号监听
+      if (options.signal) {
+        options.signal.addEventListener('abort', () => xhr.abort());
+      }
+
+      xhr.onload = function () {
+        let responseData;
+        try {
+          if (
+            xhr.responseType === 'arraybuffer' ||
+            xhr.responseType === 'blob'
+          ) {
+            responseData = xhr.response;
+          } else if (
+            xhr.getResponseHeader('content-type')?.includes('application/json')
+          ) {
+            responseData = JSON.parse(xhr.responseText);
+          } else {
+            responseData = xhr.responseText;
+          }
+        } catch (e) {
+          responseData = xhr.responseText;
+        }
+
+        const response = {
+          ok: xhr.status >= 200 && xhr.status < 300,
+          status: xhr.status,
+          statusText: xhr.statusText,
+          data: responseData,
+          headers: {},
+        };
+
+        // 解析响应头
+        const headerString = xhr.getAllResponseHeaders();
+        const headerPairs = headerString.split('\u000d\u000a');
+        for (let i = 0; i < headerPairs.length; i++) {
+          const headerPair = headerPairs[i];
+          const index = headerPair.indexOf('\u003a\u0020');
+          if (index > 0) {
+            const key = headerPair.substring(0, index);
+            const val = headerPair.substring(index + 2);
+            response.headers[key.toLowerCase()] = val;
+          }
+        }
+
+        resolve(response);
+      };
+
+      xhr.onerror = function () {
+        reject(
+          new UploadError(UploadErrorType.NETWORK_ERROR, '网络请求失败', {
+            status: xhr.status,
+          })
+        );
+      };
+
+      xhr.ontimeout = function () {
+        reject(
+          new UploadError(UploadErrorType.TIMEOUT_ERROR, '请求超时', {
+            timeout,
+          })
+        );
+      };
+
+      // 发送请求
+      xhr.send(body);
+    });
+  }
+
+  /**
+   * 解析响应头
+   * @private
+   */
+  private parseHeaders(headers: Headers): Record<string, string> {
+    const result: Record<string, string> = {};
+    headers.forEach((value, key) => {
+      result[key.toLowerCase()] = value;
+    });
+    return result;
   }
 
   /**
@@ -633,18 +994,25 @@ export class BrowserAdapter implements IUploadAdapter {
    */
   public detectFeatures(): Record<string, boolean> {
     return {
-      fetch: this.supportsFetchAPI,
-      xhr2: this.supportsXHR2,
-      fileAPI: typeof File !== 'undefined' && typeof Blob !== 'undefined',
+      fileReader: typeof FileReader !== 'undefined',
+      blob: typeof Blob !== 'undefined',
+      file: typeof File !== 'undefined',
       formData: typeof FormData !== 'undefined',
-      streams: typeof ReadableStream !== 'undefined',
-      workers: typeof Worker !== 'undefined',
+      arrayBuffer: typeof ArrayBuffer !== 'undefined',
+      fetch: typeof fetch === 'function',
+      xhr2:
+        typeof XMLHttpRequest !== 'undefined' &&
+        'upload' in new XMLHttpRequest(),
+      blobSlice: typeof Blob !== 'undefined' && 'slice' in Blob.prototype,
+      webCrypto:
+        typeof crypto !== 'undefined' && typeof crypto.subtle !== 'undefined',
       serviceWorker: 'serviceWorker' in navigator,
-      localStorage: this.isStorageAvailable(),
-      indexedDB: 'indexedDB' in window,
-      webSocket: 'WebSocket' in window,
-      textEncoder: typeof TextEncoder !== 'undefined',
-      performance: 'performance' in window,
+      indexedDB: typeof indexedDB !== 'undefined',
+      webSocket: typeof WebSocket !== 'undefined',
+      webWorker: typeof Worker !== 'undefined',
+      sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
+      localStorage: typeof localStorage !== 'undefined',
+      sessionStorage: typeof sessionStorage !== 'undefined',
     };
   }
 }

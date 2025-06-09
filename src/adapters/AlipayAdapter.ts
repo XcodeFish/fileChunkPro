@@ -10,10 +10,10 @@
  */
 
 import { UploadError } from '../core/ErrorCenter';
-import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
+import { UploadErrorType, NetworkQuality, EnvironmentType } from '../types';
 import { Logger } from '../utils/Logger';
 
-import { IStorage } from './interfaces';
+import { IAdapter, RequestOptions, IStorage, FileInfo } from './interfaces';
 import { MiniProgramStorage } from './storage/MiniProgramStorage';
 
 // 支付宝小程序适配器配置接口
@@ -24,13 +24,14 @@ interface AlipayAdapterOptions {
   abortSignal?: { aborted: boolean }; // 中止信号
 }
 
-export default class AlipayAdapter implements IUploadAdapter {
+export class AlipayAdapter implements IAdapter {
   private timeout: number;
   private maxRetries: number;
   private progressCallback?: (progress: number) => void;
   private abortSignal?: { aborted: boolean };
   private networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
   private logger: Logger;
+  private storage: IStorage;
 
   /**
    * 创建支付宝小程序适配器实例
@@ -42,6 +43,7 @@ export default class AlipayAdapter implements IUploadAdapter {
     this.progressCallback = options.progressCallback;
     this.abortSignal = options.abortSignal;
     this.logger = new Logger('AlipayAdapter');
+    this.storage = new MiniProgramStorage('alipay');
 
     // 检测并警告worker设置
     if ((options as any).useWorker) {
@@ -50,6 +52,273 @@ export default class AlipayAdapter implements IUploadAdapter {
 
     // 验证支付宝小程序环境
     this.validateEnvironment();
+  }
+
+  /**
+   * 获取环境类型
+   * @returns 环境类型
+   */
+  getEnvironmentType(): EnvironmentType {
+    return 'alipay';
+  }
+
+  /**
+   * 创建HTTP请求对象
+   * @param options 请求配置
+   * @returns 请求对象
+   */
+  createRequest(options: RequestOptions): {
+    send: (data?: {
+      data?: any;
+      headers?: Record<string, string>;
+    }) => Promise<any>;
+    abort: () => void;
+    on: (event: string, callback: (...args: any[]) => void) => void;
+  } {
+    const listeners: Record<string, Array<(...args: any[]) => void>> = {};
+    const requestTask: any = null;
+
+    const request = {
+      send: async (data?: { data?: any; headers?: Record<string, string> }) => {
+        try {
+          const response = await this.request(options.url, {
+            method: options.method || 'GET',
+            headers: { ...options.headers, ...(data?.headers || {}) },
+            body: data?.data,
+            timeout: options.timeout || this.timeout,
+          });
+
+          // 触发成功事件
+          if (listeners['success']) {
+            listeners['success'].forEach(callback => callback(response));
+          }
+
+          return response;
+        } catch (error) {
+          // 触发错误事件
+          if (listeners['error']) {
+            listeners['error'].forEach(callback => callback(error));
+          }
+          throw error;
+        }
+      },
+      abort: () => {
+        if (requestTask && typeof requestTask.abort === 'function') {
+          requestTask.abort();
+          // 触发中止事件
+          if (listeners['abort']) {
+            listeners['abort'].forEach(callback => callback());
+          }
+        }
+      },
+      on: (event: string, callback: (...args: any[]) => void) => {
+        if (!listeners[event]) {
+          listeners[event] = [];
+        }
+        listeners[event].push(callback);
+      },
+    };
+
+    return request;
+  }
+
+  /**
+   * 获取存储提供者
+   */
+  getStorage(): IStorage {
+    return this.storage;
+  }
+
+  /**
+   * 获取存储提供者（别名，兼容旧接口）
+   * @returns 存储实例
+   */
+  getStorageProvider(): IStorage {
+    return this.getStorage();
+  }
+
+  /**
+   * 读取文件
+   * @param file 文件路径
+   * @param start 开始位置
+   * @param size 读取大小
+   * @returns Promise<ArrayBuffer>
+   */
+  async readFile(file: any, start: number, size: number): Promise<ArrayBuffer> {
+    if (typeof file === 'string') {
+      return this.readChunk(file, start, size);
+    } else if (file && typeof file.path === 'string') {
+      return this.readChunk(file.path, start, size);
+    } else {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '支付宝小程序适配器需要文件路径字符串或包含path属性的对象'
+      );
+    }
+  }
+
+  /**
+   * 创建文件读取器
+   * @returns 文件读取器模拟对象
+   */
+  createFileReader(): any {
+    // 支付宝小程序没有FileReader，返回模拟对象
+    const callbacks: Record<string, any> = {};
+    const reader = {
+      readAsArrayBuffer: (blob: any) => {
+        const fs = my.getFileSystemManager();
+        // 如果是文件路径
+        if (typeof blob === 'string') {
+          fs.readFile({
+            filePath: blob,
+            success: res => {
+              if (callbacks.onload) {
+                callbacks.onload({ target: { result: res.data } });
+              }
+            },
+            fail: error => {
+              if (callbacks.onerror) {
+                callbacks.onerror({ target: { error } });
+              }
+            },
+          });
+        } else if (blob && typeof blob.path === 'string') {
+          fs.readFile({
+            filePath: blob.path,
+            success: res => {
+              if (callbacks.onload) {
+                callbacks.onload({ target: { result: res.data } });
+              }
+            },
+            fail: error => {
+              if (callbacks.onerror) {
+                callbacks.onerror({ target: { error } });
+              }
+            },
+          });
+        } else {
+          if (callbacks.onerror) {
+            callbacks.onerror({
+              target: {
+                error: new Error(
+                  '无效的文件对象，需要文件路径或包含path属性的对象'
+                ),
+              },
+            });
+          }
+        }
+      },
+      set onload(callback: any) {
+        callbacks.onload = callback;
+      },
+      set onerror(callback: any) {
+        callbacks.onerror = callback;
+      },
+    };
+
+    return reader;
+  }
+
+  /**
+   * 获取文件信息
+   * @param file 文件路径或文件对象
+   * @returns 文件信息
+   */
+  async getFileInfo(file: any): Promise<FileInfo> {
+    const path = typeof file === 'string' ? file : file.path;
+
+    if (!path) {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '无效的文件对象，需要文件路径或包含path属性的对象'
+      );
+    }
+
+    return new Promise<FileInfo>((resolve, reject) => {
+      my.getFileInfo({
+        apFilePath: path,
+        success: res => {
+          resolve({
+            name: path.substring(path.lastIndexOf('/') + 1),
+            size: res.size,
+            path,
+          });
+        },
+        fail: error => {
+          reject(
+            new UploadError(
+              UploadErrorType.FILE_ERROR,
+              `获取文件信息失败: ${error.errorMessage || JSON.stringify(error)}`,
+              error
+            )
+          );
+        },
+      });
+    });
+  }
+
+  /**
+   * 执行HTTP请求
+   * @param url 请求URL
+   * @param options 请求选项
+   */
+  async request(url: string, options: RequestOptions = {}): Promise<any> {
+    const {
+      method = 'GET',
+      headers = {},
+      body,
+      timeout = this.timeout,
+    } = options;
+
+    return new Promise((resolve, reject) => {
+      const task = my.request({
+        url,
+        method: method as any,
+        headers,
+        data: body,
+        timeout,
+        success: res => {
+          resolve({
+            ok: res.status >= 200 && res.status < 300,
+            status: res.status,
+            statusText: res.statusCode ? String(res.statusCode) : '',
+            data: res.data,
+            headers: res.headers || {},
+          });
+        },
+        fail: error => {
+          if (error.errorMessage && error.errorMessage.includes('abort')) {
+            reject(
+              new UploadError(UploadErrorType.CANCEL_ERROR, '请求被中止', error)
+            );
+          } else if (
+            error.errorMessage &&
+            error.errorMessage.includes('timeout')
+          ) {
+            reject(
+              new UploadError(UploadErrorType.TIMEOUT_ERROR, '请求超时', error)
+            );
+          } else {
+            reject(
+              new UploadError(
+                UploadErrorType.NETWORK_ERROR,
+                `请求失败: ${error.errorMessage || JSON.stringify(error)}`,
+                error
+              )
+            );
+          }
+        },
+      });
+
+      // 如果提供了中止信号
+      if (options.signal) {
+        options.signal.addEventListener('abort', () => {
+          if (task && typeof task.abort === 'function') {
+            task.abort();
+          }
+        });
+      }
+    });
   }
 
   /**
@@ -404,26 +673,6 @@ export default class AlipayAdapter implements IUploadAdapter {
       return true;
     } catch (e) {
       return false;
-    }
-  }
-
-  /**
-   * 获取存储接口实现
-   * @returns 支付宝小程序存储适配器实例
-   */
-  public getStorage(): IStorage {
-    try {
-      return new MiniProgramStorage({
-        storageApi: my,
-        keyPrefix: 'fileChunkPro_ali_',
-      });
-    } catch (error) {
-      this.logger.error('创建存储适配器失败', error);
-      throw new UploadError(
-        UploadErrorType.STORAGE_ERROR,
-        '初始化支付宝存储适配器失败',
-        error as Error
-      );
     }
   }
 

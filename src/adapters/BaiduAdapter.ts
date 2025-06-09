@@ -10,10 +10,10 @@
  */
 
 import { UploadError } from '../core/ErrorCenter';
-import { IUploadAdapter, UploadErrorType, NetworkQuality } from '../types';
+import { UploadErrorType, NetworkQuality, EnvironmentType } from '../types';
 import { Logger } from '../utils/Logger';
 
-import { IStorage } from './interfaces';
+import { IAdapter, RequestOptions, IStorage, FileInfo } from './interfaces';
 import { MiniProgramStorage } from './storage/MiniProgramStorage';
 
 // 百度小程序适配器配置接口
@@ -24,13 +24,14 @@ interface BaiduAdapterOptions {
   abortSignal?: { aborted: boolean }; // 中止信号
 }
 
-export default class BaiduAdapter implements IUploadAdapter {
+export class BaiduAdapter implements IAdapter {
   private timeout: number;
   private maxRetries: number;
   private progressCallback?: (progress: number) => void;
   private abortSignal?: { aborted: boolean };
   private networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
   private logger: Logger;
+  private storage: IStorage;
 
   /**
    * 创建百度小程序适配器实例
@@ -42,6 +43,7 @@ export default class BaiduAdapter implements IUploadAdapter {
     this.progressCallback = options.progressCallback;
     this.abortSignal = options.abortSignal;
     this.logger = new Logger('BaiduAdapter');
+    this.storage = new MiniProgramStorage('baidu');
 
     // 检测并警告worker设置
     if ((options as any).useWorker) {
@@ -50,6 +52,13 @@ export default class BaiduAdapter implements IUploadAdapter {
 
     // 验证百度小程序环境
     this.validateEnvironment();
+  }
+
+  /**
+   * 获取环境类型
+   */
+  getEnvironmentType(): EnvironmentType {
+    return 'baidu';
   }
 
   /**
@@ -536,10 +545,7 @@ export default class BaiduAdapter implements IUploadAdapter {
    */
   public getStorage(): IStorage {
     try {
-      return new MiniProgramStorage({
-        storageApi: swan,
-        keyPrefix: 'fileChunkPro_baidu_',
-      });
+      return this.storage;
     } catch (error) {
       this.logger.error('创建存储适配器失败', error);
       throw new UploadError(
@@ -548,6 +554,14 @@ export default class BaiduAdapter implements IUploadAdapter {
         error as Error
       );
     }
+  }
+
+  /**
+   * 获取存储提供者（别名，兼容旧接口）
+   * @returns 存储实例
+   */
+  getStorageProvider(): IStorage {
+    return this.getStorage();
   }
 
   /**
@@ -587,5 +601,216 @@ export default class BaiduAdapter implements IUploadAdapter {
       storage: this.isStorageAvailable(),
       network: typeof swan.getNetworkType === 'function',
     };
+  }
+
+  /**
+   * 释放资源
+   */
+  dispose(): void {
+    // 清理资源
+  }
+
+  /**
+   * 创建HTTP请求对象
+   */
+  createRequest(options: RequestOptions): {
+    send: (data?: {
+      data?: any;
+      headers?: Record<string, string>;
+    }) => Promise<any>;
+    abort: () => void;
+    on: (event: string, callback: (...args: any[]) => void) => void;
+  } {
+    const listeners: Record<string, Array<(...args: any[]) => void>> = {};
+    const requestTask: any = null;
+
+    const request = {
+      send: async (data?: { data?: any; headers?: Record<string, string> }) => {
+        try {
+          const response = await this.request(url, {
+            method: options.method || 'GET',
+            headers: { ...options.headers, ...(data?.headers || {}) },
+            body: data?.data,
+            timeout: options.timeout || this.timeout,
+          });
+
+          // 触发成功事件
+          if (listeners['success']) {
+            listeners['success'].forEach(callback => callback(response));
+          }
+
+          return response;
+        } catch (error) {
+          // 触发错误事件
+          if (listeners['error']) {
+            listeners['error'].forEach(callback => callback(error));
+          }
+          throw error;
+        }
+      },
+      abort: () => {
+        if (requestTask && typeof requestTask.abort === 'function') {
+          requestTask.abort();
+          if (listeners['abort']) {
+            listeners['abort'].forEach(callback => callback());
+          }
+        }
+      },
+      on: (event: string, callback: (...args: any[]) => void) => {
+        if (!listeners[event]) {
+          listeners[event] = [];
+        }
+        listeners[event].push(callback);
+      },
+    };
+
+    return request;
+  }
+
+  /**
+   * 读取文件
+   */
+  async readFile(file: any, start: number, size: number): Promise<ArrayBuffer> {
+    if (typeof file === 'string') {
+      return this.readChunk(file, start, size);
+    } else if (file && typeof file.path === 'string') {
+      return this.readChunk(file.path, start, size);
+    } else {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '百度小程序适配器需要文件路径字符串或包含path属性的对象'
+      );
+    }
+  }
+
+  /**
+   * 创建文件读取器
+   */
+  createFileReader(): any {
+    const callbacks: Record<string, any> = {};
+    const reader = {
+      readAsArrayBuffer: (blob: any) => {
+        const fs = swan.getFileSystemManager();
+        const path = typeof blob === 'string' ? blob : blob?.path;
+
+        if (!path) {
+          if (callbacks.onerror) {
+            callbacks.onerror({
+              target: {
+                error: new Error('无效的文件对象'),
+              },
+            });
+          }
+          return;
+        }
+
+        fs.readFile({
+          filePath: path,
+          success: res => {
+            if (callbacks.onload) {
+              callbacks.onload({ target: { result: res.data } });
+            }
+          },
+          fail: error => {
+            if (callbacks.onerror) {
+              callbacks.onerror({ target: { error } });
+            }
+          },
+        });
+      },
+      set onload(callback: any) {
+        callbacks.onload = callback;
+      },
+      set onerror(callback: any) {
+        callbacks.onerror = callback;
+      },
+    };
+
+    return reader;
+  }
+
+  /**
+   * 获取文件信息
+   */
+  async getFileInfo(file: any): Promise<FileInfo> {
+    const path = typeof file === 'string' ? file : file.path;
+
+    if (!path) {
+      throw new UploadError(
+        UploadErrorType.FILE_ERROR,
+        '无效的文件对象，需要文件路径或包含path属性的对象'
+      );
+    }
+
+    return new Promise<FileInfo>((resolve, reject) => {
+      swan.getFileInfo({
+        filePath: path,
+        success: res => {
+          resolve({
+            name: path.substring(path.lastIndexOf('/') + 1),
+            size: res.size,
+            path,
+          });
+        },
+        fail: error => {
+          reject(
+            new UploadError(
+              UploadErrorType.FILE_ERROR,
+              `获取文件信息失败: ${error.errMsg || JSON.stringify(error)}`,
+              error
+            )
+          );
+        },
+      });
+    });
+  }
+
+  /**
+   * 执行HTTP请求
+   */
+  async request(url: string, options: RequestOptions = {}): Promise<any> {
+    const {
+      method = 'GET',
+      headers = {},
+      body,
+      timeout = this.timeout,
+    } = options;
+
+    return new Promise((resolve, reject) => {
+      const task = swan.request({
+        url,
+        method: method as any,
+        header: headers,
+        data: body,
+        timeout,
+        success: res => {
+          resolve({
+            ok: res.statusCode >= 200 && res.statusCode < 300,
+            status: res.statusCode,
+            statusText: res.errMsg,
+            data: res.data,
+            headers: res.header || {},
+          });
+        },
+        fail: error => {
+          reject(
+            new UploadError(
+              UploadErrorType.NETWORK_ERROR,
+              `请求失败: ${error.errMsg || JSON.stringify(error)}`,
+              error
+            )
+          );
+        },
+      });
+
+      // 如果提供了中止信号
+      if (options.signal) {
+        options.signal.addEventListener('abort', () => {
+          if (task && typeof task.abort === 'function') {
+            task.abort();
+          }
+        });
+      }
+    });
   }
 }

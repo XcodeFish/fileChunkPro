@@ -360,4 +360,30 @@ export class BrowserStorage implements IStorage {
       this.db = null;
     }
   }
+
+  /**
+   * 获取数据（别名，兼容旧接口）
+   * @param key 键名
+   * @returns 存储的值，不存在则返回null
+   */
+  async get(key: string): Promise<string | null> {
+    return this.getItem(key);
+  }
+
+  /**
+   * 存储数据（别名，兼容旧接口）
+   * @param key 键名
+   * @param value 值
+   */
+  async set(key: string, value: string): Promise<void> {
+    return this.setItem(key, value);
+  }
+
+  /**
+   * 删除数据（别名，兼容旧接口）
+   * @param key 键名
+   */
+  async remove(key: string): Promise<void> {
+    return this.removeItem(key);
+  }
 }

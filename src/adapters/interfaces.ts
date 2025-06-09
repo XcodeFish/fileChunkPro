@@ -60,14 +60,61 @@ export interface FileInfo {
 
 /**
  * 存储接口
+ * 定义统一的跨平台存储操作
  */
 export interface IStorage {
-  setItem(key: string, value: string): Promise<void>;
+  /**
+   * 获取存储项
+   * @param key 键名
+   */
   getItem(key: string): Promise<string | null>;
+
+  /**
+   * 设置存储项
+   * @param key 键名
+   * @param value 值
+   */
+  setItem(key: string, value: string): Promise<void>;
+
+  /**
+   * 删除存储项
+   * @param key 键名
+   */
   removeItem(key: string): Promise<void>;
+
+  /**
+   * 清空所有存储项
+   */
   clear(): Promise<void>;
+
+  /**
+   * 获取所有键名
+   */
   keys(): Promise<string[]>;
+
+  /**
+   * 检查存储是否可用
+   */
   isAvailable(): boolean;
+
+  /**
+   * 获取存储项（别名）
+   * @param key 键名
+   */
+  get?(key: string): Promise<string | null>;
+
+  /**
+   * 设置存储项（别名）
+   * @param key 键名
+   * @param value 值
+   */
+  set?(key: string, value: string): Promise<void>;
+
+  /**
+   * 删除存储项（别名）
+   * @param key 键名
+   */
+  remove?(key: string): Promise<void>;
 }
 
 /**
@@ -82,42 +129,74 @@ export interface IResponse {
 }
 
 /**
- * 统一适配器接口
- * 定义跨平台文件上传需要的核心功能
+ * 平台适配器接口
+ * 定义了不同环境适配器应当实现的通用方法
  */
 export interface IAdapter {
   /**
-   * 从文件中读取指定范围的数据
-   * @param file 文件对象、文件路径或文件ID
-   * @param start 起始字节位置
-   * @param size 要读取的字节数
+   * 获取环境类型
    */
-  readChunk(file: any, start: number, size: number): Promise<ArrayBuffer>;
+  getEnvironmentType(): EnvironmentType;
+
+  /**
+   * 读取文件内容
+   * @param file 文件/文件路径，根据不同平台可能是File对象、Blob或文件路径字符串
+   * @param start 开始位置，单位字节
+   * @param size 读取大小，单位字节
+   */
+  readFile(file: any, start: number, size: number): Promise<ArrayBuffer>;
+
+  /**
+   * 创建文件读取器
+   */
+  createFileReader(): any;
+
+  /**
+   * 获取文件信息
+   * @param file 文件对象
+   */
+  getFileInfo(file: any): Promise<FileInfo>;
+
+  /**
+   * 创建请求对象
+   * @param options 请求配置
+   */
+  createRequest(options: RequestOptions): {
+    send: (data?: {
+      data?: any;
+      headers?: Record<string, string>;
+    }) => Promise<any>;
+    abort: () => void;
+    on: (event: string, callback: (...args: any[]) => void) => void;
+  };
 
   /**
    * 上传数据块
-   * @param url 上传URL
+   * @param url 上传地址
    * @param chunk 数据块
-   * @param headers HTTP请求头
+   * @param headers 请求头
    * @param metadata 可选的元数据
    */
   uploadChunk(
     url: string,
     chunk: ArrayBuffer,
     headers: Record<string, string>,
-    metadata?: Record<string, any>
+    metadata?: {
+      chunkIndex?: number;
+      totalChunks?: number;
+      fileName?: string;
+    }
   ): Promise<any>;
 
   /**
-   * 获取文件信息
-   * @param file 文件对象或文件路径
-   */
-  getFileInfo(file: any): Promise<FileInfo>;
-
-  /**
-   * 获取存储实现
+   * 获取存储提供者
    */
   getStorage(): IStorage;
+
+  /**
+   * 获取存储提供者（别名，兼容旧接口）
+   */
+  getStorageProvider(): IStorage;
 
   /**
    * 检测环境特性
@@ -199,20 +278,35 @@ export abstract class AbstractAdapter implements IAdapter {
     }
   }
 
-  abstract readChunk(
+  abstract readFile(
     file: any,
     start: number,
     size: number
   ): Promise<ArrayBuffer>;
 
+  abstract createFileReader(): any;
+
+  abstract getFileInfo(file: any): Promise<FileInfo>;
+
+  abstract createRequest(options: RequestOptions): {
+    send: (data?: {
+      data?: any;
+      headers?: Record<string, string>;
+    }) => Promise<any>;
+    abort: () => void;
+    on: (event: string, callback: (...args: any[]) => void) => void;
+  };
+
   abstract uploadChunk(
     url: string,
     chunk: ArrayBuffer,
     headers: Record<string, string>,
-    metadata?: Record<string, any>
+    metadata?: {
+      chunkIndex?: number;
+      totalChunks?: number;
+      fileName?: string;
+    }
   ): Promise<any>;
-
-  abstract getFileInfo(file: any): Promise<FileInfo>;
 
   abstract getStorage(): IStorage;
 
