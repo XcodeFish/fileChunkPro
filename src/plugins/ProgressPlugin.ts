@@ -48,6 +48,8 @@ export class ProgressPlugin implements IPlugin {
     uploader.on('uploadStart', this.handleUploadStart.bind(this));
     uploader.on('chunkSuccess', this.handleChunkSuccess.bind(this));
     uploader.on('uploadComplete', this.handleUploadComplete.bind(this));
+    // 添加对complete事件的监听，确保在上传完成时也处理进度
+    uploader.on('complete', this.handleUploadComplete.bind(this));
     uploader.on('error', this.handleError.bind(this));
 
     // 注册钩子，获取分片总数
@@ -90,7 +92,8 @@ export class ProgressPlugin implements IPlugin {
   private handleUploadComplete(): void {
     this.activeUpload = false;
 
-    // 确保发送100%进度
+    // 确保发送100%进度，并且强制设置上传分片数等于总分片数
+    this.uploadedChunks = this.totalChunks;
     this.emitProgress(100);
   }
 

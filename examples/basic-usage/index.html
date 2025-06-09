@@ -148,12 +148,12 @@
     <div class="log" id="log"></div>
   </div>
 
-  <!-- 引入fileChunkPro库 -->
+  <!-- 引入FileChunkPro库 -->
   <script src="../../dist/browser/fileChunkPro.umd.js"></script>
 
   <script>
     // 初始化上传器
-    const uploader = new fileChunkPro.UploaderCore({
+    const uploader = new FileChunkPro.UploaderCore({
       endpoint: 'https://example.com/upload', // 替换为你的上传端点
       chunkSize: 2 * 1024 * 1024, // 2MB分片大小
       concurrency: 3, // 并发上传数量
@@ -165,13 +165,13 @@
     })
 
     // 注册内置插件
-    uploader.registerPlugin('validator', new fileChunkPro.ValidatorPlugin({
+    uploader.registerPlugin('validator', new FileChunkPro.Plugins.ValidatorPlugin({
       maxFileSize: 1024 * 1024 * 1024, // 最大1GB
       allowFileTypes: ['image/*', 'video/*', 'application/pdf', 'text/*']
     }))
 
-    uploader.registerPlugin('chunk', new fileChunkPro.ChunkPlugin())
-    uploader.registerPlugin('progress', new fileChunkPro.ProgressPlugin())
+    uploader.registerPlugin('chunk', new FileChunkPro.Plugins.ChunkPlugin())
+    uploader.registerPlugin('progress', new FileChunkPro.Plugins.ProgressPlugin())
 
     // DOM 元素
     const fileInput = document.getElementById('fileInput')
@@ -237,16 +237,24 @@
 
       try {
         // 注册事件监听
-        uploader.on('progress', (progress) =>
+        uploader.on('progress', (data) =>
         {
-          progressFill.style.width = `${progress}%`
-          progressText.textContent = `${Math.round(progress)}%`
+          const progressValue = typeof data === 'object' ? data.progress : data
+          progressFill.style.width = `${progressValue}%`
+          progressText.textContent = `${Math.round(progressValue)}%`
           statusText.textContent = '上传中...'
         })
 
         uploader.on('chunkSuccess', (data) =>
         {
           addLog(`分片 ${data.chunkIndex + 1}/${data.chunkCount} 上传成功`)
+        })
+
+        uploader.on('complete', () =>
+        {
+          // 手动设置进度为100%
+          progressFill.style.width = '100%'
+          progressText.textContent = '100%'
         })
 
         // 开始上传
@@ -275,7 +283,7 @@
     })
 
     // 初始化日志
-    addLog('fileChunkPro 初始化完成');
+    addLog('FileChunkPro 初始化完成');
   </script>
 </body>
 

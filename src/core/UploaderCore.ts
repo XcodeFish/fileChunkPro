@@ -316,6 +316,9 @@ export class UploaderCore {
       // 发送完成事件
       this.emit('complete', result);
 
+      // 同时触发uploadComplete事件，确保ProgressPlugin能接收到
+      this.emit('uploadComplete', this.currentFileId);
+
       // 从活动上传中移除
       this.activeUploads.delete(this.currentFileId);
 

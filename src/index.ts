@@ -22,7 +22,8 @@ export { MemoryManager } from './utils/MemoryManager';
 export { default as StorageUtils } from './utils/StorageUtils';
 
 // 导出UI组件
-export * as UI from './ui';
+// TODO: 需要添加Vue文件处理插件来支持Vue组件的打包
+// export * as UI from './ui';
 
 // 默认导出UploaderCore
 export default UploaderCore;

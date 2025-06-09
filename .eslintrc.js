@@ -33,35 +33,52 @@ module.exports = {
   ],
   plugins: ['@typescript-eslint', 'import', 'react', 'react-hooks'],
   rules: {
-    // 临时禁用警告级别规则以通过commit
-    'no-console': 'off',
-    'no-debugger': 'off',
-    'no-alert': 'off',
+    // 核心规则
+    'no-console': ['warn', { allow: ['warn', 'error'] }],
+    'no-debugger': 'warn',
+    'no-alert': 'warn',
     'no-var': 'error',
     'prefer-const': 'error',
-    'no-unused-vars': 'off',
-    'no-empty-function': 'off',
+    'no-unused-vars': 'off', // 使用 TypeScript 版本
+    'no-empty-function': 'off', // 使用 TypeScript 版本
 
     // TypeScript 规则
     '@typescript-eslint/no-unused-vars': ['error', { argsIgnorePattern: '^_' }],
     '@typescript-eslint/explicit-function-return-type': 'off',
     '@typescript-eslint/explicit-module-boundary-types': 'off',
-    '@typescript-eslint/no-explicit-any': 'off', // 临时关闭
-    '@typescript-eslint/no-empty-function': 'off',
-    '@typescript-eslint/no-non-null-assertion': 'off', // 临时关闭
+    '@typescript-eslint/no-explicit-any': 'warn',
+    '@typescript-eslint/no-empty-function': [
+      'error',
+      { allow: ['arrowFunctions'] },
+    ],
+    '@typescript-eslint/no-non-null-assertion': 'warn',
     '@typescript-eslint/no-var-requires': 'error',
-    '@typescript-eslint/ban-ts-comment': 'off', // 临时关闭
+    '@typescript-eslint/ban-ts-comment': 'warn',
 
     // 导入规则
-    'import/order': 'off',
+    'import/order': [
+      'error',
+      {
+        groups: [
+          'builtin',
+          'external',
+          'internal',
+          'parent',
+          'sibling',
+          'index',
+        ],
+        'newlines-between': 'always',
+        alphabetize: { order: 'asc', caseInsensitive: true },
+      },
+    ],
     'import/no-duplicates': 'error',
-    'import/no-unresolved': 'off',
+    'import/no-unresolved': 'off', // TypeScript 已处理
 
     // React 规则
     'react/prop-types': 'off',
     'react/react-in-jsx-scope': 'off',
     'react-hooks/rules-of-hooks': 'error',
-    'react-hooks/exhaustive-deps': 'off',
+    'react-hooks/exhaustive-deps': 'warn',
   },
   overrides: [
     {
