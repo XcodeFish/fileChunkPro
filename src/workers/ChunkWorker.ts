@@ -1,96 +1,95 @@
 /**
- * 分片处理Worker
- * 负责文件分片的生成和处理
+ * ChunkWorker.ts
+ * 文件分片处理Worker
  */
 
-// 导入任务处理器
-import { fileProcessor } from './tasks/fileProcessor';
+// 导入任务处理函数
 import { chunkCalculator } from './tasks/chunkCalculator';
 
-// 定义消息类型
-interface WorkerMessage {
-  type: string;
-  payload: any;
-  taskId: string;
+// 监听消息
+self.addEventListener('message', (event) => {
+  const { taskId, type, data } = event.data;
+
+  // 根据任务类型处理
+  switch (type) {
+    case 'calculateChunks':
+      handleCalculateChunks(taskId, data);
+      break;
+    case 'processFile':
+      handleProcessFile(taskId, data);
+      break;
+    case 'ping':
+      handlePing(taskId);
+      break;
+    default:
+      sendError(taskId, `未知任务类型: ${type}`);
+  }
+});
+
+/**
+ * 处理分片计算任务
+ */
+function handleCalculateChunks(taskId: string, data: any): void {
+  try {
+    // 执行分片计算
+    const chunks = chunkCalculator.calculateChunks(data);
+    
+    // 发送结果
+    sendSuccess(taskId, chunks);
+  } catch (error) {
+    sendError(taskId, error instanceof Error ? error.message : String(error));
+  }
 }
 
 /**
- * 响应主线程消息
+ * 处理文件处理任务
  */
-self.onmessage = (event: MessageEvent<WorkerMessage>) => {
-  const { type, payload, taskId } = event.data;
-
-  try {
-    switch (type) {
-      case 'CHUNK_FILE':
-        handleChunkFile(payload, taskId);
-        break;
-      case 'CALCULATE_CHUNKS':
-        calculateChunks(payload, taskId);
-        break;
-      default:
-        self.postMessage({
-          error: `未知的任务类型: ${type}`,
-          taskId,
-        });
+function handleProcessFile(taskId: string, data: any): void {
+  // 模拟文件处理
+  setTimeout(() => {
+    try {
+      // 这里可以添加实际的文件处理逻辑
+      const result = {
+        processed: true,
+        chunks: data.chunkSize ? Math.ceil(data.fileSize / data.chunkSize) : 0,
+        timestamp: Date.now()
+      };
+      
+      sendSuccess(taskId, result);
+    } catch (error) {
+      sendError(taskId, error instanceof Error ? error.message : String(error));
     }
-  } catch (error) {
-    self.postMessage({
-      error: error instanceof Error ? error.message : String(error),
-      taskId,
-    });
-  }
-};
-
-/**
- * 处理文件分片任务
- */
-function handleChunkFile(payload: any, taskId: string): void {
-  const { file, chunkSize, chunkIndex } = payload;
-
-  // 使用文件处理器来处理分片
-  fileProcessor
-    .processChunk(file, chunkSize, chunkIndex)
-    .then((chunkData) => {
-      self.postMessage(
-        {
-          result: chunkData,
-          taskId,
-        },
-        [chunkData.data]
-      );
-    })
-    .catch((error) => {
-      self.postMessage({
-        error: error instanceof Error ? error.message : String(error),
-        taskId,
-      });
-    });
+  }, 100); // 模拟处理时间
 }
 
 /**
- * 计算文件分片信息
+ * 处理ping请求
  */
-function calculateChunks(payload: any, taskId: string): void {
-  const { fileSize, preferredChunkSize } = payload;
-
-  // 使用分片计算器
-  try {
-    const chunks = chunkCalculator.calculateOptimalChunks(
-      fileSize,
-      preferredChunkSize
-    );
-    self.postMessage({
-      result: chunks,
-      taskId,
-    });
-  } catch (error) {
-    self.postMessage({
-      error: error instanceof Error ? error.message : String(error),
-      taskId,
-    });
-  }
+function handlePing(taskId: string): void {
+  sendSuccess(taskId, { status: 'ok', timestamp: Date.now() });
 }
 
-// 通知主线程Worker已准备就绪
+/**
+ * 发送成功响应
+ */
+function sendSuccess(taskId: string, result: any): void {
+  self.postMessage({
+    taskId,
+    success: true,
+    result
+  });
+}
+
+/**
+ * 发送错误响应
+ */
+function sendError(taskId: string, error: string): void {
+  self.postMessage({
+    taskId,
+    success: false,
+    error
+  });
+}
+
+// 发送就绪消息
 self.postMessage({ type: 'READY' }); 

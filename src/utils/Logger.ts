@@ -5,16 +5,16 @@
 
 // 日志级别枚举
 export enum LogLevel {
-  DEBUG = 0,
-  INFO = 1,
-  WARN = 2,
-  ERROR = 3,
-  NONE = 4,
+  NONE = 'none',
+  ERROR = 'error',
+  WARN = 'warn',
+  INFO = 'info',
+  DEBUG = 'debug',
 }
 
 // 日志配置接口
 export interface LoggerConfig {
-  level?: LogLevel; // 日志级别
+  level?: LogLevel | string;
   prefix?: string; // 日志前缀
   includeTimestamp?: boolean; // 是否包含时间戳
   maxLogSize?: number; // 最大日志大小
@@ -23,6 +23,8 @@ export interface LoggerConfig {
   persist?: boolean; // 是否持久化
   logToServer?: boolean; // 是否发送到服务器
   serverUrl?: string; // 服务器地址
+  enableConsole?: boolean;
+  enableStorage?: boolean;
 }
 
 // 全局日志配置
@@ -51,15 +53,22 @@ const logCache: Array<{
 export class Logger {
   private moduleName: string;
   private config: LoggerConfig;
+  private logLevel: string | LogLevel = LogLevel.INFO;
 
   /**
-   * 构造函数
+   * 创建日志记录器
    * @param moduleName 模块名称
    * @param config 日志配置
    */
   constructor(moduleName: string, config: LoggerConfig = {}) {
     this.moduleName = moduleName;
-    this.config = { ...globalConfig, ...config };
+    this.config = {
+      level: config.level || LogLevel.INFO,
+      enableConsole: config.enableConsole !== false,
+      enableStorage: !!config.enableStorage,
+      maxLogSize: config.maxLogSize || 1000,
+    };
+    this.logLevel = this.config.level || LogLevel.INFO;
   }
 
   /**
@@ -184,7 +193,7 @@ export class Logger {
     }
 
     // 添加日志级别
-    const levelStr = LogLevel[level];
+    const levelStr = level.toString();
     if (this.config.colorize ?? globalConfig.colorize) {
       parts.push(this.colorizeLevel(levelStr, level));
     } else {
@@ -278,7 +287,7 @@ export class Logger {
 
     try {
       const payload = {
-        level: LogLevel[level],
+        level: level.toString(),
         message,
         module: this.moduleName,
         timestamp: new Date().toISOString(),
@@ -325,6 +334,14 @@ export class Logger {
    */
   public static exportLogs(): string {
     return JSON.stringify(logCache);
+  }
+
+  /**
+   * 获取当前日志级别
+   * @returns 当前日志级别
+   */
+  getLevel(): string {
+    return this.logLevel;
   }
 }
 

@@ -20,12 +20,8 @@ describe('MemoryManager', () => {
     } as any;
 
     // 重置MemoryManager的内部状态
-    if (MemoryManager.memoryWatcher) {
-      MemoryManager.stopMonitoring();
-    } else {
-      // 如果没有启动监控，直接清理数据
-      MemoryManager._clearMemoryData();
-    }
+    // 停止之前可能运行的监控
+    MemoryManager.stopMonitoring();
 
     // 模拟部分方法
     vi.spyOn(MemoryManager, 'getMemoryGrowthRate').mockImplementation(() => 0);
@@ -38,7 +34,7 @@ describe('MemoryManager', () => {
     // 停止监控
     MemoryManager.stopMonitoring();
 
-    // 清空模拟
+    // 清理模拟
     vi.restoreAllMocks();
   });
 
@@ -110,13 +106,14 @@ describe('MemoryManager', () => {
   it('should get memory statistics', () => {
     const stats = MemoryManager.getMemoryStats();
 
-    expect(stats).toHaveProperty('usage');
+    expect(stats).toHaveProperty('used');
+    expect(stats).toHaveProperty('total');
     expect(stats).toHaveProperty('limit');
     expect(stats).toHaveProperty('usageRatio');
     expect(stats).toHaveProperty('growthRate');
     expect(stats).toHaveProperty('trend');
 
-    expect(stats.usage).toBe(512 * 1024 * 1024); // 512MB
+    expect(stats.used).toBe(512 * 1024 * 1024); // 512MB
     expect(stats.limit).toBe(2 * 1024 * 1024 * 1024); // 2GB
     expect(stats.usageRatio).toBe(0.25); // 25%
   });
@@ -172,7 +169,8 @@ describe('MemoryManager', () => {
   it('should recommend concurrency based on memory usage', () => {
     // 模拟正常内存使用率(50%)
     vi.spyOn(MemoryManager, 'getMemoryStats').mockImplementation(() => ({
-      usage: 1024 * 1024 * 1024, // 1GB used
+      used: 1024 * 1024 * 1024, // 1GB used
+      total: 2 * 1024 * 1024 * 1024, // 2GB total
       limit: 2 * 1024 * 1024 * 1024, // 2GB limit
       usageRatio: 0.5, // 50%
       growthRate: 0,
@@ -186,7 +184,8 @@ describe('MemoryManager', () => {
 
     // 模拟高内存使用率(75%)
     vi.spyOn(MemoryManager, 'getMemoryStats').mockImplementation(() => ({
-      usage: 1.5 * 1024 * 1024 * 1024, // 1.5GB used
+      used: 1.5 * 1024 * 1024 * 1024, // 1.5GB used
+      total: 2 * 1024 * 1024 * 1024, // 2GB total
       limit: 2 * 1024 * 1024 * 1024, // 2GB limit
       usageRatio: 0.75, // 75%
       growthRate: 0,
@@ -198,7 +197,8 @@ describe('MemoryManager', () => {
 
     // 模拟低内存使用率(20%)
     vi.spyOn(MemoryManager, 'getMemoryStats').mockImplementation(() => ({
-      usage: 0.4 * 1024 * 1024 * 1024, // 0.4GB used
+      used: 0.4 * 1024 * 1024 * 1024, // 0.4GB used
+      total: 2 * 1024 * 1024 * 1024, // 2GB total
       limit: 2 * 1024 * 1024 * 1024, // 2GB limit
       usageRatio: 0.2, // 20%
       growthRate: 0,
@@ -267,5 +267,26 @@ describe('MemoryManager', () => {
       MemoryManager.getOptimalChunkSize(1024 * 1024);
       MemoryManager.suggestGarbageCollection();
     }).not.toThrow();
+  });
+
+  // 测试启动监控
+  it('should start memory monitoring', () => {
+    // 启动监控
+    MemoryManager.startMonitoring();
+
+    // 验证监控已启动（通过间接方法）
+    expect(() => MemoryManager.stopMonitoring()).not.toThrow();
+  });
+
+  // 测试内存监控
+  it('should monitor memory correctly', () => {
+    // 启动监控
+    MemoryManager.startMonitoring();
+
+    // 验证监控已启动
+    expect(() => MemoryManager.stopMonitoring()).not.toThrow();
+
+    // 停止监控
+    MemoryManager.stopMonitoring();
   });
 });

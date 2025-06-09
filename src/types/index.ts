@@ -43,8 +43,11 @@ export interface ChunkInfo {
 // 任务调度器选项
 export interface TaskSchedulerOptions {
   concurrency?: number;      // 最大并发数
+  maxConcurrent?: number;    // 等同于concurrency，用于向后兼容
   retries?: number;          // 最大重试次数
+  retryCount?: number;       // 最大重试次数（与retries作用相同，用于向后兼容）
   retryDelay?: number;       // 重试延迟(毫秒)
+  timeout?: number;          // 超时时间
   priorityQueue?: boolean;   // 是否按优先级排序
   autoStart?: boolean;       // 是否自动启动
   memoryOptimization?: boolean; // 是否启用内存优化
@@ -86,8 +89,36 @@ export interface TaskMetadata {
   [key: string]: any;        // 其他元数据
 }
 
-// 网络状态类型
+/**
+ * 网络状态
+ */
 export type NetworkStatus = 'online' | 'offline' | 'unknown';
+
+/**
+ * 网络质量等级
+ */
+export enum NetworkQuality {
+  /** 未知网络质量 */
+  UNKNOWN = 'unknown',
+  
+  /** 网络断开 */
+  OFFLINE = 'offline',
+  
+  /** 非常差的网络质量 */
+  POOR = 'poor',
+  
+  /** 较差的网络质量 */
+  LOW = 'low',
+  
+  /** 中等网络质量 */
+  MEDIUM = 'medium',
+  
+  /** 良好网络质量 */
+  GOOD = 'good',
+  
+  /** 优秀网络质量 */
+  EXCELLENT = 'excellent'
+}
 
 // 任务优先级枚举
 export enum TaskPriority {
@@ -135,7 +166,7 @@ export enum Environment {
   Browser,
   ReactNative,
   WechatMP,
-  AlipayMP, 
+  AlipayMP,
   BytedanceMP,
   BaiduMP,
   TaroMP,
@@ -188,15 +219,6 @@ export interface HookResult {
   errors?: Error[];          // 执行错误列表
 }
 
-// 网络质量枚举
-export enum NetworkQuality {
-  POOR = 'poor',
-  FAIR = 'fair',
-  GOOD = 'good',
-  EXCELLENT = 'excellent',
-  UNKNOWN = 'unknown'
-}
-
 // 网络条件接口
 export interface NetworkCondition {
   type: string;              // 网络类型
@@ -221,8 +243,11 @@ export interface UploadStrategy {
 export interface RetryStrategy {
   maxRetries: number;        // 最大重试次数
   initialDelay: number;      // 初始延迟
+  baseDelay?: number;        // 初始延迟的别名
   maxDelay: number;          // 最大延迟
   factor: number;            // 延迟增长因子
+  multiplier?: number;       // 延迟增长因子的别名
+  jitter?: number;           // 抖动因子
   shouldRetry: (error: Error) => boolean; // 判断是否应该重试
 }
 

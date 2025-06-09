@@ -242,27 +242,22 @@ describe.skip('上传性能测试', () => {
       // 让前3个请求立即完成
       for (let i = 0; i < 3; i++) {
         if (sendPromiseResolvers[i]) {
-          // 触发上传进度事件
-          if (mockXHR.upload.addEventListener.mock.calls[i]) {
-            const progressCallback = mockXHR.upload.addEventListener.mock.calls[
-              i
-            ].find(call => call[0] === 'progress')?.[1];
-            if (progressCallback) {
-              progressCallback({
-                loaded: 5 * 1024 * 1024,
-                total: 5 * 1024 * 1024,
-              });
-            }
+          // 获取最后一次进度回调的值
+          const lastProgress = mockXHR.upload.addEventListener.mock.calls[
+            mockXHR.upload.addEventListener.mock.calls.length - 1
+          ].find((call: any[]) => call[0] === 'progress')?.[1];
+
+          if (lastProgress) {
+            lastProgress({ loaded: 5 * 1024 * 1024, total: 5 * 1024 * 1024 });
           }
 
-          // 触发请求完成事件
-          if (mockXHR.addEventListener.mock.calls[i]) {
-            const loadCallback = mockXHR.addEventListener.mock.calls[i].find(
-              call => call[0] === 'load'
-            )?.[1];
-            if (loadCallback) {
-              loadCallback();
-            }
+          // 触发加载完成事件
+          const loadHandler = mockXHR.addEventListener.mock.calls.find(
+            (call: any[]) => call[0] === 'load'
+          )?.[1];
+
+          if (loadHandler) {
+            loadHandler();
           }
 
           sendPromiseResolvers[i](true);
@@ -275,23 +270,22 @@ describe.skip('上传性能测试', () => {
       // 完成剩余请求
       for (let i = 3; i < sendPromiseResolvers.length; i++) {
         if (mockXHR.upload.addEventListener.mock.calls[i]) {
-          const progressCallback = mockXHR.upload.addEventListener.mock.calls[
+          // 获取最后一次进度回调的值
+          const lastProgress = mockXHR.upload.addEventListener.mock.calls[
             i
-          ].find(call => call[0] === 'progress')?.[1];
-          if (progressCallback) {
-            progressCallback({
-              loaded: 5 * 1024 * 1024,
-              total: 5 * 1024 * 1024,
-            });
-          }
-        }
+          ].find((call: any[]) => call[0] === 'progress')?.[1];
 
-        if (mockXHR.addEventListener.mock.calls[i]) {
-          const loadCallback = mockXHR.addEventListener.mock.calls[i].find(
-            call => call[0] === 'load'
+          if (lastProgress) {
+            lastProgress({ loaded: 5 * 1024 * 1024, total: 5 * 1024 * 1024 });
+          }
+
+          // 触发加载完成事件
+          const loadHandler = mockXHR.addEventListener.mock.calls[i].find(
+            (call: any[]) => call[0] === 'load'
           )?.[1];
-          if (loadCallback) {
-            loadCallback();
+
+          if (loadHandler) {
+            loadHandler();
           }
         }
 

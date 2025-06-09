@@ -1,89 +1,93 @@
 /**
+ * HashWorker.ts
  * 哈希计算Worker
- * 负责文件和分片的哈希计算
  */
 
-// 导入哈希计算器
+// 导入哈希计算函数
 import { hashCalculator } from './tasks/hashCalculator';
 
-// 定义消息类型
-interface WorkerMessage {
-  type: string;
-  payload: any;
-  taskId: string;
-}
+// 监听消息
+self.addEventListener('message', (event) => {
+  const { taskId, type, data } = event.data;
 
-/**
- * 响应主线程消息
- */
-self.onmessage = (event: MessageEvent<WorkerMessage>) => {
-  const { type, payload, taskId } = event.data;
-
-  try {
-    switch (type) {
-      case 'CALCULATE_HASH':
-        calculateHash(payload, taskId);
-        break;
-      case 'CALCULATE_CHUNK_HASH':
-        calculateChunkHash(payload, taskId);
-        break;
-      default:
-        self.postMessage({
-          error: `未知的任务类型: ${type}`,
-          taskId,
-        });
-    }
-  } catch (error) {
-    self.postMessage({
-      error: error instanceof Error ? error.message : String(error),
-      taskId,
-    });
+  // 根据任务类型处理
+  switch (type) {
+    case 'calculateHash':
+      handleCalculateHash(taskId, data);
+      break;
+    case 'calculateFileHash':
+      handleCalculateFileHash(taskId, data);
+      break;
+    case 'ping':
+      handlePing(taskId);
+      break;
+    default:
+      sendError(taskId, `未知任务类型: ${type}`);
   }
-};
+});
 
 /**
- * 计算文件哈希
+ * 处理哈希计算任务
  */
-function calculateHash(payload: any, taskId: string): void {
-  const { file, algorithm = 'md5' } = payload;
-
-  hashCalculator
-    .calculateFileHash(file, algorithm)
+function handleCalculateHash(taskId: string, data: any): void {
+  // 执行哈希计算
+  hashCalculator.calculateHash(data)
     .then((hash) => {
-      self.postMessage({
-        result: hash,
-        taskId,
-      });
+      // 发送结果
+      sendSuccess(taskId, { hash });
     })
     .catch((error) => {
-      self.postMessage({
-        error: error instanceof Error ? error.message : String(error),
-        taskId,
-      });
+      sendError(taskId, error instanceof Error ? error.message : String(error));
     });
 }
 
 /**
- * 计算分片哈希
+ * 处理文件哈希计算任务
  */
-function calculateChunkHash(payload: any, taskId: string): void {
-  const { chunk, algorithm = 'md5' } = payload;
-
-  hashCalculator
-    .calculateChunkHash(chunk, algorithm)
+function handleCalculateFileHash(taskId: string, data: any): void {
+  // 执行文件哈希计算
+  hashCalculator.calculateHash(data)
     .then((hash) => {
-      self.postMessage({
-        result: hash,
-        taskId,
+      // 发送结果
+      sendSuccess(taskId, { 
+        hash,
+        fileId: data.fileId,
+        timestamp: Date.now()
       });
     })
     .catch((error) => {
-      self.postMessage({
-        error: error instanceof Error ? error.message : String(error),
-        taskId,
-      });
+      sendError(taskId, error instanceof Error ? error.message : String(error));
     });
 }
 
-// 通知主线程Worker已准备就绪
+/**
+ * 处理ping请求
+ */
+function handlePing(taskId: string): void {
+  sendSuccess(taskId, { status: 'ok', timestamp: Date.now() });
+}
+
+/**
+ * 发送成功响应
+ */
+function sendSuccess(taskId: string, result: any): void {
+  self.postMessage({
+    taskId,
+    success: true,
+    result
+  });
+}
+
+/**
+ * 发送错误响应
+ */
+function sendError(taskId: string, error: string): void {
+  self.postMessage({
+    taskId,
+    success: false,
+    error
+  });
+}
+
+// 发送就绪消息
 self.postMessage({ type: 'READY' }); 

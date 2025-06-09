@@ -3,8 +3,8 @@ node_modules/
 
 # 构建产物
 dist/
-#types/
-#workers/
+types/
+workers/
 *.local
 stats/
 coverage/

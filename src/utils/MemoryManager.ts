@@ -3,22 +3,33 @@
  * 用于估计可用内存和优化分片大小
  */
 
-// 可以尝试导入EnvUtils，但为了避免循环依赖风险，复制了简单版本的环境检测
-enum SimpleEnvironment {
-  Browser,
-  WechatMP,
-  AlipayMP,
-  BytedanceMP,
-  BaiduMP,
-  Other,
+// 为小程序全局对象添加类型声明
+declare global {
+  const wx: any | undefined;
+  const my: any | undefined;
+  const tt: any | undefined;
+  const swan: any | undefined;
+
+  // 扩展Performance接口以支持Chrome特有的memory属性
+  interface Performance {
+    memory?: {
+      usedJSHeapSize: number;
+      jsHeapSizeLimit: number;
+      totalJSHeapSize: number;
+    };
+  }
 }
 
+// 可以尝试导入EnvUtils，但为了避免循环依赖风险，复制了简单版本的环境检测
+// 未来可能需要环境检测功能，暂时移除未使用的枚举
+
 export interface MemoryStats {
-  usage: number; // 已使用内存 (bytes)
+  used: number; // 已使用内存 (bytes)
+  total: number; // 总内存 (bytes)
   limit: number; // 内存限制 (bytes)
   usageRatio: number; // 内存使用率 (0-1)
-  growthRate: number; // 内存增长率 (bytes/s)
-  trend: 'stable' | 'growing' | 'decreasing'; // 内存趋势
+  growthRate?: number; // 内存增长率 (bytes/s)
+  trend?: 'stable' | 'growing' | 'decreasing'; // 内存趋势
 }
 
 /**
@@ -151,6 +162,7 @@ export class MemoryManager {
     // 根据内存增长趋势给出建议
     if (
       stats.trend === 'growing' &&
+      stats.growthRate &&
       stats.growthRate > 2 * 1024 * 1024 &&
       now - this.lastRecommendationTime > this.MIN_RECOMMENDATION_INTERVAL
     ) {
@@ -184,49 +196,88 @@ export class MemoryManager {
   /**
    * 获取内存统计信息
    */
-  static getMemoryStats(): MemoryStats {
-    const memory = this.getMemoryInfo();
-    const usage = memory.used;
-    const limit = memory.limit;
-    const usageRatio = usage / limit;
-    const growthRate = this.getMemoryGrowthRate();
+  public static getMemoryStats(): MemoryStats {
+    try {
+      // 浏览器环境
+      if (typeof window !== 'undefined' && window.performance) {
+        // Chrome浏览器
+        if (
+          typeof (window.performance as any).memory !== 'undefined' &&
+          (window.performance as any).memory.usedJSHeapSize !== undefined
+        ) {
+          const memoryInfo = (window.performance as any).memory;
+          const used = memoryInfo.usedJSHeapSize;
+          const total = memoryInfo.totalJSHeapSize;
+          const limit = memoryInfo.jsHeapSizeLimit;
+          const usageRatio = limit > 0 ? used / limit : 0;
+          const growthRate = this.getMemoryGrowthRate();
 
-    // 确定内存趋势
-    let trend: 'stable' | 'growing' | 'decreasing' = 'stable';
-    if (growthRate > 100 * 1024) {
-      // 增长超过100KB/s
-      trend = 'growing';
-    } else if (growthRate < -100 * 1024) {
-      // 减少超过100KB/s
-      trend = 'decreasing';
+          // 确定内存趋势
+          let trend: 'stable' | 'growing' | 'decreasing' = 'stable';
+          if (growthRate > 100 * 1024) {
+            // 增长超过100KB/s
+            trend = 'growing';
+          } else if (growthRate < -100 * 1024) {
+            // 减少超过100KB/s
+            trend = 'decreasing';
+          }
+
+          return { used, total, limit, usageRatio, growthRate, trend };
+        }
+      }
+
+      // Node.js环境
+      if (typeof process !== 'undefined' && process.memoryUsage) {
+        const memoryUsage = process.memoryUsage();
+        const used = memoryUsage.heapUsed;
+        const total = memoryUsage.heapTotal;
+        const limit = memoryUsage.rss;
+        const usageRatio = limit > 0 ? used / limit : 0;
+        const growthRate = this.getMemoryGrowthRate();
+
+        // 确定内存趋势
+        let trend: 'stable' | 'growing' | 'decreasing' = 'stable';
+        if (growthRate > 100 * 1024) {
+          // 增长超过100KB/s
+          trend = 'growing';
+        } else if (growthRate < -100 * 1024) {
+          // 减少超过100KB/s
+          trend = 'decreasing';
+        }
+
+        return { used, total, limit, usageRatio, growthRate, trend };
+      }
+    } catch (error) {
+      console.warn('获取内存统计信息失败', error);
     }
 
-    return { usage, limit, usageRatio, growthRate, trend };
+    // 默认返回
+    return {
+      used: 0,
+      total: 0,
+      limit: 0,
+      usageRatio: 0,
+      growthRate: 0,
+      trend: 'stable',
+    };
   }
 
   /**
-   * 获取内存信息
+   * 获取内存信息，包括使用率
+   * @returns 内存使用情况
    */
-  private static getMemoryInfo(): { used: number; limit: number } {
-    if (
-      typeof window !== 'undefined' &&
-      window.performance &&
-      (
-        window.performance as {
-          memory?: { usedJSHeapSize: number; jsHeapSizeLimit: number };
-        }
-      ).memory
-    ) {
-      const memory = (
-        window.performance as {
-          memory: { usedJSHeapSize: number; jsHeapSizeLimit: number };
-        }
-      ).memory;
-      return { used: memory.usedJSHeapSize, limit: memory.jsHeapSizeLimit };
-    }
+  public static getMemoryInfo(): {
+    usageRatio: number;
+    used: number;
+    limit: number;
+  } {
+    const stats = this.getMemoryStats();
 
-    // 默认假设值
-    return { used: 256 * 1024 * 1024, limit: 1024 * 1024 * 1024 };
+    return {
+      used: stats.used,
+      limit: stats.limit,
+      usageRatio: stats.usageRatio,
+    };
   }
 
   /**
@@ -290,7 +341,7 @@ export class MemoryManager {
     const memoryStats = this.getMemoryStats();
 
     // 获取可用内存
-    const availableMemory = memoryStats.limit - memoryStats.usage;
+    const availableMemory = memoryStats.limit - memoryStats.used;
 
     // 计算基础分片大小
     let baseSize: number;
@@ -320,6 +371,7 @@ export class MemoryManager {
     let trendFactor = 1.0;
     if (
       memoryStats.trend === 'growing' &&
+      memoryStats.growthRate &&
       memoryStats.growthRate > 1 * 1024 * 1024
     ) {
       // 内存增长迅速，减少分片大小
@@ -369,37 +421,30 @@ export class MemoryManager {
   }
 
   /**
-   * 垃圾回收建议
-   * 在关键操作前调用，建议浏览器进行垃圾回收
+   * 尝试触发浏览器垃圾回收
    */
-  static suggestGarbageCollection(): void {
-    if (typeof window !== 'undefined') {
-      try {
-        // 直接调用浏览器GC（仅开发环境可用，并不总是有效）
-        if (typeof window.gc === 'function') {
-          (window as unknown).gc();
-        } else {
-          // 创建大量临时对象然后清除引用，触发垃圾回收
-          const size = 10000;
-          const temp = new Array(100)
-            .fill(0)
-            .map(() => new Array(size).fill(Math.random()));
-
-          // 清除引用
-          for (let i = 0; i < temp.length; i++) {
-            temp[i] = null;
-          }
-
-          // 分发GC事件
-          this.dispatchMemoryEvent('garbageCollection', {
-            timestamp: Date.now(),
-            memoryBefore:
-              this.memoryUsageHistory[this.memoryUsageHistory.length - 1] || 0,
-          });
-        }
-      } catch (e) {
-        console.warn('尝试触发垃圾回收失败', e);
+  public static suggestGarbageCollection(): void {
+    try {
+      // 尝试直接调用GC（需要特殊标志启动浏览器）
+      if (
+        typeof window !== 'undefined' &&
+        typeof (window as any).gc === 'function'
+      ) {
+        (window as any).gc();
       }
+
+      // 强制触发GC的技巧
+      const temp: any[] = [];
+      // 创建并丢弃大量对象
+      for (let i = 0; i < 10000; i++) {
+        temp.push(new Array(10000).fill('x').join(''));
+      }
+      // 清空数组引用
+      for (let i = 0; i < temp.length; i++) {
+        temp[i] = undefined;
+      }
+    } catch (error) {
+      console.warn('触发垃圾回收失败', error);
     }
   }
 
@@ -409,9 +454,11 @@ export class MemoryManager {
    */
   static needsMemoryCleanup(): boolean {
     const stats = this.getMemoryStats();
-    return (
+    return !!(
       stats.usageRatio > 0.8 ||
-      (stats.trend === 'growing' && stats.growthRate > 5 * 1024 * 1024)
+      (stats.trend === 'growing' &&
+        stats.growthRate &&
+        stats.growthRate > 5 * 1024 * 1024)
     );
   }
 
@@ -460,48 +507,43 @@ export class MemoryManager {
   }
 
   /**
-   * 简易环境检测
-   * @returns 检测到的环境类型
+   * 检测是否为低内存设备
+   * @returns 是否为低内存设备
    */
-  private static detectSimpleEnvironment(): SimpleEnvironment {
-    // 浏览器环境
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      return SimpleEnvironment.Browser;
+  public static isLowMemoryDevice(): boolean {
+    // 检测设备内存
+    if (typeof navigator !== 'undefined' && (navigator as any).deviceMemory) {
+      return (navigator as any).deviceMemory < 4; // 小于4GB认为是低内存设备
     }
 
-    // 微信小程序
-    if (
-      typeof wx !== 'undefined' &&
-      typeof wx.getFileSystemManager === 'function'
-    ) {
-      return SimpleEnvironment.WechatMP;
+    // 获取当前内存使用情况
+    const memInfo = this.getMemoryInfo();
+
+    // 如果可用内存小于2GB，认为是低内存设备
+    return memInfo.limit < 2 * 1024 * 1024 * 1024;
+  }
+
+  /**
+   * 检测是否为低功耗设备
+   * @returns 是否为低功耗设备
+   */
+  public static isLowPowerDevice(): boolean {
+    // 检测设备硬件信息
+    if (typeof navigator !== 'undefined') {
+      // 检测是否为移动设备
+      const isMobile =
+        /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(
+          navigator.userAgent
+        );
+
+      // 检测处理器核心数
+      const cpuCores = navigator.hardwareConcurrency || 0;
+
+      // 移动设备或低核心数设备视为低功耗设备
+      return isMobile || cpuCores <= 2;
     }
 
-    // 支付宝小程序
-    if (
-      typeof my !== 'undefined' &&
-      typeof my.getFileSystemManager === 'function'
-    ) {
-      return SimpleEnvironment.AlipayMP;
-    }
-
-    // 字节跳动小程序
-    if (
-      typeof tt !== 'undefined' &&
-      typeof tt.getFileSystemManager === 'function'
-    ) {
-      return SimpleEnvironment.BytedanceMP;
-    }
-
-    // 百度小程序
-    if (
-      typeof swan !== 'undefined' &&
-      typeof swan.getFileSystemManager === 'function'
-    ) {
-      return SimpleEnvironment.BaiduMP;
-    }
-
-    return SimpleEnvironment.Other;
+    return false;
   }
 }
 

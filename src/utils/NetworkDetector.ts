@@ -3,9 +3,10 @@
  * 用于检测网络状态、质量和特性，提供网络变化监听
  */
 
-import { NetworkQuality, NetworkCondition, NetworkStatus } from '../types';
+import { NetworkCondition, NetworkStatus } from '../types';
 
 import { Logger } from './Logger';
+import { NetworkQuality } from './NetworkQuality';
 
 // 网络测速结果
 export interface SpeedTestResult {
@@ -47,6 +48,18 @@ export class NetworkDetector {
   private changeListeners: Set<NetworkChangeCallback> = new Set();
   private logger: Logger = new Logger('NetworkDetector');
   private static instance?: NetworkDetector;
+  private quality: NetworkQuality = NetworkQuality.UNKNOWN;
+  // @ts-ignore - 这些变量将在未来版本中使用
+  private isOnline = true;
+  // @ts-ignore - 这些变量将在未来版本中使用
+  private networkType = 'unknown';
+  // @ts-ignore - 这些变量将在未来版本中使用
+  private connectionSpeed = 0;
+  private lastCheckTime = 0;
+  private checkInterval = 10000; // 10秒检查一次
+  // @ts-ignore - 这些变量将在未来版本中使用
+  private _intervalId: any = null;
+  private callbacks: ((quality: NetworkQuality) => void)[] = [];
 
   /**
    * 获取网络检测器实例 (单例模式)
@@ -60,6 +73,13 @@ export class NetworkDetector {
       NetworkDetector.instance.updateConfig(config);
     }
     return NetworkDetector.instance;
+  }
+
+  /**
+   * 创建一个网络检测器实例
+   */
+  public static create(): NetworkDetector {
+    return new NetworkDetector();
   }
 
   /**
@@ -374,7 +394,7 @@ export class NetworkDetector {
     }
 
     if (effectiveType === '3g' || (rtt > 300 && rtt <= 600)) {
-      return NetworkQuality.FAIR;
+      return NetworkQuality.MEDIUM;
     }
 
     if (effectiveType === '4g' || (rtt <= 300 && rtt > 100)) {
@@ -551,6 +571,45 @@ export class NetworkDetector {
     this.stopAutoRefresh();
     this.removeNetworkListener();
     this.changeListeners.clear();
+  }
+
+  /**
+   * 开始监控网络质量
+   */
+  public startMonitoring(): void {
+    this._intervalId = setInterval(() => {
+      this.checkNetworkQuality();
+    }, this.checkInterval);
+  }
+
+  /**
+   * 检查网络质量
+   */
+  private checkNetworkQuality(): void {
+    const currentTime = Date.now();
+    if (currentTime - this.lastCheckTime >= this.checkInterval) {
+      this.lastCheckTime = currentTime;
+      this.quality = this.getNetworkQuality();
+      this.callbacks.forEach(callback => callback(this.quality));
+    }
+  }
+
+  /**
+   * 添加网络质量回调
+   * @param callback 回调函数
+   */
+  public addQualityCallback(callback: (quality: NetworkQuality) => void): void {
+    this.callbacks.push(callback);
+  }
+
+  /**
+   * 移除网络质量回调
+   * @param callback 回调函数
+   */
+  public removeQualityCallback(
+    callback: (quality: NetworkQuality) => void
+  ): void {
+    this.callbacks = this.callbacks.filter(c => c !== callback);
   }
 }
 

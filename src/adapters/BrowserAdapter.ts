@@ -26,7 +26,7 @@ export class BrowserAdapter implements IUploadAdapter {
   private progressCallback?: (progress: number) => void;
   private abortSignal?: AbortSignal;
   private withCredentials: boolean;
-  private networkQuality: NetworkQuality = 'unknown';
+  private networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
   private logger: Logger;
 
   /**

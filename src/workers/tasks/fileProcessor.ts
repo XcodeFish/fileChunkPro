@@ -103,7 +103,7 @@ async function simulateCompression(data: ArrayBuffer | Uint8Array): Promise<{
  * 模拟文件加密
  * 注：这只是示例，并不执行实际加密
  */
-async function simulateEncryption(data: ArrayBuffer | Uint8Array, key: string): Promise<{
+async function simulateEncryption(data: ArrayBuffer | Uint8Array, _key: string): Promise<{
   encryptedSize: number;
   originalSize: number;
 }> {

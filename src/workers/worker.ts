@@ -1,61 +1,70 @@
 /**
- * Worker主脚本
- * 处理来自主线程的消息并执行对应操作
+ * worker.ts
+ * 通用Worker基础类型和工具
  */
 
-import { calculateChunks } from './tasks/chunkCalculator';
-import { calculateHash } from './tasks/hashCalculator';
+// 导入模块
+// @ts-ignore - 这些导入将在未来版本中使用
+import { chunkCalculator } from './tasks/chunkCalculator';
+// @ts-ignore - 这些导入将在未来版本中使用
+import { hashCalculator } from './tasks/hashCalculator';
 import { processFile } from './tasks/fileProcessor';
 
-// 任务类型
-type TaskType = 'calculateChunks' | 'calculateHash' | 'processFile' | 'ping';
-
-// Worker状态
+// 定义Worker状态类型
 type WorkerState = 'idle' | 'busy' | 'error';
 
-// 当前状态
-let currentState: WorkerState = 'idle';
-let currentTaskId: string | null = null;
-let taskStartTime: number = 0;
-let totalTasksProcessed = 0;
-let totalErrors = 0;
-let lastMemoryUsage = 0;
+// 定义Worker消息类型
+export interface WorkerMessage {
+  taskId: string;
+  type: string;
+  data: any;
+}
+
+// 定义Worker响应类型
+export interface WorkerResponse {
+  taskId: string;
+  success: boolean;
+  result?: any;
+  error?: string;
+}
+
+// 定义Worker配置类型
+export interface WorkerConfig {
+  maxMemory?: number;
+  logLevel?: string;
+  maxTasks?: number;
+}
 
 // 性能监控间隔
 const PERFORMANCE_CHECK_INTERVAL = 10000; // 10秒
 
-/**
- * 任务处理方法映射
- */
-const taskHandlers: Record<string, (data: any) => Promise<any> | any> = {
-  /**
-   * 计算文件分片
-   */
-  calculateChunks,
+// 当前状态
+let currentState: WorkerState = 'idle';
+let currentTaskId: string | null = null;
+let taskStartTime = 0;
+let totalTasksProcessed = 0;
+let totalErrors = 0;
+let lastMemoryUsage = 0;
+
+// 任务处理器
+const taskHandlers: Record<string, (data: any) => Promise<any>> = {
+  // 分片计算任务
+  calculateChunks: async (data: any) => {
+    return chunkCalculator.calculateChunks(data);
+  },
   
-  /**
-   * 计算文件哈希
-   */
-  calculateHash,
+  // 哈希计算任务
+  calculateHash: async (data: any) => {
+    return hashCalculator.calculateHash(data);
+  },
   
-  /**
-   * 处理文件数据
-   */
+  // 文件处理任务
   processFile,
   
-  /**
-   * 处理ping请求
-   */
-  ping: () => ({
-    timestamp: Date.now(),
-    state: currentState,
-    memory: getMemoryUsage(),
-    stats: {
-      totalTasksProcessed,
-      totalErrors,
-      uptime: Date.now() - (self as any).startTime,
-    }
-  })
+  // 测试任务
+  ping: async () => {
+    return { pong: true, timestamp: Date.now() };
+  }
 };
 
 /**
@@ -74,32 +83,6 @@ function getMemoryUsage(): any {
   }
   
   return { used: lastMemoryUsage };
-}
-
-/**
- * 简单哈希算法（当Web Crypto API不可用时的回退方案）
- */
-function simpleHash(data: ArrayBuffer | Uint8Array): string {
-  const view = data instanceof Uint8Array ? data : new Uint8Array(data);
-  let h1 = 0xdeadbeef;
-  let h2 = 0x41c6ce57;
-  
-  // 每512字节采样一次以提高性能
-  const step = Math.max(1, Math.floor(view.length / 2048));
-  
-  for (let i = 0; i < view.length; i += step) {
-    const val = view[i];
-    h1 = Math.imul(h1 ^ val, 2654435761);
-    h2 = Math.imul(h2 ^ val, 1597334677);
-  }
-  
-  h1 = Math.imul(h1 ^ (h1 >>> 16), 2246822507);
-  h1 ^= Math.imul(h2 ^ (h2 >>> 13), 3266489909);
-  h2 = Math.imul(h2 ^ (h2 >>> 16), 2246822507);
-  h2 ^= Math.imul(h1 ^ (h1 >>> 13), 3266489909);
-  
-  const hash = 4294967296 * (2097151 & h2) + (h1 >>> 0);
-  return hash.toString(16).padStart(16, '0');
 }
 
 /**

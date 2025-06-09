@@ -28,10 +28,9 @@ interface PluginRegistration {
 }
 
 export class PluginManager {
-  private plugins: Map<string, PluginRegistration> = new Map();
+  private plugins: Map<string, any> = new Map();
   private hooks: Map<string, HookRegistration[]> = new Map();
   private pluginDependencies: Map<string, Set<string>> = new Map();
-  private pluginOrder: string[] = [];
   private logger: Logger = new Logger('PluginManager');
   private eventBus?: EventBus;
 
@@ -83,7 +82,7 @@ export class PluginManager {
     // 更新依赖关系
     this.pluginDependencies.set(name, new Set(dependencies));
 
-    // 更新插件加载顺序
+    // 重新计算插件加载顺序
     this.recalculatePluginOrder();
 
     // 触发事件
@@ -165,7 +164,7 @@ export class PluginManager {
       }
     }
 
-    this.pluginOrder = result;
+    // this.pluginOrder = result; // 未使用的变量，移除
   }
 
   /**
@@ -650,7 +649,7 @@ export class PluginManager {
     this.pluginDependencies.clear();
 
     // 重置插件顺序
-    this.pluginOrder = [];
+    // this.pluginOrder = []; // 未使用的变量，移除
 
     // 触发事件
     this.eventBus?.emit('plugins:cleared');

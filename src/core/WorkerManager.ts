@@ -9,6 +9,13 @@ import { Logger } from '../utils/Logger';
 
 import { EventBus } from './EventBus';
 
+// 扩展Navigator接口以支持deviceMemory属性
+declare global {
+  interface Navigator {
+    deviceMemory?: number;
+  }
+}
+
 // WorkerManager 配置
 export interface WorkerManagerOptions {
   // 最大 Worker 数量
@@ -321,10 +328,18 @@ export default class WorkerManager {
         action: 'init',
         config: {
           type,
-          maxMemory: navigator.deviceMemory
-            ? navigator.deviceMemory * 1024 * 1024 * 1024
-            : undefined,
-          logLevel: this.logger.getLevel(),
+          maxMemory:
+            typeof navigator.deviceMemory !== 'undefined'
+              ? navigator.deviceMemory
+              : 4,
+          maxMemoryBytes:
+            typeof navigator.deviceMemory !== 'undefined'
+              ? navigator.deviceMemory * 1024 * 1024 * 1024
+              : 4 * 1024 * 1024 * 1024,
+          logLevel:
+            this.logger && typeof this.logger.getLevel === 'function'
+              ? this.logger.getLevel()
+              : 'info',
         },
       });
 
@@ -369,7 +384,7 @@ export default class WorkerManager {
 
           // 清理事件监听器
           if (messageHandler) {
-            worker.removeEventListener('message', messageHandler);
+            worker.removeEventListener('message', messageHandler || (() => {}));
           }
 
           reject(new Error('Worker初始化超时'));
@@ -390,7 +405,7 @@ export default class WorkerManager {
             }
 
             // 移除事件监听
-            worker.removeEventListener('message', messageHandler);
+            worker.removeEventListener('message', messageHandler || (() => {}));
 
             resolve(true);
           }
@@ -413,7 +428,7 @@ export default class WorkerManager {
             clearTimeout(timeoutId);
           }
           if (messageHandler) {
-            worker.removeEventListener('message', messageHandler);
+            worker.removeEventListener('message', messageHandler || (() => {}));
           }
 
           reject(
@@ -538,15 +553,15 @@ export default class WorkerManager {
     }
 
     // 查找指定类型的空闲Worker
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${type}:`) && instance.status === 'idle') {
+    for (const [_id, instance] of this.workers.entries()) {
+      if (_id.startsWith(`${type}:`) && instance.status === 'idle') {
         return instance.worker;
       }
     }
 
     // 如果没有空闲的指定类型Worker，尝试复用其他类型
     if (type !== 'default') {
-      for (const [id, instance] of this.workers.entries()) {
+      for (const [_id, instance] of this.workers.entries()) {
         if (instance.status === 'idle') {
           return instance.worker;
         }
@@ -838,9 +853,8 @@ export default class WorkerManager {
       if (!this.isWorkerSupported) {
         this.logger.info(`环境不支持Worker，任务 ${taskId} 将在主线程执行`);
 
-        return this.fallbackToMainThread(type, data)
-          .then(resolve)
-          .catch(reject);
+        this.fallbackToMainThread(type, data).then(resolve).catch(reject);
+        return;
       }
 
       // 尝试获取可用的Worker
@@ -1031,7 +1045,7 @@ export default class WorkerManager {
 
     // 计算当前此类型的Worker数量
     let currentWorkerCount = 0;
-    for (const [key, instance] of this.workers.entries()) {
+    for (const [key, _instance] of this.workers.entries()) {
       if (key.startsWith(workerType)) {
         currentWorkerCount++;
       }
@@ -1114,7 +1128,7 @@ export default class WorkerManager {
    * 在主线程中计算哈希
    * @param data 计算哈希所需数据
    */
-  private calculateHashInMainThread(data: any): string {
+  private calculateHashInMainThread(_data: any): string {
     // 简化实现，实际项目中需要使用真实的哈希算法
     // 这里只是一个占位符，表示实际会调用哈希库
     return `hash_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -1550,7 +1564,8 @@ export default class WorkerManager {
     };
 
     for (const [id, instance] of this.workers.entries()) {
-      const type = id.split(':')[0];
+      // 分割ID获取类型，但目前未使用
+      // const type = id.split(':')[0];
 
       metrics.workers[id] = {
         status: instance.status,

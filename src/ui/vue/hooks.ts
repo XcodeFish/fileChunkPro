@@ -1,16 +1,26 @@
-import { ref, onMounted, onUnmounted } from 'vue';
+import { ref, onMounted, onUnmounted, Ref } from 'vue';
 
 import { UploadError } from '../../core/ErrorCenter';
-import FileChunkPro from '../../index';
+import UploaderCore from '../../core/UploaderCore';
 import { UploaderOptions, UploadResult } from '../../types';
+
+interface FileUploadHook {
+  upload: (file: File) => Promise<UploadResult>;
+  cancelUpload: () => void;
+  loading: Ref<boolean>;
+  progress: Ref<number>;
+  error: Ref<UploadError | null>;
+  result: Ref<UploadResult | null>;
+  uploader: Ref<UploaderCore | null>;
+}
 
 /**
  * 文件上传钩子
  * 提供Vue Composition API风格的文件上传功能
  * @param options 上传配置选项
  */
-export function useFileUpload(options: UploaderOptions) {
-  const uploader = ref<FileChunkPro | null>(null);
+export function useFileUpload(options: UploaderOptions): FileUploadHook {
+  const uploader = ref<UploaderCore | null>(null);
   const loading = ref<boolean>(false);
   const progress = ref<number>(0);
   const error = ref<UploadError | null>(null);
@@ -18,7 +28,7 @@ export function useFileUpload(options: UploaderOptions) {
 
   // 初始化上传器
   onMounted(() => {
-    uploader.value = new FileChunkPro(options);
+    uploader.value = new UploaderCore(options);
 
     // 注册事件监听
     uploader.value.on('progress', (percent: number) => {
@@ -78,6 +88,6 @@ export function useFileUpload(options: UploaderOptions) {
     progress,
     error,
     result,
-    uploader,
+    uploader: uploader as Ref<UploaderCore | null>,
   };
 }

@@ -57,7 +57,6 @@ export class TaskScheduler {
   private startTime = 0;
   private isMemoryOptimizationEnabled = true;
   private isNetworkOptimizationEnabled = true;
-  private lastNetworkStatusTime = 0;
   private networkHistory: Array<{ status: NetworkStatus; timestamp: number }> =
     [];
   private isProcessing = false;
@@ -76,6 +75,13 @@ export class TaskScheduler {
     shortestExecutionTime: Infinity,
   };
   private completedTasks: TaskItem[] = [];
+  private lastNetworkStatusTime = 0;
+  private logger?: {
+    debug?: (message: string) => void;
+    info?: (message: string) => void;
+    warn?: (message: string) => void;
+    error?: (message: string) => void;
+  };
 
   constructor(options: TaskSchedulerOptions, eventBus?: EventBus) {
     this.options = {
@@ -90,8 +96,7 @@ export class TaskScheduler {
       ...options,
     };
 
-    // 设置动态并发值为初始并发值
-    this.dynamicConcurrency = this.options.concurrency;
+    this.dynamicConcurrency = this.options.concurrency ?? 1;
 
     // 如果提供了eventBus，使用它，否则创建一个新的
     this.eventBus = eventBus || new EventBus();
@@ -190,6 +195,12 @@ export class TaskScheduler {
         if (previousStatus !== this.networkStatus) {
           this.lastNetworkStatusTime = now;
 
+          // 计算上一次网络状态变化后的持续时间
+          const statusDuration = now - this.lastNetworkStatusTime;
+          this.logger?.debug?.(
+            `网络状态从 ${previousStatus} 变为 ${this.networkStatus}，持续了 ${statusDuration}ms`
+          );
+
           // 如果网络断开，暂停调度器
           if (this.networkStatus === 'offline') {
             if (!this.paused) {
@@ -200,6 +211,7 @@ export class TaskScheduler {
                 previous: previousStatus,
                 current: this.networkStatus,
                 action: 'pauseScheduler',
+                lastStatusDuration: statusDuration,
               });
             }
           }
@@ -219,6 +231,7 @@ export class TaskScheduler {
                   previous: previousStatus,
                   current: this.networkStatus,
                   action: 'resumeScheduler',
+                  lastStatusDuration: statusDuration,
                 });
               }
             }, 1000);
@@ -284,7 +297,7 @@ export class TaskScheduler {
         !this.isMemoryOptimizationEnabled &&
         !this.isNetworkOptimizationEnabled
       ) {
-        this.dynamicConcurrency = this.options.concurrency;
+        this.dynamicConcurrency = this.options.concurrency ?? 1;
         return;
       }
 
@@ -311,7 +324,7 @@ export class TaskScheduler {
         if (stability === 'unstable') {
           recommendedConcurrency = Math.max(
             1,
-            Math.floor(recommendedConcurrency * 0.6)
+            Math.floor((recommendedConcurrency || 1) * 0.6)
           );
         }
       }
@@ -319,11 +332,11 @@ export class TaskScheduler {
       // 更新动态并发值
       if (this.dynamicConcurrency !== recommendedConcurrency) {
         const previous = this.dynamicConcurrency;
-        this.dynamicConcurrency = recommendedConcurrency;
+        this.dynamicConcurrency = recommendedConcurrency ?? 1;
 
         this.eventBus.emit('concurrencyChange', {
           previous,
-          current: recommendedConcurrency,
+          current: this.dynamicConcurrency,
           reason: 'autoAdjustment',
         });
       }
@@ -532,7 +545,7 @@ export class TaskScheduler {
               });
 
               // 检查是否需要重试
-              if (taskItem.retryCount < this.options.retries) {
+              if (taskItem.retryCount < (this.options.retries || 0)) {
                 taskItem.retryCount++;
                 taskItem.state = TaskState.PENDING;
 
@@ -618,7 +631,7 @@ export class TaskScheduler {
         const idleTime = Date.now() - this.idleStartTime;
 
         // 如果空闲时间超过设定值，可以考虑释放资源
-        if (idleTime > this.options.maxIdleTime) {
+        if (idleTime > (this.options.maxIdleTime || 60000)) {
           // 释放内存
           if (this.memoryMonitorInterval) {
             clearInterval(this.memoryMonitorInterval);
@@ -665,17 +678,26 @@ export class TaskScheduler {
         // 如果所有任务都已完成
         if (this.taskQueue.length === 0 && this.runningTasks.size === 0) {
           this.eventBus.off('taskCompleted', completeHandler);
-          this.eventBus.off('taskFailed', failHandler);
+          this.eventBus.off(
+            'taskFailed',
+            failHandler as EventHandlerCompatible
+          );
           this.eventBus.off('schedulerAborted', abortHandler);
           resolve();
         }
       };
 
+      // 创建一个兼容性更好的类型
+      type EventHandlerCompatible = (data: any) => void;
+
       // 处理任务失败事件
       const failHandler = (_data: { error: Error }) => {
         if (this.taskQueue.length === 0 && this.runningTasks.size === 0) {
           this.eventBus.off('taskCompleted', completeHandler);
-          this.eventBus.off('taskFailed', failHandler);
+          this.eventBus.off(
+            'taskFailed',
+            failHandler as EventHandlerCompatible
+          );
           this.eventBus.off('schedulerAborted', abortHandler);
           // 不拒绝Promise，因为任务已有自己的错误处理
           resolve();
@@ -685,14 +707,14 @@ export class TaskScheduler {
       // 处理调度器中止事件
       const abortHandler = () => {
         this.eventBus.off('taskCompleted', completeHandler);
-        this.eventBus.off('taskFailed', failHandler);
+        this.eventBus.off('taskFailed', failHandler as EventHandlerCompatible);
         this.eventBus.off('schedulerAborted', abortHandler);
         reject(new Error('Scheduler was aborted'));
       };
 
       // 注册事件处理器
       this.eventBus.on('taskCompleted', completeHandler);
-      this.eventBus.on('taskFailed', failHandler);
+      this.eventBus.on('taskFailed', failHandler as EventHandlerCompatible);
       this.eventBus.on('schedulerAborted', abortHandler);
 
       // 开始执行任务

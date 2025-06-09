@@ -5,7 +5,6 @@
 
 import {
   UploaderOptions,
-  Environment,
   UploadResult,
   ChunkInfo,
   UploadErrorType,
@@ -37,7 +36,6 @@ export class UploaderCore {
   private errorCenter: ErrorCenter = new ErrorCenter();
   private pluginManager: PluginManager = new PluginManager();
   private scheduler: TaskScheduler;
-  private environment: Environment;
   private isCancelled = false;
   private currentFileId: string | null = null;
   private memoryWatcher: NodeJS.Timeout | null = null;
@@ -82,7 +80,7 @@ export class UploaderCore {
     // 初始化任务调度器
     this.scheduler = new TaskScheduler(
       {
-        maxConcurrent: this.options.concurrency as number,
+        concurrency: this.options.concurrency as number,
         retryCount: this.options.retryCount as number,
         retryDelay: this.options.retryDelay as number,
         timeout: this.options.timeout as number,
@@ -96,15 +94,20 @@ export class UploaderCore {
     });
 
     // 检测环境
-    this.environment = EnvUtils.detectEnvironment();
+    // this.environment = EnvUtils.detectEnvironment(); // 未使用的变量，移除
 
     // 初始化网络检测器
     if (this.options.enableAdaptiveUploads) {
       // 在测试环境中检查是否有全局MockNetworkDetector
       if (typeof global !== 'undefined' && (global as any).NetworkDetector) {
         this.networkDetector = new (global as any).NetworkDetector();
-      } else if (typeof NetworkDetector === 'function') {
-        this.networkDetector = new NetworkDetector();
+      } else if (typeof NetworkDetector !== 'undefined') {
+        try {
+          this.networkDetector = NetworkDetector.create();
+        } catch (error) {
+          console.warn('无法初始化NetworkDetector', error);
+          this.networkDetector = null;
+        }
       }
     }
 
@@ -256,7 +259,7 @@ export class UploaderCore {
 
       // 更新调度器设置
       this.scheduler.updateSettings({
-        maxConcurrent: strategy.concurrency,
+        concurrency: strategy.concurrency,
         retryCount: strategy.retryCount,
         retryDelay: strategy.retryDelay,
         timeout: strategy.timeout,
@@ -264,12 +267,6 @@ export class UploaderCore {
 
       // 添加所有分片上传任务
       chunks.forEach((chunk, index) => {
-        // 设置任务优先级：首尾分片为高优先级，其他为普通优先级
-        const priority =
-          index === 0 || index === chunks.length - 1
-            ? TaskPriority.HIGH
-            : TaskPriority.NORMAL;
-
         this.scheduler.addTask(
           async () => {
             if (this.isCancelled) {
@@ -285,8 +282,10 @@ export class UploaderCore {
               fileId: this.currentFileId,
             });
           },
-          index,
-          priority
+          index === 0 || index === chunks.length - 1
+            ? TaskPriority.HIGH
+            : TaskPriority.NORMAL,
+          { fileId: this.currentFileId || undefined, chunkIndex: index }
         );
       });
 
@@ -475,7 +474,7 @@ export class UploaderCore {
     if (allowedFileTypes && allowedFileTypes.length > 0) {
       const fileType = file.type || this.getFileTypeFromName(file.name);
       const isTypeAllowed = allowedFileTypes.some(
-        type => fileType.includes(type) || type === '*'
+        (type: string) => fileType.includes(type) || type === '*'
       );
 
       if (!isTypeAllowed) {
@@ -557,14 +556,14 @@ export class UploaderCore {
     }
 
     // 检测网络质量
-    let networkQuality: NetworkQuality = 'unknown';
+    let networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
     if (this.networkDetector) {
       try {
-        networkQuality = await this.networkDetector.detectNetworkQuality();
+        networkQuality = await this.networkDetector.getNetworkQuality();
       } catch (error) {
         // 如果网络检测失败，使用默认策略
         console.error('网络质量检测失败', error);
-        networkQuality = 'unknown';
+        networkQuality = NetworkQuality.UNKNOWN;
       }
     }
 
@@ -573,28 +572,43 @@ export class UploaderCore {
     let isLowPowerDevice = false;
 
     try {
-      // 测试环境下可能没有这些方法
+      // 检查MemoryManager方法存在性
       if (
         MemoryManager &&
-        typeof MemoryManager.isLowMemoryDevice === 'function'
+        typeof MemoryManager['isLowMemoryDevice'] === 'function'
       ) {
-        isLowMemoryDevice = MemoryManager.isLowMemoryDevice();
+        try {
+          isLowMemoryDevice = (MemoryManager as any).isLowMemoryDevice();
+        } catch (error) {
+          console.warn('内存设备检测失败', error);
+        }
       }
 
       if (
         MemoryManager &&
-        typeof MemoryManager.isLowPowerDevice === 'function'
+        typeof MemoryManager['isLowPowerDevice'] === 'function'
       ) {
-        isLowPowerDevice = MemoryManager.isLowPowerDevice();
+        try {
+          isLowPowerDevice = (MemoryManager as any).isLowPowerDevice();
+        } catch (error) {
+          console.warn('低功耗设备检测失败', error);
+        }
       }
     } catch (error) {
       console.error('设备信息检测失败', error);
     }
 
     // 基于网络和设备状况选择策略
-    if (networkQuality === 'good' && !isLowMemoryDevice && !isLowPowerDevice) {
+    if (
+      networkQuality === NetworkQuality.GOOD &&
+      !isLowMemoryDevice &&
+      !isLowPowerDevice
+    ) {
       return this.uploadStrategies.get('highPerformance')!;
-    } else if (networkQuality === 'poor' || file.size > 100 * 1024 * 1024) {
+    } else if (
+      networkQuality === NetworkQuality.POOR ||
+      file.size > 100 * 1024 * 1024
+    ) {
       return this.uploadStrategies.get('reliability')!;
     } else if (isLowPowerDevice || isLowMemoryDevice) {
       return this.uploadStrategies.get('powerSaving')!;
@@ -619,13 +633,13 @@ export class UploaderCore {
       try {
         if (
           MemoryManager &&
-          typeof MemoryManager.getMemoryInfo === 'function'
+          typeof MemoryManager['getMemoryInfo'] === 'function'
         ) {
-          memoryInfo = MemoryManager.getMemoryInfo();
+          const memInfo = (MemoryManager as any).getMemoryInfo();
+          memoryInfo = { usageRatio: memInfo.used / memInfo.limit || 0 };
         }
       } catch (error) {
-        console.error('获取内存信息失败', error);
-        return;
+        console.warn('获取内存信息失败', error);
       }
 
       // 发送内存使用事件
@@ -672,7 +686,7 @@ export class UploaderCore {
         const currentConcurrency = this.scheduler.getConcurrency();
         if (currentConcurrency > 1) {
           this.scheduler.updateSettings({
-            maxConcurrent: currentConcurrency - 1,
+            concurrency: currentConcurrency - 1,
           });
 
           this.emit('concurrencyAdjusted', {
@@ -763,14 +777,14 @@ export class UploaderCore {
     fileId: string
   ): Promise<void> {
     // 根据网络状态自适应调整重试策略
-    let networkQuality: NetworkQuality = 'unknown';
+    let networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
 
     try {
       if (
         this.networkDetector &&
-        typeof this.networkDetector.detectNetworkQuality === 'function'
+        typeof this.networkDetector.getNetworkQuality === 'function'
       ) {
-        networkQuality = await this.networkDetector.detectNetworkQuality();
+        networkQuality = await this.networkDetector.getNetworkQuality();
       }
     } catch (error) {
       console.error('网络质量检测失败', error);
@@ -918,47 +932,46 @@ export class UploaderCore {
    * @param networkQuality 网络质量
    */
   private getRetryStrategy(networkQuality: NetworkQuality): RetryStrategy {
-    // 智能重试策略
     if (this.options.smartRetry) {
       switch (networkQuality) {
-        case 'good':
+        case NetworkQuality.GOOD:
           return {
             maxRetries: 2,
-            baseDelay: 500,
-            multiplier: 1.5,
+            maxDelay: 30000,
+            initialDelay: 500,
+            factor: 2,
             jitter: 0.2,
+            shouldRetry: () => true,
           };
-        case 'average':
+        case NetworkQuality.MEDIUM:
           return {
             maxRetries: 4,
-            baseDelay: 1000,
-            multiplier: 2,
+            maxDelay: 60000,
+            initialDelay: 1000,
+            factor: 2,
             jitter: 0.3,
+            shouldRetry: () => true,
           };
-        case 'poor':
+        case NetworkQuality.POOR:
           return {
             maxRetries: 7,
-            baseDelay: 2000,
-            multiplier: 2.5,
-            jitter: 0.4,
-          };
-        default:
-          // 默认策略
-          return {
-            maxRetries: Number(this.options.retryCount) || 3,
-            baseDelay: Number(this.options.retryDelay) || 1000,
-            multiplier: 2,
-            jitter: 0.3,
+            maxDelay: 120000,
+            initialDelay: 2000,
+            factor: 1.5,
+            jitter: 0.5,
+            shouldRetry: () => true,
           };
       }
     }
 
-    // 使用固定重试策略
+    // 默认策略
     return {
       maxRetries: Number(this.options.retryCount) || 3,
-      baseDelay: Number(this.options.retryDelay) || 1000,
-      multiplier: 1,
-      jitter: 0,
+      initialDelay: Number(this.options.retryDelay) || 1000,
+      maxDelay: 60000,
+      factor: 2,
+      jitter: 0.3,
+      shouldRetry: () => true,
     };
   }
 
@@ -973,12 +986,16 @@ export class UploaderCore {
   ): number {
     // 指数退避算法
     const exponentialDelay =
-      strategy.baseDelay * Math.pow(strategy.multiplier, attempt - 1);
+      strategy.initialDelay * Math.pow(strategy.factor, attempt - 1);
 
-    // 添加抖动以避免同时重试
-    const jitter = strategy.jitter * exponentialDelay * (Math.random() * 2 - 1);
+    // 加入抖动
+    const jitter =
+      (strategy.jitter || 0) * exponentialDelay * (Math.random() * 2 - 1);
 
-    return Math.min(exponentialDelay + jitter, 30000); // 最大延迟30秒
+    // 计算最终延迟
+    const delay = Math.min(strategy.maxDelay, exponentialDelay + jitter);
+
+    return Math.max(0, delay);
   }
 
   /**

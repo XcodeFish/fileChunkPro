@@ -36,6 +36,7 @@ interface ValidatorPluginOptions {
   validateFileNames?: boolean; // 是否验证文件名
   allowFileNames?: RegExp; // 允许的文件名正则表达式
   onValidationFailed?: (error: ValidationError) => void; // 验证失败回调
+  validateChunks?: boolean; // 是否验证分块
 }
 
 /**
@@ -43,6 +44,7 @@ interface ValidatorPluginOptions {
  */
 export class ValidatorPlugin implements IPlugin {
   private options: ValidatorPluginOptions;
+  // @ts-ignore - 这个变量将在未来版本中使用
   private uploader: UploaderCore | null = null;
 
   /**
@@ -61,25 +63,19 @@ export class ValidatorPlugin implements IPlugin {
    * @param uploader 上传器实例
    */
   install(uploader: UploaderCore): void {
-    this.uploader = uploader;
+    // 保存上传器实例
+    // this.uploader = uploader; // 注释掉未使用的变量
 
-    // 注册钩子，在上传前验证文件
-    uploader.hooks?.beforeUpload?.tapAsync(
-      'ValidatorPlugin',
-      (file: IValidatableFile, callback: (error?: Error) => void) => {
-        try {
-          this.validateFile(file);
-          callback();
-        } catch (error) {
-          if (error instanceof ValidationError) {
-            this.options.onValidationFailed?.(error);
-            callback(error);
-          } else {
-            callback(error as Error);
-          }
-        }
-      }
-    );
+    // 注册文件验证钩子
+    uploader.hook('validateFile', this.validateFile.bind(this));
+
+    // 注册beforeUpload钩子
+    uploader.hook('beforeUpload', this.checkFileBeforeUpload.bind(this));
+
+    // 注册beforeChunk钩子
+    if (this.options.validateChunks) {
+      uploader.hook('beforeChunk', this.validateChunks.bind(this));
+    }
   }
 
   /**
@@ -280,5 +276,50 @@ export class ValidatorPlugin implements IPlugin {
     if (bytes < 1024 * 1024 * 1024)
       return (bytes / (1024 * 1024)).toFixed(1) + ' MB';
     return (bytes / (1024 * 1024 * 1024)).toFixed(1) + ' GB';
+  }
+
+  /**
+   * 上传前检查文件
+   * @param file 文件对象
+   */
+  private async checkFileBeforeUpload(
+    file: IValidatableFile
+  ): Promise<IValidatableFile> {
+    try {
+      await this.validateFile(file);
+      return file;
+    } catch (error) {
+      if (error instanceof ValidationError) {
+        this.options.onValidationFailed?.(error);
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * 验证分片
+   * @param chunks 分片数组
+   */
+  private async validateChunks(chunks: any[]): Promise<any[]> {
+    // 这里可以添加分片验证逻辑
+    // 例如检查分片数量、大小等
+    if (!chunks || chunks.length === 0) {
+      throw new ValidationError(
+        UploadErrorType.VALIDATION_ERROR,
+        '无效的分片数据'
+      );
+    }
+
+    // 验证每个分片
+    chunks.forEach((chunk, index) => {
+      if (!chunk || chunk.size <= 0) {
+        throw new ValidationError(
+          UploadErrorType.VALIDATION_ERROR,
+          `分片 ${index} 无效`
+        );
+      }
+    });
+
+    return chunks;
   }
 }

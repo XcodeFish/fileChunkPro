@@ -4,13 +4,7 @@
  */
 
 import { UploaderCore } from '../core/UploaderCore';
-import {
-  IPlugin,
-  ChunkInfo,
-  UploadFile,
-  ChunkData,
-  NetworkQuality,
-} from '../types';
+import { IPlugin, ChunkInfo, NetworkQuality } from '../types';
 import { Logger } from '../utils/Logger';
 import { MemoryManager } from '../utils/MemoryManager';
 import { NetworkDetector } from '../utils/NetworkDetector';
@@ -22,6 +16,21 @@ interface IFileObject {
   type?: string;
   path?: string;
   slice?: (start: number, end: number) => Blob;
+  meta?: {
+    chunkSize?: number;
+    totalChunks?: number;
+    useStreams?: boolean;
+    [key: string]: any;
+  };
+}
+
+// 定义ChunkData接口
+interface ChunkData {
+  index: number;
+  data: ArrayBuffer | Blob;
+  size: number;
+  start: number;
+  end: number;
 }
 
 interface ChunkPluginOptions {
@@ -37,15 +46,13 @@ interface ChunkPluginOptions {
  * 分片处理插件，实现文件分片策略
  */
 export class ChunkPlugin implements IPlugin {
-  private readonly name = 'ChunkPlugin';
-  private readonly version = '1.1.0';
+  public readonly version = '1.1.0';
   private core: UploaderCore | null = null;
   private chunkSize: number | 'auto';
   private useStreams: boolean;
   private streamChunkSize: number = 2 * 1024 * 1024; // 2MB
   private readonly MAX_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
   private readonly MIN_CHUNK_SIZE = 512 * 1024; // 512KB
-  private adaptiveStrategy: 'performance' | 'memory' | 'network' | 'balanced';
   private enableOptimization: boolean;
   private networkDetector: NetworkDetector | null = null;
   private logger: Logger;
@@ -60,12 +67,16 @@ export class ChunkPlugin implements IPlugin {
       options.useStreams !== undefined
         ? options.useStreams
         : typeof ReadableStream !== 'undefined'; // 如果支持流API则默认启用
-    this.adaptiveStrategy = options.adaptiveStrategy || 'balanced';
-    this.enableOptimization = options.enableOptimization !== false;
     this.logger = new Logger('ChunkPlugin');
+    this.enableOptimization = options.enableOptimization !== false;
 
     if (this.enableOptimization) {
-      this.networkDetector = new NetworkDetector();
+      try {
+        this.networkDetector = NetworkDetector.create();
+      } catch (error) {
+        this.logger.warn('无法初始化NetworkDetector', error);
+        this.networkDetector = null;
+      }
     }
   }
 
@@ -136,7 +147,7 @@ export class ChunkPlugin implements IPlugin {
     this.logger.debug(`网络质量变化：${quality}`);
 
     // 当网络质量变差时，可以动态调整未上传分片的大小
-    if (quality === 'poor') {
+    if (quality === NetworkQuality.POOR) {
       // 减小分片大小以提高成功率
       this.logger.info('网络质量较差，调整为较小的分片大小');
 
@@ -145,7 +156,7 @@ export class ChunkPlugin implements IPlugin {
         reason: 'poorNetwork',
         suggestedChunkSize: Math.max(this.MIN_CHUNK_SIZE, 1 * 1024 * 1024), // 1MB
       });
-    } else if (quality === 'excellent') {
+    } else if (quality === NetworkQuality.EXCELLENT) {
       // 增大分片大小以提高吞吐量
       this.logger.info('网络质量优良，调整为较大的分片大小');
 
@@ -182,7 +193,7 @@ export class ChunkPlugin implements IPlugin {
    * @param file 上传文件
    * @returns 处理后的文件
    */
-  private async handleBeforeUpload(file: UploadFile): Promise<UploadFile> {
+  private async handleBeforeUpload(file: IFileObject): Promise<IFileObject> {
     // 检查文件大小，判断是否需要分片和计算最佳分片大小
     if (!file.size || file.size <= 0) {
       throw new Error('文件大小无效');
@@ -207,7 +218,7 @@ export class ChunkPlugin implements IPlugin {
    * @param file 上传文件
    * @returns 文件分片数据
    */
-  private async handleBeforeChunk(file: UploadFile): Promise<ChunkData[]> {
+  private async handleBeforeChunk(file: IFileObject): Promise<ChunkData[]> {
     if (!file.size) {
       throw new Error('文件大小无效');
     }
@@ -283,15 +294,15 @@ export class ChunkPlugin implements IPlugin {
     }
 
     // 小程序环境或其他环境，通过适配器读取
-    if (this.core && this.core.adapter?.readChunk) {
-      return await this.core.adapter.readChunk(
+    if (this.core && (this.core as any).adapter?.readChunk) {
+      return await (this.core as any).adapter.readChunk(
         file.path || file.name,
         start,
         chunkInfo.size
       );
     }
 
-    throw new Error('无法读取文件分片，不支持的文件类型');
+    throw new Error('无法读取文件分片，不支持的文件类型或缺少适配器');
   }
 
   /**
@@ -310,39 +321,53 @@ export class ChunkPlugin implements IPlugin {
 
     // 如果不启用优化，使用基础的内存管理计算分片大小
     if (!this.enableOptimization) {
-      return MemoryManager.getOptimalChunkSize(file.size);
+      try {
+        // 尝试调用MemoryManager的方法，如果方法不存在则使用默认值
+        if (typeof MemoryManager.getOptimalChunkSize === 'function') {
+          return MemoryManager.getOptimalChunkSize(file.size);
+        }
+        // 默认值，根据文件大小选择合适的分片大小
+        return Math.min(
+          Math.max(2 * 1024 * 1024, file.size / 100),
+          this.MAX_CHUNK_SIZE
+        );
+      } catch (error) {
+        // 出错时使用默认值
+        console.error('无法获取最优分片大小', error);
+        return 2 * 1024 * 1024; // 默认2MB
+      }
     }
 
     // 根据策略类型计算最优分片大小
     let baseChunkSize = 2 * 1024 * 1024; // 默认2MB
 
     // 获取网络质量
-    let networkQuality: NetworkQuality = 'unknown';
+    let networkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
     if (
       this.networkDetector &&
-      typeof this.networkDetector.detectNetworkQuality === 'function'
+      typeof this.networkDetector.getNetworkQuality === 'function'
     ) {
       try {
-        networkQuality = await this.networkDetector.detectNetworkQuality();
+        networkQuality = this.networkDetector.getNetworkQuality();
       } catch (error) {
         // 如果网络检测失败，使用默认的网络质量
         console.error('网络质量检测失败', error);
-        networkQuality = 'unknown';
+        networkQuality = NetworkQuality.UNKNOWN;
       }
     }
 
     // 根据网络质量调整基础分片大小
     switch (networkQuality) {
-      case 'poor':
+      case NetworkQuality.POOR:
         baseChunkSize = 1 * 1024 * 1024; // 1MB
         break;
-      case 'fair':
+      case NetworkQuality.MEDIUM:
         baseChunkSize = 2 * 1024 * 1024; // 2MB
         break;
-      case 'good':
+      case NetworkQuality.GOOD:
         baseChunkSize = 4 * 1024 * 1024; // 4MB
         break;
-      case 'excellent':
+      case NetworkQuality.EXCELLENT:
         baseChunkSize = 8 * 1024 * 1024; // 8MB
         break;
     }
@@ -367,7 +392,7 @@ export class ChunkPlugin implements IPlugin {
    * 判断是否应该使用流式处理
    * @param file 上传文件
    */
-  private shouldUseStreams(file: UploadFile): boolean {
+  private shouldUseStreams(file: IFileObject): boolean {
     // 如果显式设置了useStreams，则遵循设置
     if (typeof this.useStreams === 'boolean') {
       return this.useStreams;
@@ -390,7 +415,7 @@ export class ChunkPlugin implements IPlugin {
    * @param chunkSize 分片大小
    */
   private async createRegularChunks(
-    file: UploadFile,
+    file: IFileObject,
     chunkSize: number
   ): Promise<ChunkData[]> {
     const chunks: ChunkData[] = [];
@@ -411,8 +436,8 @@ export class ChunkPlugin implements IPlugin {
         });
       }
       // 对于其他环境，例如小程序
-      else if (this.core?.adapter?.readChunk) {
-        const buffer = await this.core.adapter.readChunk(
+      else if (this.core && (this.core as any).adapter?.readChunk) {
+        const buffer = await (this.core as any).adapter.readChunk(
           file.path || file.name,
           start,
           end - start
@@ -439,7 +464,7 @@ export class ChunkPlugin implements IPlugin {
    * @param suggestedChunkSize 建议的分片大小
    */
   private async createStreamChunks(
-    file: UploadFile,
+    file: IFileObject,
     suggestedChunkSize: number
   ): Promise<ChunkData[]> {
     // 使用更小的分片大小进行流式处理
