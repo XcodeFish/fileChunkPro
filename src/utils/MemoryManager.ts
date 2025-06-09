@@ -102,6 +102,15 @@ export class MemoryManager {
   private static eventListeners: Map<string, Array<(event: any) => void>> =
     new Map(); // 事件监听器
   private static isInitialized = false; // 是否已初始化
+  private static usePreciseMemoryInfo = false; // 是否使用精确内存信息
+  private static memorySamplingRate = 1000; // 内存采样率(ms)
+  private static dynamicSamplingEnabled = true; // 是否启用动态采样
+  private static memoryPeakUsage = 0; // 峰值内存使用量
+  private static memoryBaselineUsage = 0; // 基准内存使用量
+  private static memoryWarningThresholds = {
+    warning: 0.7, // 70%
+    critical: 0.85, // 85%
+  };
 
   /**
    * 初始化内存管理器
@@ -112,6 +121,8 @@ export class MemoryManager {
 
     this.detectDeviceMemory();
     this.calculateMemoryAllocationLimit();
+    this.checkPreciseMemoryInfo();
+    this.setupMemoryWarningListeners();
     this.isInitialized = true;
 
     // 在初始化后自动开始监控
@@ -153,6 +164,39 @@ export class MemoryManager {
         console.warn('获取微信小程序系统信息失败', e);
       }
     }
+    // 支付宝小程序环境检测
+    else if (typeof my !== 'undefined' && my.getSystemInfoSync) {
+      try {
+        const sysInfo = my.getSystemInfoSync();
+        if (sysInfo.platform && sysInfo.model) {
+          this.estimateMemoryFromDevice(sysInfo.platform, sysInfo.model);
+        }
+      } catch (e) {
+        console.warn('获取支付宝小程序系统信息失败', e);
+      }
+    }
+    // 字节跳动小程序环境检测
+    else if (typeof tt !== 'undefined' && tt.getSystemInfoSync) {
+      try {
+        const sysInfo = tt.getSystemInfoSync();
+        if (sysInfo.platform && sysInfo.model) {
+          this.estimateMemoryFromDevice(sysInfo.platform, sysInfo.model);
+        }
+      } catch (e) {
+        console.warn('获取字节跳动小程序系统信息失败', e);
+      }
+    }
+    // 百度小程序环境检测
+    else if (typeof swan !== 'undefined' && swan.getSystemInfoSync) {
+      try {
+        const sysInfo = swan.getSystemInfoSync();
+        if (sysInfo.platform && sysInfo.model) {
+          this.estimateMemoryFromDevice(sysInfo.platform, sysInfo.model);
+        }
+      } catch (e) {
+        console.warn('获取百度小程序系统信息失败', e);
+      }
+    }
 
     // 如果无法检测，给予保守估计
     if (!this.deviceMemory) {
@@ -161,6 +205,109 @@ export class MemoryManager {
 
     // 确定设备内存容量级别
     this.detectedCapacity = this.determineDeviceCapacity(this.deviceMemory);
+
+    // 记录基准内存使用情况
+    this.recordBaselineMemoryUsage();
+  }
+
+  /**
+   * 记录基准内存使用情况
+   * 用于后续监控对比
+   */
+  private static recordBaselineMemoryUsage(): void {
+    const memInfo = this.getMemoryInfo();
+    this.memoryBaselineUsage = memInfo.used;
+  }
+
+  /**
+   * 检查是否可以获取精确内存信息
+   */
+  private static checkPreciseMemoryInfo(): void {
+    if (
+      typeof window !== 'undefined' &&
+      window.performance &&
+      (window.performance as any).memory
+    ) {
+      try {
+        const before = (window.performance as any).memory.usedJSHeapSize;
+        // 尝试分配一个大数组
+        const testArray = new Array(1000000).fill(0);
+        const after = (window.performance as any).memory.usedJSHeapSize;
+
+        // 如果内存使用量变化，则认为可以获取精确内存信息
+        this.usePreciseMemoryInfo = after > before;
+
+        // 释放测试数组
+        testArray.length = 0;
+      } catch (e) {
+        this.usePreciseMemoryInfo = false;
+      }
+    } else {
+      this.usePreciseMemoryInfo = false;
+    }
+  }
+
+  /**
+   * 设置内存警告监听器
+   * 针对不同环境添加相应的内存警告监听
+   */
+  private static setupMemoryWarningListeners(): void {
+    // 微信小程序内存警告
+    if (typeof wx !== 'undefined' && wx.onMemoryWarning) {
+      wx.onMemoryWarning(this.handleExternalMemoryWarning.bind(this));
+    }
+
+    // 支付宝小程序内存警告
+    if (typeof my !== 'undefined' && my.onMemoryWarning) {
+      my.onMemoryWarning(this.handleExternalMemoryWarning.bind(this));
+    }
+
+    // 字节跳动小程序内存警告
+    if (typeof tt !== 'undefined' && tt.onMemoryWarning) {
+      tt.onMemoryWarning(this.handleExternalMemoryWarning.bind(this));
+    }
+
+    // 浏览器内存警告 (未标准化，但某些平台可能支持)
+    if (typeof window !== 'undefined') {
+      try {
+        window.addEventListener(
+          'memorywarning',
+          this.handleExternalMemoryWarning.bind(this)
+        );
+      } catch (e) {
+        // 忽略不支持的浏览器错误
+      }
+    }
+  }
+
+  /**
+   * 处理外部内存警告事件
+   * @param event 内存警告事件
+   */
+  private static handleExternalMemoryWarning(event: any): void {
+    let level = MemoryWarningLevel.WARNING;
+
+    // 微信小程序特定的级别
+    if (event && event.level) {
+      if (event.level === 10 || event.level === 'warn') {
+        level = MemoryWarningLevel.WARNING;
+      } else if (event.level >= 15 || event.level === 'critical') {
+        level = MemoryWarningLevel.CRITICAL;
+      }
+    }
+
+    // 获取当前内存状态
+    const stats = this.getMemoryStats();
+
+    // 生成建议
+    const recommendations = this.getMemoryRecommendations(stats);
+
+    // 触发内存警告事件
+    this.dispatchEvent('memoryWarning', {
+      level,
+      stats,
+      recommendations,
+    });
   }
 
   /**
@@ -222,6 +369,11 @@ export class MemoryManager {
 
     if (platform === 'ios') {
       if (
+        lowerModel.includes('iphone 13') ||
+        lowerModel.includes('iphone 14')
+      ) {
+        this.deviceMemory = 6 * 1024 * 1024 * 1024; // 6GB
+      } else if (
         lowerModel.includes('iphone 11') ||
         lowerModel.includes('iphone 12')
       ) {
@@ -237,12 +389,18 @@ export class MemoryManager {
     } else if (platform === 'android') {
       if (
         lowerModel.includes('samsung') &&
-        (lowerModel.includes('s20') || lowerModel.includes('s21'))
+        (lowerModel.includes('s21') || lowerModel.includes('s22'))
+      ) {
+        this.deviceMemory = 12 * 1024 * 1024 * 1024; // 12GB (高端型号)
+      } else if (
+        lowerModel.includes('samsung') &&
+        (lowerModel.includes('s20') || lowerModel.includes('note 20'))
       ) {
         this.deviceMemory = 8 * 1024 * 1024 * 1024; // 8GB
       } else if (
         lowerModel.includes('xiaomi') ||
-        lowerModel.includes('huawei')
+        lowerModel.includes('huawei') ||
+        lowerModel.includes('honor')
       ) {
         this.deviceMemory = 6 * 1024 * 1024 * 1024; // 6GB
       } else {
@@ -253,7 +411,9 @@ export class MemoryManager {
     }
   }
 
-  // 为测试提供访问内部数据
+  /**
+   * 获取/设置内存使用历史数据
+   */
   static get memoryUsage(): number[] {
     return this.memoryUsageHistory;
   }
@@ -272,65 +432,158 @@ export class MemoryManager {
 
   /**
    * 清除内存监控数据
-   * 仅供测试使用
+   * 用于长时间运行或重置监控状态
    */
   static _clearMemoryData(): void {
     this.memoryUsageHistory = [];
     this.memoryTimestampHistory = [];
+    this.memoryPeakUsage = 0;
+
+    // 重新记录基准内存
+    if (this.isInitialized) {
+      this.recordBaselineMemoryUsage();
+    }
   }
 
   /**
-   * 启动内存使用监控
-   * 增强版监控更多指标并提供更精确的数据
+   * 开始内存监控
+   * 定期采样内存使用情况并分析趋势
    */
   static startMonitoring(): void {
-    // 确保MemoryManager已初始化
+    if (this.memoryWatcher) {
+      return; // 已经在监控中
+    }
+
     if (!this.isInitialized) {
       this.initialize();
     }
 
-    // 如果已经在监控，则不再创建
-    if (this.memoryWatcher) return;
+    // 清空历史数据
+    this._clearMemoryData();
 
-    // 浏览器环境监控
-    if (
-      typeof window !== 'undefined' &&
-      window.performance &&
-      (window.performance as any).memory
-    ) {
-      this.memoryWatcher = setInterval(() => {
-        const memory = (window.performance as any).memory;
-        const now = Date.now();
+    // 添加小程序平台的内存警告监听
+    this.setupPlatformSpecificMonitoring();
 
-        // 记录内存使用情况
-        this.memoryUsageHistory.push(memory.usedJSHeapSize);
-        this.memoryTimestampHistory.push(now);
+    // 设置动态采样率
+    let samplingInterval = this.memorySamplingRate;
 
-        // 保留最近的样本
-        if (this.memoryUsageHistory.length > this.MAX_MEMORY_SAMPLES) {
-          this.memoryUsageHistory.shift();
-          this.memoryTimestampHistory.shift();
-        }
-
-        // 分析内存使用情况并检查是否需要触发警告
-        this.analyzeMemoryUsage();
-      }, 1000);
+    // 根据设备容量调整采样间隔
+    if (this.detectedCapacity === DeviceMemoryCapacity.VERY_LOW) {
+      samplingInterval = 2000; // 降低采样频率以减少资源消耗
+    } else if (this.detectedCapacity === DeviceMemoryCapacity.LOW) {
+      samplingInterval = 1500;
     }
-    // 小程序环境监控
-    else if (typeof wx !== 'undefined' && wx.onMemoryWarning) {
-      // 微信小程序内存告警监听
-      wx.onMemoryWarning(_res => {
-        // 微信小程序的内存告警，忽略level参数，统一按警告级别处理
-        const stats = this.getMemoryStats();
 
-        // 分发内存警告事件
+    // 初始采样
+    this.updateMemorySample();
+
+    // 开始定时采样
+    this.memoryWatcher = setInterval(() => {
+      try {
+        // 更新内存样本
+        this.updateMemorySample();
+
+        // 分析内存使用情况
+        this.analyzeMemoryUsage();
+
+        // 动态调整采样间隔
+        if (this.dynamicSamplingEnabled) {
+          this.adjustSamplingRate();
+        }
+      } catch (e) {
+        console.error('内存监控异常', e);
+      }
+    }, samplingInterval);
+  }
+
+  /**
+   * 更新内存样本
+   * 获取当前内存使用情况并记录到历史数据中
+   */
+  private static updateMemorySample(): void {
+    const memInfo = this.getMemoryInfo();
+
+    // 记录使用量
+    this.memoryUsageHistory.push(memInfo.used);
+    this.memoryTimestampHistory.push(Date.now());
+
+    // 更新峰值
+    if (memInfo.used > this.memoryPeakUsage) {
+      this.memoryPeakUsage = memInfo.used;
+    }
+
+    // 限制样本数量
+    if (this.memoryUsageHistory.length > this.MAX_MEMORY_SAMPLES) {
+      this.memoryUsageHistory.shift();
+      this.memoryTimestampHistory.shift();
+    }
+  }
+
+  /**
+   * 动态调整内存采样率
+   * 根据内存使用趋势调整采样频率
+   */
+  private static adjustSamplingRate(): void {
+    const trend = this.determineMemoryTrend();
+    const memStats = this.getMemoryStats();
+
+    // 初始采样间隔
+    let newInterval = this.memorySamplingRate;
+
+    // 根据趋势和使用率调整
+    if (trend === MemoryTrend.GROWING && memStats.usageRatio > 0.6) {
+      // 内存增长且接近警告阈值，提高采样频率
+      newInterval = Math.max(500, this.memorySamplingRate - 200);
+    } else if (trend === MemoryTrend.STABLE && memStats.usageRatio < 0.5) {
+      // 内存稳定且使用率较低，降低采样频率
+      newInterval = Math.min(2000, this.memorySamplingRate + 300);
+    } else if (trend === MemoryTrend.DECREASING) {
+      // 内存减少，可以适度降低采样频率
+      newInterval = Math.min(1500, this.memorySamplingRate + 100);
+    }
+
+    // 如果需要更新采样间隔
+    if (newInterval !== this.memorySamplingRate) {
+      this.memorySamplingRate = newInterval;
+
+      // 重新启动监控器
+      if (this.memoryWatcher) {
+        clearInterval(this.memoryWatcher);
+
+        this.memoryWatcher = setInterval(() => {
+          this.updateMemorySample();
+          this.analyzeMemoryUsage();
+          if (this.dynamicSamplingEnabled) {
+            this.adjustSamplingRate();
+          }
+        }, this.memorySamplingRate);
+      }
+    }
+  }
+
+  /**
+   * 设置平台特定的内存监控
+   */
+  private static setupPlatformSpecificMonitoring(): void {
+    // 微信小程序特有的内存警告监听
+    if (typeof wx !== 'undefined' && wx.onMemoryWarning) {
+      wx.onMemoryWarning(({ level }) => {
+        const warningLevel =
+          level === 10
+            ? MemoryWarningLevel.WARNING
+            : MemoryWarningLevel.CRITICAL;
+        const stats = this.getMemoryStats();
+        const recommendations = this.getMemoryRecommendations(stats);
+
         this.dispatchEvent('memoryWarning', {
-          level: MemoryWarningLevel.WARNING,
+          level: warningLevel,
           stats,
-          recommendations: this.getMemoryRecommendations(stats),
+          recommendations,
         });
       });
     }
+
+    // 其他平台的内存警告监听可以类似实现
   }
 
   /**
@@ -342,78 +595,97 @@ export class MemoryManager {
       this.memoryWatcher = null;
     }
 
-    // 移除小程序环境的监听器
-    if (typeof wx !== 'undefined' && wx.offMemoryWarning) {
-      wx.offMemoryWarning();
-    }
-
-    // 清空历史数据
-    this._clearMemoryData();
+    // 清除小程序特定的监听器
+    this.clearPlatformSpecificListeners();
   }
 
   /**
-   * 分析内存使用情况并根据需要触发事件
+   * 清除平台特定的监听器
+   */
+  private static clearPlatformSpecificListeners(): void {
+    // 目前小程序平台不提供移除内存警告监听的方法
+    // 如果将来提供，可以在此处实现
+  }
+
+  /**
+   * 分析内存使用情况
+   * 基于当前内存使用趋势和级别触发相关事件
    */
   private static analyzeMemoryUsage(): void {
+    // 获取当前内存统计信息
+    const memStats = this.getMemoryStats();
     const now = Date.now();
-    const stats = this.getMemoryStats();
-    let warningLevel = MemoryWarningLevel.NORMAL;
+    const currentTrend = this.determineMemoryTrend();
+    memStats.trend = currentTrend;
 
-    // 确定警告级别
-    if (stats.usageRatio >= this.CRITICAL_MEMORY_THRESHOLD) {
-      warningLevel = MemoryWarningLevel.CRITICAL;
-    } else if (stats.usageRatio >= this.HIGH_MEMORY_THRESHOLD) {
-      warningLevel = MemoryWarningLevel.WARNING;
-    }
-
-    // 临界内存状态，发出警告并建议垃圾回收
+    // 检查是否需要发出警告
     if (
-      warningLevel === MemoryWarningLevel.CRITICAL &&
-      now - this.lastGarbageCollectionTime > this.MIN_GC_INTERVAL
+      memStats.usageRatio >= this.CRITICAL_MEMORY_THRESHOLD &&
+      now - this.lastMemoryWarning >= this.MIN_WARNING_INTERVAL
     ) {
-      this.suggestGarbageCollection();
-      this.lastGarbageCollectionTime = now;
-
-      // 发布内存警告事件
-      if (now - this.lastMemoryWarning > this.MIN_WARNING_INTERVAL) {
-        this.dispatchEvent('memoryWarning', {
-          level: warningLevel,
-          stats,
-          recommendations: this.getMemoryRecommendations(stats),
-        });
-        this.lastMemoryWarning = now;
-      }
-    }
-    // 内存处于警告级别
-    else if (
-      warningLevel === MemoryWarningLevel.WARNING &&
-      now - this.lastMemoryWarning > this.MIN_WARNING_INTERVAL * 2 // 降低警告频率
-    ) {
-      this.dispatchEvent('memoryWarning', {
-        level: warningLevel,
-        stats,
-        recommendations: this.getMemoryRecommendations(stats),
-      });
+      // 临界内存警告
       this.lastMemoryWarning = now;
+
+      const recommendations = this.getMemoryRecommendations(memStats);
+
+      // 派发内存临界事件
+      this.dispatchEvent('memoryWarning', {
+        level: MemoryWarningLevel.CRITICAL,
+        stats: memStats,
+        recommendations,
+      });
+
+      // 紧急情况，建议执行垃圾回收
+      if (recommendations.shouldReleaseMemory) {
+        this.suggestGarbageCollection();
+      }
+    } else if (
+      memStats.usageRatio >= this.HIGH_MEMORY_THRESHOLD &&
+      now - this.lastMemoryWarning >= this.MIN_WARNING_INTERVAL
+    ) {
+      // 高级内存警告
+      this.lastMemoryWarning = now;
+
+      // 派发内存警告事件
+      this.dispatchEvent('memoryWarning', {
+        level: MemoryWarningLevel.WARNING,
+        stats: memStats,
+        recommendations: this.getMemoryRecommendations(memStats),
+      });
     }
 
-    // 根据内存增长趋势给出建议
+    // 当内存持续增长且使用率较高时，提供建议
     if (
-      stats.trend === MemoryTrend.GROWING &&
-      stats.growthRate &&
-      stats.growthRate > 2 * 1024 * 1024 && // 内存增长率超过2MB/秒
-      now - this.lastRecommendationTime > this.MIN_RECOMMENDATION_INTERVAL
+      currentTrend === MemoryTrend.GROWING &&
+      memStats.usageRatio > this.NORMAL_MEMORY_THRESHOLD &&
+      now - this.lastRecommendationTime >= this.MIN_RECOMMENDATION_INTERVAL
     ) {
-      this.dispatchEvent('memoryRecommendation', {
-        ...stats,
-        recommendations: this.getMemoryRecommendations(stats),
-      });
       this.lastRecommendationTime = now;
+
+      const recommendations = this.getMemoryRecommendations(memStats);
+
+      // 派发内存建议事件
+      this.dispatchEvent('memoryRecommendation', {
+        ...memStats,
+        recommendations,
+      });
+
+      // 检查是否应该暂停上传
+      if (
+        memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD &&
+        recommendations.shouldPause
+      ) {
+        // 派发暂停建议事件
+        this.dispatchEvent('memoryPressurePause', {
+          reason: '内存压力过大',
+          shouldPause: true,
+        });
+      }
     }
   }
 
   /**
-   * 根据内存状况生成推荐设置
+   * 根据内存状态生成内存使用建议
    */
   private static getMemoryRecommendations(stats: MemoryStats): {
     chunkSize?: number;
@@ -428,36 +700,40 @@ export class MemoryManager {
       shouldReleaseMemory?: boolean;
     } = {};
 
-    // 基于内存使用率和趋势给出不同推荐
-    if (stats.usageRatio >= this.CRITICAL_MEMORY_THRESHOLD) {
-      // 内存使用率临界
-      recommendations.chunkSize = 512 * 1024; // 512KB
-      recommendations.concurrency = 1;
+    // 根据内存使用比例调整建议
+    if (stats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
+      // 严重内存不足情况
+      recommendations.chunkSize = Math.max(
+        524288, // 最小分片 512KB
+        this.getOptimalChunkSize(10 * 1024 * 1024) / 2 // 当前推荐的一半
+      );
+      recommendations.concurrency = 1; // 最小并发
       recommendations.shouldPause = true;
       recommendations.shouldReleaseMemory = true;
-    } else if (stats.usageRatio >= this.HIGH_MEMORY_THRESHOLD) {
-      // 内存使用率较高
-      recommendations.chunkSize = 1 * 1024 * 1024; // 1MB
-      recommendations.concurrency = 2;
-      recommendations.shouldReleaseMemory = true;
-    } else if (
-      stats.trend === MemoryTrend.GROWING &&
-      stats.growthRate &&
-      stats.growthRate > 3 * 1024 * 1024
-    ) {
-      // 内存增长快
-      recommendations.chunkSize = 2 * 1024 * 1024; // 2MB
+    } else if (stats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
+      // 内存紧张情况
+      recommendations.chunkSize = Math.max(
+        1048576, // 最小分片 1MB
+        this.getOptimalChunkSize(10 * 1024 * 1024) * 0.7 // 当前推荐的70%
+      );
       recommendations.concurrency = Math.max(
-        2,
+        1,
         this.getRecommendedConcurrency() - 1
       );
+      recommendations.shouldPause = stats.trend === MemoryTrend.GROWING;
+      recommendations.shouldReleaseMemory = true;
+    } else if (stats.usageRatio > this.NORMAL_MEMORY_THRESHOLD) {
+      // 内存偏高情况
+      const currentConcurrency = this.getRecommendedConcurrency();
+      recommendations.concurrency = Math.max(1, currentConcurrency - 1);
+      recommendations.shouldReleaseMemory = stats.trend === MemoryTrend.GROWING;
     }
 
     return recommendations;
   }
 
   /**
-   * 注册事件监听器
+   * 监听内存相关事件
    */
   public static addEventListener(
     event: string,
@@ -466,11 +742,14 @@ export class MemoryManager {
     if (!this.eventListeners.has(event)) {
       this.eventListeners.set(event, []);
     }
-    this.eventListeners.get(event)?.push(callback);
+    const callbacks = this.eventListeners.get(event) || [];
+    if (!callbacks.includes(callback)) {
+      callbacks.push(callback);
+    }
   }
 
   /**
-   * 移除事件监听器
+   * 移除内存相关事件监听
    */
   public static removeEventListener(
     event: string,
@@ -478,114 +757,167 @@ export class MemoryManager {
   ): void {
     if (!this.eventListeners.has(event)) return;
 
-    const listeners = this.eventListeners.get(event);
-    if (listeners) {
-      const index = listeners.indexOf(callback);
-      if (index !== -1) {
-        listeners.splice(index, 1);
-      }
+    const callbacks = this.eventListeners.get(event) || [];
+    const index = callbacks.indexOf(callback);
+    if (index !== -1) {
+      callbacks.splice(index, 1);
+    }
+
+    // 如果没有监听器了，删除整个事件
+    if (callbacks.length === 0) {
+      this.eventListeners.delete(event);
     }
   }
 
   /**
-   * 触发事件
+   * 触发内存相关事件
    */
   private static dispatchEvent(eventName: string, detail: unknown): void {
-    // 触发内部事件监听器
-    const listeners = this.eventListeners.get(eventName);
-    if (listeners) {
-      listeners.forEach(callback => {
+    // 如果有注册的内部监听器，调用它们
+    if (this.eventListeners.has(eventName)) {
+      const callbacks = this.eventListeners.get(eventName) || [];
+      callbacks.forEach(cb => {
         try {
-          callback(detail);
-        } catch (error) {
-          console.error(`执行${eventName}事件监听器出错:`, error);
+          cb({ type: eventName, detail });
+        } catch (err) {
+          console.error(`[MemoryManager] 事件监听器执行错误:`, err);
         }
       });
     }
 
-    // 兼容浏览器CustomEvent
-    if (
-      typeof window !== 'undefined' &&
-      typeof window.dispatchEvent === 'function' &&
-      typeof CustomEvent === 'function'
-    ) {
+    // 同时在window上触发事件(浏览器环境)
+    if (typeof window !== 'undefined' && typeof CustomEvent === 'function') {
       try {
         const event = new CustomEvent(eventName, { detail });
         window.dispatchEvent(event);
-      } catch (e) {
-        // 忽略事件分发错误
-        console.warn('分发内存事件失败:', e);
+      } catch (err) {
+        console.error(`[MemoryManager] 触发window事件错误:`, err);
       }
     }
+
+    // 在各种小程序环境中，通过特定的事件系统触发
+    this.dispatchPlatformSpecificEvent(eventName, detail);
   }
 
   /**
-   * 获取内存统计信息
-   * 增强版提供更完整的内存统计数据
+   * 在特定平台触发事件
+   */
+  private static dispatchPlatformSpecificEvent(
+    eventName: string,
+    detail: unknown
+  ): void {
+    // 微信小程序，通过全局事件总线触发
+    if (typeof wx !== 'undefined' && wx.getStorageSync && wx.setStorageSync) {
+      try {
+        // 使用存储API作为事件通信通道
+        const eventKey = `mem_event_${eventName}`;
+        wx.setStorageSync(eventKey, {
+          timestamp: Date.now(),
+          detail,
+        });
+      } catch (err) {
+        // 忽略错误
+      }
+    }
+
+    // 其他小程序环境类似实现
+    // ...
+  }
+
+  /**
+   * 获取当前内存统计信息
    */
   public static getMemoryStats(): MemoryStats {
-    try {
-      // 获取基本内存信息
-      const memInfo = this.getMemoryInfo();
-      const { usageRatio, used, limit } = memInfo;
+    // 获取基本内存信息
+    const memInfo = this.getMemoryInfo();
+    let growthRate = 0;
+    let trend: MemoryTrend | undefined;
 
-      // 计算内存增长率和趋势
-      const growthRate = this.getMemoryGrowthRate();
-      const trend = this.determineMemoryTrend();
+    // 如果有足够的样本，计算内存增长率和趋势
+    if (this.memoryUsageHistory.length >= 2) {
+      // 计算过去5秒或可用样本的平均增长率
+      const sampleCount = Math.min(5, this.memoryUsageHistory.length);
+      const recentUsage = this.memoryUsageHistory.slice(-sampleCount);
+      const recentTimestamps = this.memoryTimestampHistory.slice(-sampleCount);
 
-      // 设备容量和可用内存
-      if (!this.detectedCapacity) {
-        this.detectDeviceMemory();
+      if (sampleCount >= 2) {
+        const timeDiff =
+          recentTimestamps[recentTimestamps.length - 1] - recentTimestamps[0]; // 毫秒
+        const memDiff = recentUsage[recentUsage.length - 1] - recentUsage[0]; // 字节
+
+        if (timeDiff > 0) {
+          // 计算每秒内存增长率
+          growthRate = (memDiff / timeDiff) * 1000;
+        }
       }
 
-      const availableForUploading = this.getAvailableMemoryForUploading();
-      const isLowMemoryEnvironment = this.isLowMemoryDevice();
-
-      return {
-        used,
-        total: limit,
-        limit,
-        usageRatio,
-        growthRate,
-        trend,
-        capacity: this.detectedCapacity || DeviceMemoryCapacity.MEDIUM,
-        availableForUploading,
-        isLowMemoryEnvironment,
-      };
-    } catch (e) {
-      // 出错时返回保守估计
-      console.warn('获取内存统计信息失败', e);
-      return {
-        used: 0,
-        total: 0,
-        limit: 0,
-        usageRatio: 0.5, // 保守估计为50%
-        trend: MemoryTrend.STABLE,
-      };
+      // 确定内存使用趋势
+      trend = this.determineMemoryTrend();
     }
+
+    // 确定设备内存容量级别
+    const capacity =
+      this.detectedCapacity || this.determineDeviceCapacity(memInfo.limit);
+
+    // 计算可用于上传的内存估计值
+    const availableForUploading = this.getAvailableMemoryForUploading();
+
+    // 是否为低内存环境
+    const isLowMemoryEnvironment = this.isLowMemoryDevice();
+
+    return {
+      used: memInfo.used,
+      total: memInfo.total,
+      limit: memInfo.limit,
+      usageRatio: memInfo.usageRatio,
+      growthRate,
+      trend,
+      capacity,
+      availableForUploading,
+      isLowMemoryEnvironment,
+    };
   }
 
   /**
-   * 判断内存使用趋势
+   * 确定内存使用趋势
    */
   private static determineMemoryTrend(): MemoryTrend {
-    if (this.memoryUsageHistory.length < 5) {
-      return MemoryTrend.STABLE; // 样本不足，视为稳定
+    // 需要至少3个样本来确定趋势
+    if (this.memoryUsageHistory.length < 3) {
+      return MemoryTrend.STABLE;
     }
 
-    // 使用最近的5个样本计算趋势
-    const recentSamples = this.memoryUsageHistory.slice(-5);
-    const firstSample = recentSamples[0];
-    const lastSample = recentSamples[recentSamples.length - 1];
+    // 使用线性回归斜率来确定趋势
+    const recentSamples = Math.min(8, this.memoryUsageHistory.length);
+    const samples = this.memoryUsageHistory.slice(-recentSamples);
+    const timestamps = this.memoryTimestampHistory.slice(-recentSamples);
 
-    // 计算变化百分比
-    const changePercent = (lastSample - firstSample) / firstSample;
+    // 计算趋势系数 (简化的线性回归)
+    let sumXY = 0;
+    let sumX = 0;
+    let sumY = 0;
+    let sumX2 = 0;
 
-    if (changePercent > 0.05) {
-      // 增长超过5%
+    for (let i = 0; i < samples.length; i++) {
+      const x = timestamps[i] - timestamps[0]; // 时间偏移
+      const y = samples[i];
+      sumXY += x * y;
+      sumX += x;
+      sumY += y;
+      sumX2 += x * x;
+    }
+
+    const n = samples.length;
+    const slope = (n * sumXY - sumX * sumY) / (n * sumX2 - sumX * sumX);
+
+    // 根据斜率确定趋势
+    // 考虑内存使用量的规模，使用相对阈值
+    const baseMemory = Math.max(1, samples[0]);
+    const relativeThreshold = baseMemory * 0.001; // 千分之一的相对变化
+
+    if (slope > relativeThreshold) {
       return MemoryTrend.GROWING;
-    } else if (changePercent < -0.05) {
-      // 减少超过5%
+    } else if (slope < -relativeThreshold) {
       return MemoryTrend.DECREASING;
     } else {
       return MemoryTrend.STABLE;
@@ -593,16 +925,140 @@ export class MemoryManager {
   }
 
   /**
-   * 获取可用于上传任务的内存估计值
+   * 获取可用于上传的内存估计值
    */
   private static getAvailableMemoryForUploading(): number {
-    if (!this.memoryAllocationLimit) {
-      this.calculateMemoryAllocationLimit();
+    const memInfo = this.getMemoryInfo();
+    const availableTotal = memInfo.limit - memInfo.used;
+
+    // 分配一部分可用内存给上传任务
+    // 根据设备容量级别调整分配比例
+    let allocationRatio = 0.5; // 默认分配50%的可用内存
+
+    switch (this.detectedCapacity) {
+      case DeviceMemoryCapacity.VERY_LOW:
+        allocationRatio = 0.25; // 低内存设备只分配25%的可用内存
+        break;
+      case DeviceMemoryCapacity.LOW:
+        allocationRatio = 0.4;
+        break;
+      case DeviceMemoryCapacity.MEDIUM:
+        allocationRatio = 0.5;
+        break;
+      case DeviceMemoryCapacity.HIGH:
+        allocationRatio = 0.6;
+        break;
+      case DeviceMemoryCapacity.VERY_HIGH:
+        allocationRatio = 0.7; // 高内存设备可以分配更多
+        break;
     }
 
-    const memInfo = this.getMemoryInfo();
-    // 可用内存 = 分配上限 * (1 - 当前使用率)
-    return this.memoryAllocationLimit! * (1 - memInfo.usageRatio);
+    return availableTotal * allocationRatio;
+  }
+
+  /**
+   * 获取内存信息
+   * 综合各种环境和API获取内存使用情况
+   */
+  public static getMemoryInfo(): {
+    usageRatio: number;
+    used: number;
+    limit: number;
+    total: number;
+  } {
+    let used = 0;
+    let total = 0;
+    let limit = 0;
+
+    // 浏览器环境
+    if (
+      typeof window !== 'undefined' &&
+      window.performance &&
+      (window.performance as any).memory
+    ) {
+      try {
+        const memory = (window.performance as any).memory;
+        used = memory.usedJSHeapSize;
+        total = memory.totalJSHeapSize;
+        limit = memory.jsHeapSizeLimit;
+      } catch (e) {
+        // 忽略错误，使用后备方法
+      }
+    }
+
+    // 小程序环境 - 微信（无精确内存API）
+    if (
+      typeof wx !== 'undefined' &&
+      typeof used === 'undefined' &&
+      this.deviceMemory
+    ) {
+      // 微信小程序目前没有获取内存使用量的API，只能使用预估值
+      limit = this.deviceMemory;
+      total = this.deviceMemory * 0.8; // 保守假设能用到总内存的80%
+      used = this.memoryBaselineUsage; // 使用基线内存使用量
+
+      // 如果有使用历史，用最新值
+      if (this.memoryUsageHistory.length > 0) {
+        used = this.memoryUsageHistory[this.memoryUsageHistory.length - 1];
+      }
+    }
+
+    // 支付宝小程序环境 - 类似处理
+    if (
+      typeof my !== 'undefined' &&
+      typeof used === 'undefined' &&
+      this.deviceMemory
+    ) {
+      limit = this.deviceMemory;
+      total = this.deviceMemory * 0.8;
+      used = this.memoryBaselineUsage;
+
+      if (this.memoryUsageHistory.length > 0) {
+        used = this.memoryUsageHistory[this.memoryUsageHistory.length - 1];
+      }
+    }
+
+    // 如果都没有获取到，使用保守估计
+    if (limit === 0) {
+      limit = 512 * 1024 * 1024; // 假设512MB的堆限制
+      total = limit * 0.8;
+      used = total * 0.5; // 假设使用了50%
+    }
+
+    // 计算使用率
+    const usageRatio = Math.min(1, Math.max(0, used / limit));
+
+    return { usageRatio, used, total, limit };
+  }
+
+  /**
+   * 计算内存增长率
+   */
+  static getMemoryGrowthRate(): number {
+    if (this.memoryUsageHistory.length < 2) {
+      return 0; // 样本不足，无法计算
+    }
+
+    // 使用最近的样本计算平均增长率
+    const samples = Math.min(5, this.memoryUsageHistory.length);
+    const recentUsage = this.memoryUsageHistory.slice(-samples);
+    const recentTimestamps = this.memoryTimestampHistory.slice(-samples);
+
+    if (recentUsage.length < 2) {
+      return 0;
+    }
+
+    // 计算最早和最新样本的差值
+    const memoryDiff = recentUsage[recentUsage.length - 1] - recentUsage[0];
+    const timeDiff =
+      recentTimestamps[recentTimestamps.length - 1] - recentTimestamps[0];
+
+    if (timeDiff <= 0) {
+      return 0;
+    }
+
+    // 计算每秒增长字节数
+    return (memoryDiff / timeDiff) * 1000;
   }
 
   /**
@@ -744,241 +1200,178 @@ export class MemoryManager {
   }
 
   /**
-   * 获取内存信息
-   * 尝试通过多种方式获取当前内存使用情况
-   */
-  public static getMemoryInfo(): {
-    usageRatio: number;
-    used: number;
-    limit: number;
-  } {
-    try {
-      // 浏览器环境
-      if (typeof window !== 'undefined' && window.performance) {
-        // Chrome浏览器
-        if (
-          typeof (window.performance as any).memory !== 'undefined' &&
-          (window.performance as any).memory.usedJSHeapSize !== undefined
-        ) {
-          const memoryInfo = (window.performance as any).memory;
-          const used = memoryInfo.usedJSHeapSize;
-          const limit = memoryInfo.jsHeapSizeLimit;
-          const usageRatio = limit > 0 ? used / limit : 0;
-
-          return { usageRatio, used, limit };
-        }
-      }
-
-      // Node.js环境
-      if (typeof process !== 'undefined' && process.memoryUsage) {
-        const memoryUsage = process.memoryUsage();
-        const used = memoryUsage.heapUsed;
-        const limit = memoryUsage.rss;
-        const usageRatio = limit > 0 ? used / limit : 0;
-
-        return { usageRatio, used, limit };
-      }
-
-      // 无法获取精确信息时返回保守估计
-      return {
-        usageRatio: 0.5, // 假设50%使用率
-        used: 0,
-        limit: 0,
-      };
-    } catch (e) {
-      console.warn('获取内存信息失败', e);
-      return {
-        usageRatio: 0.5, // 假设50%使用率
-        used: 0,
-        limit: 0,
-      };
-    }
-  }
-
-  /**
-   * 获取当前内存使用趋势
-   * @returns 内存使用增长率 (bytes/s)
-   */
-  static getMemoryGrowthRate(): number {
-    // 如果样本不足，无法计算趋势
-    if (
-      this.memoryUsageHistory.length < 2 ||
-      this.memoryTimestampHistory.length < 2
-    ) {
-      return 0;
-    }
-
-    // 使用最新和最旧样本计算增长率
-    const firstUsage = this.memoryUsageHistory[0];
-    const lastUsage =
-      this.memoryUsageHistory[this.memoryUsageHistory.length - 1];
-    const firstTime = this.memoryTimestampHistory[0];
-    const lastTime =
-      this.memoryTimestampHistory[this.memoryTimestampHistory.length - 1];
-
-    // 计算时间间隔(秒)
-    const timeElapsed = (lastTime - firstTime) / 1000;
-    if (timeElapsed === 0) return 0;
-
-    // 计算每秒增长字节数
-    return (lastUsage - firstUsage) / timeElapsed;
-  }
-
-  /**
    * 获取分片处理策略
-   * 根据文件大小和当前内存状况提供完整的处理策略
+   * 根据文件大小和当前内存状态提供最优的处理策略
    */
   public static getChunkProcessingStrategy(
     fileSize: number,
     currentStrategy?: Partial<ChunkProcessingStrategy>
   ): ChunkProcessingStrategy {
-    // 默认策略
-    const defaultStrategy: ChunkProcessingStrategy = {
-      chunkSize: 2 * 1024 * 1024, // 2MB
-      concurrency: 3,
-      processingMode: 'parallel',
-      useStreaming: fileSize > 100 * 1024 * 1024, // 100MB以上文件默认使用流式处理
-      prioritizeMetadata: true,
-      preloadChunks: 2,
-    };
-
-    // 合并当前策略
-    const strategy = {
-      ...defaultStrategy,
-      ...currentStrategy,
-    };
+    if (!this.isInitialized) {
+      this.initialize();
+    }
 
     // 获取内存状态
     const memStats = this.getMemoryStats();
 
-    // 内存紧张情况下的调整
-    if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
-      // 降低并发数和分片大小
-      strategy.chunkSize = this.getOptimalChunkSize(
-        fileSize,
-        strategy.chunkSize,
-        2
-      );
-      strategy.concurrency = Math.min(strategy.concurrency, 2);
-      strategy.preloadChunks = 1;
+    // 优化的分片大小
+    const chunkSize = this.getOptimalChunkSize(fileSize);
 
-      // 对于大文件，强制使用流式处理
-      if (fileSize > 50 * 1024 * 1024) {
-        // 50MB
-        strategy.useStreaming = true;
+    // 优化的并发数
+    const concurrency = this.getRecommendedConcurrency();
+
+    // 默认处理模式
+    let processingMode: 'sequential' | 'parallel' | 'hybrid' = 'parallel';
+    let useStreaming = false;
+    const prioritizeMetadata = true;
+    let preloadChunks = 2;
+
+    // 大文件处理策略调整
+    if (fileSize > 200 * 1024 * 1024) {
+      // 200MB
+      // 对于大文件，考虑特殊处理策略
+      const largeFileStrategy = this.getLargeFileStrategy(fileSize);
+
+      // 应用大文件策略
+      useStreaming = largeFileStrategy.shouldUseStreaming;
+
+      // 内存不足时使用顺序处理
+      if (
+        memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD ||
+        this.isLowMemoryDevice()
+      ) {
+        processingMode = 'sequential';
+        preloadChunks = 1;
+      } else {
+        processingMode = largeFileStrategy.processingMode;
+        preloadChunks = largeFileStrategy.maxPartsInMemory;
       }
-
-      // 内存极度紧张时切换到顺序处理
-      if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
-        strategy.processingMode = 'sequential';
-        strategy.concurrency = 1;
-        strategy.preloadChunks = 0;
+    } else if (fileSize > 50 * 1024 * 1024) {
+      // 50MB
+      // 中等文件
+      if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
+        processingMode = 'hybrid';
+        preloadChunks = 1;
+      } else {
+        processingMode = 'parallel';
+        preloadChunks = Math.min(3, concurrency);
       }
     }
-    // 内存充足情况下的调整
-    else if (memStats.usageRatio < this.NORMAL_MEMORY_THRESHOLD) {
-      // 可以适当增加分片大小和并发数
-      strategy.chunkSize = this.getOptimalChunkSize(
-        fileSize,
-        strategy.chunkSize,
-        strategy.concurrency
-      );
-      strategy.preloadChunks = Math.min(3, strategy.concurrency);
 
-      // 小文件不需要流式处理
-      if (fileSize < 20 * 1024 * 1024) {
-        // 20MB
-        strategy.useStreaming = false;
-      }
+    // 合并当前策略(如果有)
+    if (currentStrategy) {
+      return {
+        chunkSize: currentStrategy.chunkSize ?? chunkSize,
+        concurrency: currentStrategy.concurrency ?? concurrency,
+        processingMode: currentStrategy.processingMode ?? processingMode,
+        useStreaming: currentStrategy.useStreaming ?? useStreaming,
+        prioritizeMetadata:
+          currentStrategy.prioritizeMetadata ?? prioritizeMetadata,
+        preloadChunks: currentStrategy.preloadChunks ?? preloadChunks,
+      };
     }
 
-    // 大文件特殊处理策略
-    if (fileSize > 500 * 1024 * 1024) {
-      // 500MB
-      strategy.processingMode = 'hybrid'; // 使用混合处理模式
-      strategy.useStreaming = true; // 强制使用流式处理
-    }
-
-    return strategy;
+    return {
+      chunkSize,
+      concurrency,
+      processingMode,
+      useStreaming,
+      prioritizeMetadata,
+      preloadChunks,
+    };
   }
 
   /**
-   * 获取当前可用内存
-   * 用于估算可用于上传的内存量
+   * 获取可用内存估计值
    */
   static getAvailableMemory(): number {
     const memInfo = this.getMemoryInfo();
-    if (!memInfo.limit) {
-      // 无法获取精确信息时，使用保守估计
-      return 100 * 1024 * 1024; // 假设100MB可用
-    }
-    return memInfo.limit - memInfo.used;
+    return Math.max(0, memInfo.limit - memInfo.used);
   }
 
   /**
-   * 检测是否为低内存状态
+   * 检测是否处于低内存状态
    */
   static isLowMemory(): boolean {
     const memInfo = this.getMemoryInfo();
-    return memInfo.usageRatio > this.HIGH_MEMORY_THRESHOLD;
+    return memInfo.usageRatio >= this.HIGH_MEMORY_THRESHOLD;
   }
 
   /**
-   * 检测是否为临界内存状态
+   * 检测是否处于临界内存状态
    */
   static isCriticalMemory(): boolean {
     const memInfo = this.getMemoryInfo();
-    return memInfo.usageRatio > this.CRITICAL_MEMORY_THRESHOLD;
+    return memInfo.usageRatio >= this.CRITICAL_MEMORY_THRESHOLD;
   }
 
   /**
    * 建议进行垃圾回收
-   * 尝试通过各种手段释放内存
+   * 尝试释放内存并更新内存使用情况
    */
   public static suggestGarbageCollection(): void {
-    // 发出内存不足警告
-    console.warn('内存使用率较高，建议进行垃圾回收');
+    if (typeof window !== 'undefined') {
+      // 尝试强制回收内存
+      // 注意：这是一种启发式方法，并非所有浏览器都支持
+      try {
+        (function forceGC() {
+          // 尝试创建一些临时对象并立即释放
+          if (!this.isInitialized) {
+            return;
+          }
 
-    try {
-      // 使用闭包触发V8垃圾回收
-      // 这不是强制垃圾回收，但可能会提示V8进行回收
-      (function forceGC() {
-        const arr = [];
-        for (let i = 0; i < 1000; i++) {
-          arr.push(new Array(10000).fill(0));
-        }
-        // 释放arr
-        arr.length = 0;
-      })();
+          // 清除所有引用以辅助垃圾回收
+          const tempArr = [];
+          for (let i = 0; i < 10000; i++) {
+            tempArr.push(new Array(10000).fill(0));
+            tempArr.pop();
+          }
 
-      // 尝试在Node.js环境中强制垃圾回收
-      if (typeof global !== 'undefined' && typeof global.gc === 'function') {
-        global.gc();
+          // 更新内存状态
+          setTimeout(() => {
+            // 更新内存样本
+            if (this.memoryWatcher) {
+              this.updateMemorySample();
+            }
+          }, 100);
+        }).call(this);
+      } catch (e) {
+        // 忽略错误
       }
-    } catch (e) {
-      // 忽略错误
     }
+
+    // 记录垃圾收集时间
+    this.lastGarbageCollectionTime = Date.now();
   }
 
   /**
-   * 判断是否需要清理内存
-   * 基于内存使用趋势和当前使用率
+   * 检查是否需要进行内存清理
    */
   static needsMemoryCleanup(): boolean {
-    const stats = this.getMemoryStats();
+    // 如果最近已经建议过垃圾回收，避免频繁调用
+    if (Date.now() - this.lastGarbageCollectionTime < this.MIN_GC_INTERVAL) {
+      return false;
+    }
 
-    // 内存使用率高
-    if (stats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
+    // 检查内存使用情况
+    const memStats = this.getMemoryStats();
+
+    // 内存使用率高且内存增长趋势
+    if (
+      memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD &&
+      memStats.trend === MemoryTrend.GROWING
+    ) {
       return true;
     }
 
-    // 内存增长快
-    if (
-      stats.trend === MemoryTrend.GROWING &&
-      stats.growthRate &&
-      stats.growthRate > 2 * 1024 * 1024 && // 增长率超过2MB/s
-      stats.usageRatio > 0.5 // 使用率超过50%
-    ) {
+    // 内存严重不足
+    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
+      return true;
+    }
+
+    // 内存增长速度异常快
+    if (memStats.growthRate && memStats.growthRate > 10 * 1024 * 1024) {
+      // 10MB/s
       return true;
     }
 
@@ -987,96 +1380,128 @@ export class MemoryManager {
 
   /**
    * 获取推荐的分片数量
-   * 根据文件大小和可用内存动态计算
+   * 根据文件大小和当前内存状态计算
    */
   static getRecommendedChunkCount(fileSize: number, maxConcurrent = 3): number {
-    // 获取可用内存
-    const availableMem = this.getAvailableMemory();
+    // 获取最优分片大小
+    const chunkSize = this.getOptimalChunkSize(fileSize);
 
-    // 确保文件至少分为10个分片
-    const minChunks = 10;
+    // 计算分片总数 (向上取整)
+    const totalChunks = Math.ceil(fileSize / chunkSize);
 
-    // 计算理想分片大小
-    const idealChunkSize = this.getOptimalChunkSize(fileSize);
+    // 考虑并发限制和最小分片数
+    const minChunks = 1;
+    const maxChunks = Math.max(100, maxConcurrent * 10); // 避免过多分片
 
-    // 计算理想分片数
-    const idealChunkCount = Math.ceil(fileSize / idealChunkSize);
-
-    // 考虑内存限制，计算基于内存的最大分片数
-    // 假设每个分片需要比其实际大小多30%的内存
-    const memoryBasedMaxChunks = Math.floor(
-      availableMem / (idealChunkSize * 1.3)
-    );
-
-    // 取理想分片数与内存限制中的较小值，确保至少分为minChunks个分片
-    return Math.max(
-      Math.min(idealChunkCount, memoryBasedMaxChunks, maxConcurrent * 5),
-      minChunks
-    );
+    // 确保分片数在合理范围内
+    return Math.min(maxChunks, Math.max(minChunks, totalChunks));
   }
 
   /**
    * 获取推荐的并发数
-   * 根据内存状况和设备能力动态计算
+   * 根据设备能力和内存状态计算
    */
   static getRecommendedConcurrency(defaultConcurrent = 3): number {
-    // 根据内存使用率调整并发数
-    const memInfo = this.getMemoryInfo();
-
-    if (memInfo.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
-      return 1; // 内存极度紧张，单线程处理
+    // 如果未初始化，使用默认并发数
+    if (!this.isInitialized) {
+      return defaultConcurrent;
     }
 
-    if (memInfo.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
-      return 2; // 内存紧张，降低并发
+    // 获取内存状态
+    const memStats = this.getMemoryStats();
+
+    // 基于设备内存容量确定基础并发数
+    let baseConcurrency: number;
+
+    switch (memStats.capacity) {
+      case DeviceMemoryCapacity.VERY_LOW:
+        baseConcurrency = 1; // 极低内存设备
+        break;
+      case DeviceMemoryCapacity.LOW:
+        baseConcurrency = 2; // 低内存设备
+        break;
+      case DeviceMemoryCapacity.MEDIUM:
+        baseConcurrency = 3; // 中等设备
+        break;
+      case DeviceMemoryCapacity.HIGH:
+        baseConcurrency = 4; // 高内存设备
+        break;
+      case DeviceMemoryCapacity.VERY_HIGH:
+        baseConcurrency = 6; // 极高内存设备
+        break;
+      default:
+        baseConcurrency = defaultConcurrent; // 默认
     }
 
-    if (this.isLowMemoryDevice()) {
-      return Math.min(defaultConcurrent, 2); // 低内存设备限制并发
+    // 根据内存使用率调整
+    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
+      return 1; // 内存严重不足，只允许1个并发
+    } else if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
+      return Math.max(1, baseConcurrency - 1); // 减少1个并发
+    } else if (
+      memStats.usageRatio < this.NORMAL_MEMORY_THRESHOLD &&
+      memStats.trend !== MemoryTrend.GROWING
+    ) {
+      return Math.min(8, baseConcurrency + 1); // 内存充足且不在增长，可增加1个并发
     }
 
-    return defaultConcurrent; // 默认并发数
+    return baseConcurrency;
   }
 
   /**
-   * 判断是否为低内存设备
+   * 检测是否为低内存设备
+   * 用于判断应用是否应该采用更保守的策略
    */
   public static isLowMemoryDevice(): boolean {
-    // 确保已初始化
     if (!this.isInitialized) {
       this.initialize();
     }
 
-    // 根据检测到的设备内存容量判断
-    return (
-      this.detectedCapacity === DeviceMemoryCapacity.VERY_LOW ||
-      this.detectedCapacity === DeviceMemoryCapacity.LOW
-    );
+    // 检测设备内存容量
+    if (this.detectedCapacity) {
+      return (
+        this.detectedCapacity === DeviceMemoryCapacity.VERY_LOW ||
+        this.detectedCapacity === DeviceMemoryCapacity.LOW
+      );
+    }
+
+    // 如果无法检测准确的内存容量，使用deviceMemory判断
+    if (this.deviceMemory) {
+      return this.deviceMemory < 2 * 1024 * 1024 * 1024; // 小于2GB
+    }
+
+    // 无法判断，保守返回true
+    return true;
   }
 
   /**
-   * 判断是否为低性能设备
-   * 基于内存和其他指标综合判断
+   * 检测是否为低功耗设备
+   * 用于判断是否需要避免计算密集型操作
    */
   public static isLowPowerDevice(): boolean {
-    // 低内存通常意味着低性能
-    if (this.isLowMemoryDevice()) {
-      return true;
-    }
+    // 获取CPU核心数作为参考
+    let cpuCores = 1;
 
-    // 尝试检测处理器核心数
-    if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
-      if (navigator.hardwareConcurrency <= 2) {
-        return true; // 双核或单核设备视为低性能
+    try {
+      if (typeof navigator !== 'undefined' && navigator.hardwareConcurrency) {
+        cpuCores = navigator.hardwareConcurrency;
       }
+    } catch (e) {
+      // 忽略错误
     }
 
-    return false;
+    // 简单判断：双核或更低视为低功耗设备
+    const isLowCoreCount = cpuCores <= 2;
+
+    // 结合内存判断：低内存设备通常也是低功耗设备
+    const isLowMemory = this.isLowMemoryDevice();
+
+    return isLowMemory || isLowCoreCount;
   }
 
   /**
-   * 获取大文件处理优化策略
-   * 针对大文件提供特殊的处理策略
+   * 获取大文件处理策略
+   * 针对大文件（>100MB）的特殊处理方案
    */
   public static getLargeFileStrategy(fileSize: number): {
     shouldUseParts: boolean; // 是否应该使用分部处理
@@ -1086,59 +1511,82 @@ export class MemoryManager {
     shouldOffloadCalculation: boolean; // 是否应该卸载计算任务到Worker
     processingMode: 'sequential' | 'parallel' | 'hybrid'; // 处理模式
   } {
-    // 默认策略
-    const defaultStrategy = {
+    if (!this.isInitialized) {
+      this.initialize();
+    }
+
+    // 默认值
+    const strategy = {
       shouldUseParts: false,
-      partSize: 100 * 1024 * 1024, // 100MB
+      partSize: 50 * 1024 * 1024, // 50MB
       maxPartsInMemory: 2,
       shouldUseStreaming: false,
       shouldOffloadCalculation: false,
-      processingMode: 'parallel' as const,
+      processingMode: 'hybrid' as 'sequential' | 'parallel' | 'hybrid',
     };
 
-    // 不是大文件，使用默认策略
-    if (fileSize < 200 * 1024 * 1024) {
-      // 小于200MB
-      return defaultStrategy;
+    // 小于100MB的文件不需要特殊处理
+    if (fileSize <= 100 * 1024 * 1024) {
+      return strategy;
     }
 
     // 获取内存状态
     const memStats = this.getMemoryStats();
+    const isLowMemory = this.isLowMemoryDevice();
+    const isLowPower = this.isLowPowerDevice();
 
-    // 大文件策略
-    const largeFileStrategy = {
-      ...defaultStrategy,
-      shouldUseParts: true,
-      shouldUseStreaming: true,
-      shouldOffloadCalculation: true,
-    };
-
-    // 根据文件大小进一步调整
+    // 针对不同大小的文件调整策略
     if (fileSize > 1 * 1024 * 1024 * 1024) {
-      // 大于1GB
-      largeFileStrategy.partSize = 50 * 1024 * 1024; // 50MB
-      largeFileStrategy.maxPartsInMemory = 1;
-      largeFileStrategy.processingMode = 'sequential' as const;
+      // >1GB
+      strategy.shouldUseParts = true;
+      strategy.partSize = 100 * 1024 * 1024; // 100MB
+      strategy.maxPartsInMemory = isLowMemory ? 1 : 2;
+      strategy.shouldUseStreaming = true;
+      strategy.shouldOffloadCalculation = true;
+      strategy.processingMode = isLowMemory ? 'sequential' : 'hybrid';
     } else if (fileSize > 500 * 1024 * 1024) {
-      // 大于500MB
-      largeFileStrategy.partSize = 100 * 1024 * 1024; // 100MB
-      largeFileStrategy.maxPartsInMemory = 2;
-      largeFileStrategy.processingMode = 'hybrid' as const;
+      // >500MB
+      strategy.shouldUseParts = true;
+      strategy.partSize = 50 * 1024 * 1024; // 50MB
+      strategy.maxPartsInMemory = isLowMemory ? 1 : 3;
+      strategy.shouldUseStreaming =
+        memStats.usageRatio > this.NORMAL_MEMORY_THRESHOLD;
+      strategy.shouldOffloadCalculation = !isLowPower;
+      strategy.processingMode = isLowMemory ? 'sequential' : 'hybrid';
+    } else if (fileSize > 200 * 1024 * 1024) {
+      // >200MB
+      strategy.shouldUseParts =
+        memStats.usageRatio > this.NORMAL_MEMORY_THRESHOLD;
+      strategy.partSize = 25 * 1024 * 1024; // 25MB
+      strategy.maxPartsInMemory = isLowMemory ? 2 : 4;
+      strategy.shouldUseStreaming =
+        memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD;
+      strategy.shouldOffloadCalculation = !isLowPower;
+      strategy.processingMode = isLowMemory ? 'sequential' : 'parallel';
+    } else {
+      // 100MB-200MB
+      strategy.shouldUseParts = false;
+      strategy.maxPartsInMemory = isLowMemory ? 2 : 5;
+      strategy.shouldUseStreaming =
+        memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD;
+      strategy.shouldOffloadCalculation = false;
+      strategy.processingMode = 'parallel';
     }
 
-    // 根据内存状态调整
-    if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
-      largeFileStrategy.maxPartsInMemory = 1;
-      largeFileStrategy.partSize = 50 * 1024 * 1024; // 50MB
-      largeFileStrategy.processingMode = 'sequential' as const;
+    // 如果内存严重不足，始终使用顺序处理并限制在内存中的部分数
+    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
+      strategy.shouldUseParts = true;
+      strategy.maxPartsInMemory = 1;
+      strategy.shouldUseStreaming = true;
+      strategy.processingMode = 'sequential';
     }
 
-    return largeFileStrategy;
+    return strategy;
   }
 
   /**
-   * 获取内存友好的分片计划
-   * 生成一个完整的分片计划，包括大小和处理顺序
+   * 获取内存效率最优的分片计划
+   * 为大文件创建优化的分片处理方案
    */
   public static getMemoryEfficientChunkPlan(
     fileSize: number,
@@ -1149,42 +1597,48 @@ export class MemoryManager {
     estimatedMemoryUsage: number;
     processingOrder: number[];
   } {
-    // 确定分片大小
+    // 获取最优分片大小
     const chunkSize = initialChunkSize || this.getOptimalChunkSize(fileSize);
 
-    // 计算分片数量
+    // 计算分片数 (向上取整)
     const totalChunks = Math.ceil(fileSize / chunkSize);
 
     // 创建分片计划
     const chunks: ChunkPlan[] = [];
+
+    // 估算所有分片的总内存使用量
     let remainingSize = fileSize;
+    let currentPos = 0;
+    let estimatedMemoryUsage = 0;
 
     for (let i = 0; i < totalChunks; i++) {
+      // 最后一个分片可能小于chunkSize
       const currentChunkSize = Math.min(chunkSize, remainingSize);
-      const start = fileSize - remainingSize;
-      const end = start + currentChunkSize;
 
-      chunks.push({
+      // 创建分片信息
+      const chunk: ChunkPlan = {
         index: i,
-        start,
-        end,
+        start: currentPos,
+        end: currentPos + currentChunkSize - 1,
         size: currentChunkSize,
         priority: this.getChunkPriority(i, totalChunks),
-      });
+      };
 
+      chunks.push(chunk);
+
+      // 更新位置和剩余大小
+      currentPos += currentChunkSize;
       remainingSize -= currentChunkSize;
+
+      // 估算内存使用 (考虑额外开销)
+      const estimatedOverhead = 500; // 分片元数据开销大约500字节
+      estimatedMemoryUsage += currentChunkSize + estimatedOverhead;
     }
 
-    // 估计内存使用
-    // 假设处理每个分片需要约分片大小的1.5倍内存
-    const estimatedMemoryUsage = chunkSize * 1.5;
-
-    // 确定处理顺序
-    // 优先处理第一个和最后一个分片，然后按优先级排序其他分片
+    // 根据优先级创建处理顺序
     const processingOrder = chunks
-      .slice() // 创建副本
-      .sort((a, b) => b.priority - a.priority) // 按优先级排序
-      .map(chunk => chunk.index); // 提取索引
+      .map((chunk, index) => index)
+      .sort((a, b) => chunks[b].priority - chunks[a].priority);
 
     return {
       chunks,
@@ -1195,15 +1649,19 @@ export class MemoryManager {
   }
 
   /**
-   * 计算分片优先级
-   * 第一个和最后一个分片优先级最高，其他均匀分布
+   * 获取分片处理优先级
+   * 用于确定分片处理顺序
    */
   private static getChunkPriority(index: number, totalChunks: number): number {
-    if (index === 0) return 100; // 第一个分片
-    if (index === totalChunks - 1) return 90; // 最后一个分片
-
-    // 中间分片按位置均匀分布优先级，范围从80到10
-    return 80 - (index / totalChunks) * 70;
+    // 首片和尾片优先级最高，中间部分按顺序递减
+    if (index === 0) {
+      return 100; // 第一片优先级最高
+    } else if (index === totalChunks - 1) {
+      return 90; // 最后一片次高优先级
+    } else {
+      // 中间分片优先级从80递减到20
+      return Math.max(20, 80 - Math.floor(60 * (index / totalChunks)));
+    }
   }
 }
 
