@@ -9,6 +9,7 @@ import {
   PrecheckResult,
 } from './PrecheckPlugin';
 import { ProgressPlugin } from './ProgressPlugin';
+import { PWAPlugin, PWAPluginOptions } from './PWAPlugin';
 import { ResumePlugin } from './ResumePlugin';
 import { SmartConcurrencyPlugin } from './SmartConcurrencyPlugin';
 import { ValidatorPlugin } from './ValidatorPlugin';
@@ -23,6 +24,8 @@ export {
   PrecheckOptions,
   PrecheckResult,
   SmartConcurrencyPlugin,
+  PWAPlugin,
+  PWAPluginOptions,
 };
 
 // 默认导出插件对象
@@ -33,4 +36,5 @@ export default {
   ResumePlugin,
   PrecheckPlugin,
   SmartConcurrencyPlugin,
+  PWAPlugin,
 };

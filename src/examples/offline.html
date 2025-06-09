@@ -1,0 +1,83 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>离线 - FileChunkPro</title>
+  <style>
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100vh;
+      margin: 0;
+      padding: 20px;
+      text-align: center;
+      color: #333;
+      background-color: #f8f9fa;
+    }
+
+    .container {
+      max-width: 500px;
+      padding: 40px;
+      background: white;
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    }
+
+    h1 {
+      color: #2979ff;
+      margin-bottom: 10px;
+    }
+
+    p {
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+
+    .icon {
+      font-size: 64px;
+      margin-bottom: 20px;
+    }
+
+    .retry-button {
+      padding: 10px 20px;
+      background-color: #2979ff;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 16px;
+      transition: background-color 0.3s;
+    }
+
+    .retry-button:hover {
+      background-color: #2062cc;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <div class="icon">📶</div>
+    <h1>您当前处于离线状态</h1>
+    <p>无法连接到网络。请检查您的网络连接，然后重试。</p>
+    <p>已保存的内容和文件仍可使用。</p>
+    <button class="retry-button" onclick="window.location.reload()">重新连接</button>
+  </div>
+  <script>
+    // 检测网络恢复
+    window.addEventListener('online', function ()
+    {
+      // 显示提示
+      alert('网络已恢复连接！')
+      // 可以自动刷新页面
+      window.location.reload()
+    });
+  </script>
+</body>
+
+</html>

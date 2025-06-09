@@ -1,0 +1,362 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta name="theme-color" content="#2979ff">
+  <title>FileChunkPro PWA 示例</title>
+  <link rel="manifest" href="/manifest.json">
+  <link rel="icon" href="/icons/favicon.ico">
+  <link rel="apple-touch-icon" href="/icons/icon-192x192.png">
+  <style>
+    :root {
+      --primary-color: #2979ff;
+      --primary-color-dark: #2062cc;
+      --light-gray: #f8f9fa;
+      --dark-gray: #6c757d;
+      --success-color: #28a745;
+      --warning-color: #ffc107;
+      --danger-color: #dc3545;
+    }
+
+    * {
+      box-sizing: border-box;
+      margin: 0;
+      padding: 0;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, 'Open Sans', 'Helvetica Neue', sans-serif;
+      line-height: 1.6;
+      color: #333;
+      background-color: var(--light-gray);
+      padding: 20px;
+    }
+
+    .container {
+      max-width: 800px;
+      margin: 0 auto;
+      background-color: white;
+      border-radius: 10px;
+      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+      padding: 30px;
+    }
+
+    header {
+      text-align: center;
+      margin-bottom: 30px;
+    }
+
+    h1 {
+      color: var(--primary-color);
+      margin-bottom: 10px;
+    }
+
+    .status-bar {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      background-color: var(--light-gray);
+      padding: 10px 15px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+    }
+
+    .status-online {
+      color: var(--success-color);
+      font-weight: bold;
+    }
+
+    .status-offline {
+      color: var(--danger-color);
+      font-weight: bold;
+    }
+
+    .upload-container {
+      margin-bottom: 30px;
+    }
+
+    .upload-button {
+      background-color: var(--primary-color);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      padding: 12px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+      width: 100%;
+    }
+
+    .upload-button:hover {
+      background-color: var(--primary-color-dark);
+    }
+
+    .upload-button:disabled {
+      background-color: var(--dark-gray);
+      cursor: not-allowed;
+    }
+
+    .progress-container {
+      margin-top: 20px;
+      background-color: var(--light-gray);
+      border-radius: 5px;
+      height: 30px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background-color: var(--primary-color);
+      color: white;
+      text-align: center;
+      line-height: 30px;
+      transition: width 0.3s ease;
+    }
+
+    .install-pwa-container {
+      margin-top: 30px;
+      text-align: center;
+    }
+
+    .install-button {
+      background-color: var(--success-color);
+      color: white;
+      border: none;
+      border-radius: 5px;
+      padding: 12px 20px;
+      font-size: 16px;
+      cursor: pointer;
+      transition: background-color 0.3s;
+      display: none;
+    }
+
+    .install-button:hover {
+      background-color: #218838;
+    }
+
+    .notification {
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background-color: white;
+      border-left: 5px solid var(--primary-color);
+      border-radius: 5px;
+      padding: 15px;
+      box-shadow: 0 4px 8px rgba(0, 0, 0, 0.1);
+      z-index: 1000;
+      opacity: 1;
+      transition: opacity 0.3s;
+    }
+
+    .notification-header {
+      font-weight: bold;
+      margin-bottom: 5px;
+      color: var(--primary-color);
+    }
+
+    .notification-hide {
+      opacity: 0;
+    }
+
+    .file-list {
+      margin-top: 20px;
+      border-top: 1px solid var(--light-gray);
+      padding-top: 20px;
+    }
+
+    .file-item {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 10px;
+      border-bottom: 1px solid var(--light-gray);
+    }
+
+    .file-name {
+      max-width: 70%;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+
+    .file-status {
+      padding: 3px 8px;
+      border-radius: 3px;
+      font-size: 14px;
+    }
+
+    .status-pending {
+      background-color: var(--warning-color);
+      color: #212529;
+    }
+
+    .status-uploading {
+      background-color: var(--primary-color);
+      color: white;
+    }
+
+    .status-completed {
+      background-color: var(--success-color);
+      color: white;
+    }
+
+    .status-error {
+      background-color: var(--danger-color);
+      color: white;
+    }
+
+    .error-container {
+      display: none;
+      background-color: var(--danger-color);
+      color: white;
+      padding: 15px;
+      border-radius: 5px;
+      margin-bottom: 20px;
+    }
+
+    footer {
+      text-align: center;
+      margin-top: 30px;
+      color: var(--dark-gray);
+      font-size: 14px;
+    }
+  </style>
+</head>
+
+<body>
+  <div class="container">
+    <header>
+      <h1>FileChunkPro PWA 示例</h1>
+      <p>高性能文件分片上传 - 支持离线工作</p>
+    </header>
+
+    <div id="error-container" class="error-container"></div>
+
+    <div class="status-bar">
+      <div>
+        网络状态: <span id="network-status" class="status-online">在线</span>
+      </div>
+      <div>
+        PWA状态: <span id="pwa-status">检测中...</span>
+      </div>
+    </div>
+
+    <div class="upload-container">
+      <input type="file" id="file-input" multiple style="display: none;">
+      <button id="upload-button" class="upload-button">选择文件上传</button>
+
+      <div class="progress-container">
+        <div id="progress-bar" class="progress-bar">0%</div>
+      </div>
+    </div>
+
+    <div class="file-list">
+      <h3>上传文件列表</h3>
+      <div id="file-list-container">
+        <!-- 文件列表将动态添加到这里 -->
+      </div>
+    </div>
+
+    <div class="install-pwa-container">
+      <button id="install-pwa" class="install-button">安装应用</button>
+      <p id="install-pwa-hint" style="margin-top: 10px; display: none;">
+        安装此应用可以获得更好的体验，支持离线工作和桌面快捷方式
+      </p>
+    </div>
+
+    <footer>
+      <p>FileChunkPro &copy; 2023 - 高性能文件上传解决方案</p>
+    </footer>
+  </div>
+
+  <script src="browser-pwa-example.js"></script>
+  <script>
+    // 检查PWA状态并更新UI
+    function updatePWAStatus ()
+    {
+      const statusElement = document.getElementById('pwa-status')
+
+      // 检查是否支持ServiceWorker
+      if ('serviceWorker' in navigator) {
+        // 检查是否已安装
+        if (navigator.serviceWorker.controller) {
+          statusElement.textContent = '已激活'
+          statusElement.style.color = '#28a745'
+        } else {
+          statusElement.textContent = '已支持'
+          statusElement.style.color = '#2979ff'
+        }
+
+        // 显示安装提示
+        const installHint = document.getElementById('install-pwa-hint')
+        if (installHint) {
+          installHint.style.display = 'block'
+        }
+      } else {
+        statusElement.textContent = '不支持'
+        statusElement.style.color = '#dc3545'
+      }
+    }
+
+    // 添加文件到列表
+    function addFileToList (fileName, fileSize, status = 'pending')
+    {
+      const container = document.getElementById('file-list-container')
+      const fileItem = document.createElement('div')
+      fileItem.className = 'file-item'
+
+      // 格式化文件大小
+      const formattedSize = formatFileSize(fileSize)
+
+      // 获取状态类和文本
+      const statusMap = {
+        'pending': { class: 'status-pending', text: '待上传' },
+        'uploading': { class: 'status-uploading', text: '上传中' },
+        'completed': { class: 'status-completed', text: '已完成' },
+        'error': { class: 'status-error', text: '失败' }
+      }
+
+      const statusInfo = statusMap[status] || statusMap.pending
+
+      fileItem.innerHTML = `
+        <div class="file-name" title="${fileName}">${fileName} (${formattedSize})</div>
+        <div class="file-status ${statusInfo.class}">${statusInfo.text}</div>
+      `
+
+      container.appendChild(fileItem)
+      return fileItem
+    }
+
+    // 格式化文件大小
+    function formatFileSize (bytes)
+    {
+      if (bytes === 0) return '0 B'
+
+      const k = 1024
+      const sizes = ['B', 'KB', 'MB', 'GB', 'TB']
+      const i = Math.floor(Math.log(bytes) / Math.log(k))
+
+      return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i]
+    }
+
+    // 页面加载后执行
+    document.addEventListener('DOMContentLoaded', () =>
+    {
+      // 更新PWA状态
+      updatePWAStatus()
+
+      // 示例：添加一些演示文件
+      setTimeout(() =>
+      {
+        addFileToList('示例文档.docx', 1.5 * 1024 * 1024, 'completed')
+        addFileToList('大型视频.mp4', 250 * 1024 * 1024, 'uploading')
+        addFileToList('项目源码.zip', 45 * 1024 * 1024, 'pending')
+      }, 1000)
+    });
+  </script>
+</body>
+
+</html>
