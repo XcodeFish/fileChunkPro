@@ -22,9 +22,28 @@ export {
 export { default as SecurityError } from './SecurityError';
 export { default as FileContentDetector } from './FileContentDetector';
 export { default as PermissionChecker } from './PermissionChecker';
+export { default as SecurityUtils } from './SecurityUtils';
+export { default as ContentValidator } from './ContentValidator';
+export { default as CSRFProtection } from './CSRFProtection';
+export { default as IntegrityCheck } from './IntegrityCheck';
+
 export type { SecurityErrorOptions } from './SecurityError';
 export type { FileContentDetectionResult } from './FileContentDetector';
 export type {
   PermissionCheckOptions,
   PermissionCheckResult,
 } from './PermissionChecker';
+export type {
+  HashAlgorithm,
+  EncryptionAlgorithm,
+  EncryptionConfig,
+  HashResult,
+  EncryptionResult,
+} from './SecurityUtils';
+export type { CSRFTokenOptions } from './CSRFProtection';
+export type {
+  IntegrityAlgorithm,
+  IntegrityCheckOptions,
+  IntegrityCheckResult,
+  IntegrityCheckStatus,
+} from './IntegrityCheck';
