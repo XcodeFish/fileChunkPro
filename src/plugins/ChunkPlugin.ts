@@ -306,20 +306,44 @@ class ChunkPlugin implements IPlugin {
   }
 
   /**
-   * 处理插件销毁
+   * 处理插件销毁，确保完全清理所有资源
    */
   private handleDispose(): void {
-    // 清理资源
-    if (this.enableMemoryMonitoring && this.memoryEventHandler) {
-      MemoryManager.removeEventListener(
+    // 清除内存相关资源和所有事件监听器
+    if (this.enableMemoryMonitoring) {
+      // 清理所有可能的事件监听
+      const allEvents = [
         'memoryWarning',
-        this.memoryEventHandler
-      );
-      this.memoryEventHandler = null;
+        'memoryRecommendation',
+        'memoryPressurePause',
+        'suggestMemoryCleanup',
+      ];
+
+      // 清理内存事件处理器
+      if (this.memoryEventHandler) {
+        allEvents.forEach(event => {
+          MemoryManager.removeEventListener(event, this.memoryEventHandler!);
+        });
+        this.memoryEventHandler = null;
+      }
+
+      // 停止内存监控
       MemoryManager.stopMonitoring();
     }
 
+    // 清理网络检测器
+    if (this.networkDetector) {
+      if (typeof this.networkDetector.dispose === 'function') {
+        this.networkDetector.dispose();
+      }
+      this.networkDetector = null;
+    }
+
+    // 清空核心引用，防止循环引用
     this.core = null;
+
+    // 记录日志
+    this.logger.info('ChunkPlugin资源已释放');
   }
 
   /**

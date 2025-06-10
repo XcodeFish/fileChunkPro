@@ -86,6 +86,8 @@ export class MemoryManager {
   private static memoryUsageHistory: number[] = [];
   private static memoryTimestampHistory: number[] = [];
   private static memoryWatcher: NodeJS.Timeout | null = null;
+  private static logger: any = null; // 记录器，可选使用
+  private static _sampleCount = 0; // 采样计数器
   private static readonly MAX_MEMORY_SAMPLES = 20; // 增加采样数量以提高准确性
   private static readonly CRITICAL_MEMORY_THRESHOLD = 0.85; // 85%
   private static readonly HIGH_MEMORY_THRESHOLD = 0.7; // 70%
@@ -123,6 +125,12 @@ export class MemoryManager {
     this.calculateMemoryAllocationLimit();
     this.checkPreciseMemoryInfo();
     this.setupMemoryWarningListeners();
+
+    // 检测是否为小程序环境，若是则应用更严格的优化策略
+    if (this.isInMiniProgramEnv()) {
+      this.applyMiniProgramOptimizations();
+    }
+
     this.isInitialized = true;
 
     // 在初始化后自动开始监控
@@ -464,15 +472,26 @@ export class MemoryManager {
     // 添加小程序平台的内存警告监听
     this.setupPlatformSpecificMonitoring();
 
-    // 设置动态采样率
+    // 设置初始采样率，根据设备能力进行差异化配置
     let samplingInterval = this.memorySamplingRate;
+    let analysisInterval = 3; // 每采样3次进行一次分析，减少分析频率
 
-    // 根据设备容量调整采样间隔
+    // 根据设备容量调整采样间隔和分析频率
     if (this.detectedCapacity === DeviceMemoryCapacity.VERY_LOW) {
-      samplingInterval = 2000; // 降低采样频率以减少资源消耗
+      samplingInterval = 3000; // 极低内存设备显著降低采样频率
+      analysisInterval = 5; // 极低内存设备降低分析频率
     } else if (this.detectedCapacity === DeviceMemoryCapacity.LOW) {
-      samplingInterval = 1500;
+      samplingInterval = 2000; // 低内存设备降低采样频率
+      analysisInterval = 4; // 低内存设备降低分析频率
+    } else if (this.detectedCapacity === DeviceMemoryCapacity.MEDIUM) {
+      samplingInterval = 1500; // 中等内存设备适中采样频率
     }
+
+    // 更新采样率
+    this.memorySamplingRate = samplingInterval;
+
+    // 采样计数器
+    let sampleCount = 0;
 
     // 初始采样
     this.updateMemorySample();
@@ -483,17 +502,35 @@ export class MemoryManager {
         // 更新内存样本
         this.updateMemorySample();
 
-        // 分析内存使用情况
-        this.analyzeMemoryUsage();
+        // 增加采样计数
+        sampleCount++;
 
-        // 动态调整采样间隔
-        if (this.dynamicSamplingEnabled) {
-          this.adjustSamplingRate();
+        // 只在特定频率进行内存分析，减少CPU占用
+        if (sampleCount >= analysisInterval) {
+          // 分析内存使用情况
+          this.analyzeMemoryUsage();
+          sampleCount = 0;
+
+          // 动态调整采样间隔 (减少调整频率)
+          if (this.dynamicSamplingEnabled) {
+            this.adjustSamplingRate();
+          }
         }
       } catch (e) {
         console.error('内存监控异常', e);
       }
     }, samplingInterval);
+
+    // 周期性清理过多的历史数据，避免长时间运行导致的内存增长
+    const cleanupInterval = Math.max(30000, samplingInterval * 20); // 至少30秒
+    setInterval(() => {
+      if (this.memoryUsageHistory.length > this.MAX_MEMORY_SAMPLES * 0.8) {
+        const keepCount = Math.ceil(this.MAX_MEMORY_SAMPLES * 0.6); // 保留60%最新数据
+        this.memoryUsageHistory = this.memoryUsageHistory.slice(-keepCount);
+        this.memoryTimestampHistory =
+          this.memoryTimestampHistory.slice(-keepCount);
+      }
+    }, cleanupInterval);
   }
 
   /**
@@ -521,42 +558,76 @@ export class MemoryManager {
 
   /**
    * 动态调整内存采样率
-   * 根据内存使用趋势调整采样频率
+   * 根据内存使用趋势调整采样频率，避免过度调整
    */
   private static adjustSamplingRate(): void {
+    // 如果采样数不足，不进行调整
+    if (this.memoryUsageHistory.length < 5) {
+      return;
+    }
+
     const trend = this.determineMemoryTrend();
     const memStats = this.getMemoryStats();
 
     // 初始采样间隔
     let newInterval = this.memorySamplingRate;
 
-    // 根据趋势和使用率调整
+    // 设备类型基本采样率限制
+    const minInterval = this.isLowMemoryDevice() ? 1000 : 500;
+    const maxInterval = this.isLowMemoryDevice() ? 5000 : 3000;
+
+    // 根据趋势和使用率调整（更保守的调整策略）
     if (trend === MemoryTrend.GROWING && memStats.usageRatio > 0.6) {
-      // 内存增长且接近警告阈值，提高采样频率
-      newInterval = Math.max(500, this.memorySamplingRate - 200);
+      // 内存增长且接近警告阈值，提高采样频率，但限制变化幅度
+      newInterval = Math.max(minInterval, this.memorySamplingRate - 100);
     } else if (trend === MemoryTrend.STABLE && memStats.usageRatio < 0.5) {
-      // 内存稳定且使用率较低，降低采样频率
-      newInterval = Math.min(2000, this.memorySamplingRate + 300);
+      // 内存稳定且使用率较低，适度降低采样频率
+      newInterval = Math.min(maxInterval, this.memorySamplingRate + 200);
     } else if (trend === MemoryTrend.DECREASING) {
       // 内存减少，可以适度降低采样频率
-      newInterval = Math.min(1500, this.memorySamplingRate + 100);
+      newInterval = Math.min(maxInterval, this.memorySamplingRate + 50);
     }
 
-    // 如果需要更新采样间隔
-    if (newInterval !== this.memorySamplingRate) {
+    // 防止微小变化导致频繁重设定时器
+    const significantChange =
+      Math.abs(newInterval - this.memorySamplingRate) > 300;
+
+    // 只在采样率显著变化时更新
+    if (significantChange && newInterval !== this.memorySamplingRate) {
       this.memorySamplingRate = newInterval;
 
       // 重新启动监控器
       if (this.memoryWatcher) {
         clearInterval(this.memoryWatcher);
 
+        // 创建新的定时器并记录ID
         this.memoryWatcher = setInterval(() => {
-          this.updateMemorySample();
-          this.analyzeMemoryUsage();
-          if (this.dynamicSamplingEnabled) {
-            this.adjustSamplingRate();
+          try {
+            this.updateMemorySample();
+
+            // 静态变量用于记录采样数
+            if (!this._sampleCount) this._sampleCount = 0;
+            this._sampleCount++;
+
+            // 降低分析频率，减少性能开销
+            if (this._sampleCount % 3 === 0) {
+              this.analyzeMemoryUsage();
+              if (this.dynamicSamplingEnabled) {
+                this.adjustSamplingRate();
+              }
+            }
+          } catch (e) {
+            console.error('内存采样错误:', e);
           }
         }, this.memorySamplingRate);
+
+        // 记录定时器ID用于后续清理
+        if (typeof window !== 'undefined') {
+          if (!(window as any).__memoryManagerTimers) {
+            (window as any).__memoryManagerTimers = [];
+          }
+          (window as any).__memoryManagerTimers.push(this.memoryWatcher);
+        }
       }
     }
   }
@@ -588,15 +659,47 @@ export class MemoryManager {
 
   /**
    * 停止内存监控
+   * 释放所有资源和监听器
    */
   static stopMonitoring(): void {
+    // 清理定时器
     if (this.memoryWatcher) {
       clearInterval(this.memoryWatcher);
       this.memoryWatcher = null;
     }
 
+    // 检查并清除所有定时器
+    if (typeof window !== 'undefined') {
+      // 由于无法直接访问已创建的所有定时器，我们记录最后一次定时器操作的ID
+      const timers = (window as any).__memoryManagerTimers;
+      if (timers && Array.isArray(timers)) {
+        timers.forEach(timerId => {
+          clearInterval(timerId);
+          clearTimeout(timerId);
+        });
+        (window as any).__memoryManagerTimers = [];
+      }
+    }
+
     // 清除小程序特定的监听器
     this.clearPlatformSpecificListeners();
+
+    // 清除所有事件监听器
+    this.eventListeners.clear();
+
+    // 清除内存样本数据，减少内存占用
+    this._clearMemoryData();
+
+    // 记录停止监控时间
+    const stopTime = Date.now();
+    this.memoryPeakUsage = 0; // 重置峰值
+
+    if (this.logger) {
+      this.logger.info('内存监控已停止，资源已释放', {
+        stopTime,
+        runningTime: stopTime - (this.memoryTimestampHistory[0] || stopTime),
+      });
+    }
   }
 
   /**
@@ -1119,83 +1222,143 @@ export class MemoryManager {
 
   /**
    * 计算自适应分片大小
-   * 基于内存状态、文件大小和设备能力综合计算
+   * 基于内存状态、文件大小和设备能力综合计算，增强稳定性
    */
   private static calculateAdaptiveChunkSize(
     fileSize: number,
     memStats: MemoryStats,
     concurrency = 3
   ): number {
+    // 分片大小范围常量 (确保与validateChunkSize方法一致)
+    const MIN_CHUNK_SIZE = 256 * 1024; // 256KB
+    const MAX_CHUNK_SIZE = 50 * 1024 * 1024; // 50MB
+
     // 基础分片大小计算
     let baseChunkSize: number;
 
-    // 根据设备内存容量确定基础分片大小
+    // 根据设备内存容量确定基础分片大小，保守策略
     switch (memStats.capacity) {
       case DeviceMemoryCapacity.VERY_LOW:
-        baseChunkSize = 512 * 1024; // 512KB
+        baseChunkSize = 384 * 1024; // 384KB (更保守)
         break;
       case DeviceMemoryCapacity.LOW:
-        baseChunkSize = 1 * 1024 * 1024; // 1MB
+        baseChunkSize = 768 * 1024; // 768KB
         break;
       case DeviceMemoryCapacity.MEDIUM:
-        baseChunkSize = 2 * 1024 * 1024; // 2MB
+        baseChunkSize = 1.5 * 1024 * 1024; // 1.5MB
         break;
       case DeviceMemoryCapacity.HIGH:
-        baseChunkSize = 4 * 1024 * 1024; // 4MB
+        baseChunkSize = 3 * 1024 * 1024; // 3MB
         break;
       case DeviceMemoryCapacity.VERY_HIGH:
-        baseChunkSize = 8 * 1024 * 1024; // 8MB
+        baseChunkSize = 6 * 1024 * 1024; // 6MB
         break;
       default:
-        baseChunkSize = 2 * 1024 * 1024; // 默认2MB
+        baseChunkSize = 1 * 1024 * 1024; // 默认1MB (更保守)
     }
 
-    // 调整因子，基于内存使用率
-    let adjustmentFactor = 1.0;
+    // 调整因子，基于内存使用率 (使用更线性的调整)
+    let memoryUsageAdjustment: number;
 
-    // 根据内存使用率调整
-    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
-      adjustmentFactor = 0.25; // 严重降低分片大小
-    } else if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
-      adjustmentFactor = 0.5; // 适度降低分片大小
-    } else if (memStats.usageRatio < this.NORMAL_MEMORY_THRESHOLD) {
-      adjustmentFactor = 1.5; // 可以增加分片大小
-    }
-
-    // 考虑内存增长趋势
-    if (
-      memStats.trend === MemoryTrend.GROWING &&
-      memStats.growthRate &&
-      memStats.growthRate > 1 * 1024 * 1024
-    ) {
-      adjustmentFactor *= 0.7; // 内存增长快，降低分片大小
-    }
-
-    // 考虑文件大小
-    // 大文件使用相对小的分片，小文件可以使用相对大的分片
-    let fileSizeFactor: number;
-
-    if (fileSize > 1 * 1024 * 1024 * 1024) {
-      // 1GB以上
-      fileSizeFactor = 0.8;
-    } else if (fileSize > 100 * 1024 * 1024) {
-      // 100MB以上
-      fileSizeFactor = 1.0;
-    } else if (fileSize > 10 * 1024 * 1024) {
-      // 10MB以上
-      fileSizeFactor = 1.2;
+    // 根据内存使用率线性插值调整，避免突变
+    if (memStats.usageRatio >= this.CRITICAL_MEMORY_THRESHOLD) {
+      memoryUsageAdjustment = 0.3; // 70%降低
+    } else if (memStats.usageRatio >= this.HIGH_MEMORY_THRESHOLD) {
+      // 线性插值: 在HIGH和CRITICAL之间平滑过渡
+      const ratio =
+        (memStats.usageRatio - this.HIGH_MEMORY_THRESHOLD) /
+        (this.CRITICAL_MEMORY_THRESHOLD - this.HIGH_MEMORY_THRESHOLD);
+      memoryUsageAdjustment = 0.6 - ratio * 0.3; // 从0.6降到0.3
+    } else if (memStats.usageRatio >= this.NORMAL_MEMORY_THRESHOLD) {
+      // 线性插值: 在NORMAL和HIGH之间平滑过渡
+      const ratio =
+        (memStats.usageRatio - this.NORMAL_MEMORY_THRESHOLD) /
+        (this.HIGH_MEMORY_THRESHOLD - this.NORMAL_MEMORY_THRESHOLD);
+      memoryUsageAdjustment = 1.0 - ratio * 0.4; // 从1.0降到0.6
     } else {
-      fileSizeFactor = 1.5; // 小文件
+      // 低于NORMAL阈值时，可以适度增加
+      memoryUsageAdjustment = 1.1; // 仅增加10%，更保守
     }
 
-    // 考虑并发数
+    // 考虑内存增长趋势 (更保守的调整)
+    let trendAdjustment = 1.0;
+    if (memStats.trend === MemoryTrend.GROWING) {
+      if (memStats.growthRate && memStats.growthRate > 5 * 1024 * 1024) {
+        // 增长非常快 (>5MB/s)
+        trendAdjustment = 0.5; // 减半
+      } else if (memStats.growthRate && memStats.growthRate > 1 * 1024 * 1024) {
+        // 增长较快 (>1MB/s)
+        trendAdjustment = 0.7; // 降低30%
+      } else {
+        // 增长缓慢
+        trendAdjustment = 0.9; // 轻微降低10%
+      }
+    } else if (memStats.trend === MemoryTrend.DECREASING) {
+      trendAdjustment = 1.05; // 轻微增加5%
+    }
+
+    // 考虑文件大小，更细粒度的调整
+    let fileSizeAdjustment: number;
+    if (fileSize >= 2 * 1024 * 1024 * 1024) {
+      // >= 2GB
+      fileSizeAdjustment = 0.5;
+    } else if (fileSize >= 1 * 1024 * 1024 * 1024) {
+      // >= 1GB
+      fileSizeAdjustment = 0.6;
+    } else if (fileSize >= 500 * 1024 * 1024) {
+      // >= 500MB
+      fileSizeAdjustment = 0.7;
+    } else if (fileSize >= 100 * 1024 * 1024) {
+      // >= 100MB
+      fileSizeAdjustment = 0.8;
+    } else if (fileSize >= 50 * 1024 * 1024) {
+      // >= 50MB
+      fileSizeAdjustment = 0.9;
+    } else if (fileSize >= 10 * 1024 * 1024) {
+      // >= 10MB
+      fileSizeAdjustment = 1.0;
+    } else if (fileSize >= 1 * 1024 * 1024) {
+      // >= 1MB
+      fileSizeAdjustment = 1.1;
+    } else {
+      // < 1MB
+      fileSizeAdjustment = 1.2;
+    }
+
+    // 考虑并发数 (使用更平缓的调整)
     // 并发数越高，每个分片应该越小
-    const concurrencyFactor = 1 / Math.sqrt(concurrency);
+    const concurrencyAdjustment = Math.max(
+      0.5,
+      1.0 / (0.5 + concurrency * 0.15)
+    );
 
-    // 计算最终分片大小
-    const adaptiveChunkSize =
-      baseChunkSize * adjustmentFactor * fileSizeFactor * concurrencyFactor;
+    // 计算调整后的分片大小，将调整幅度限制在合理范围内
+    let adaptiveChunkSize =
+      baseChunkSize *
+      memoryUsageAdjustment *
+      trendAdjustment *
+      fileSizeAdjustment *
+      concurrencyAdjustment;
 
+    // 确保计算结果在合理范围内 (增加的最后安全措施)
+    adaptiveChunkSize = Math.min(
+      MAX_CHUNK_SIZE,
+      Math.max(MIN_CHUNK_SIZE, adaptiveChunkSize)
+    );
+
+    // 对极端值进行额外检查
+    if (adaptiveChunkSize <= MIN_CHUNK_SIZE * 1.1) {
+      adaptiveChunkSize = MIN_CHUNK_SIZE; // 接近最小值时，直接使用最小值
+    } else if (adaptiveChunkSize >= MAX_CHUNK_SIZE * 0.9) {
+      adaptiveChunkSize = MAX_CHUNK_SIZE; // 接近最大值时，直接使用最大值
+    }
+
+    // 对于小文件，确保分片大小不会超过文件大小
+    if (adaptiveChunkSize > fileSize) {
+      adaptiveChunkSize = fileSize;
+    }
+
+    // 返回整数值
     return Math.round(adaptiveChunkSize);
   }
 
@@ -1310,38 +1473,39 @@ export class MemoryManager {
    * 尝试释放内存并更新内存使用情况
    */
   public static suggestGarbageCollection(): void {
-    if (typeof window !== 'undefined') {
-      // 尝试强制回收内存
-      // 注意：这是一种启发式方法，并非所有浏览器都支持
-      try {
-        (function forceGC() {
-          // 尝试创建一些临时对象并立即释放
-          if (!this.isInitialized) {
-            return;
-          }
-
-          // 清除所有引用以辅助垃圾回收
-          const tempArr = [];
-          for (let i = 0; i < 10000; i++) {
-            tempArr.push(new Array(10000).fill(0));
-            tempArr.pop();
-          }
-
-          // 更新内存状态
-          setTimeout(() => {
-            // 更新内存样本
-            if (this.memoryWatcher) {
-              this.updateMemorySample();
-            }
-          }, 100);
-        }).call(this);
-      } catch (e) {
-        // 忽略错误
-      }
+    // 避免频繁触发GC
+    const now = Date.now();
+    if (now - this.lastGarbageCollectionTime < this.MIN_GC_INTERVAL) {
+      return;
     }
 
-    // 记录垃圾收集时间
-    this.lastGarbageCollectionTime = Date.now();
+    this.lastGarbageCollectionTime = now;
+
+    if (typeof window !== 'undefined') {
+      // 不再尝试强制GC，而是通过事件通知应用层可以释放资源
+      this.dispatchEvent('suggestMemoryCleanup', {
+        timestamp: now,
+        currentUsage: this.getMemoryInfo().used,
+        peakUsage: this.memoryPeakUsage,
+        reason: 'memoryPressure',
+      });
+
+      // 尝试一些基本的内存释放措施
+      if (this.memoryUsageHistory.length > this.MAX_MEMORY_SAMPLES / 2) {
+        // 保留一半的历史数据，减少内存占用
+        const keepCount = Math.ceil(this.MAX_MEMORY_SAMPLES / 2);
+        this.memoryUsageHistory = this.memoryUsageHistory.slice(-keepCount);
+        this.memoryTimestampHistory =
+          this.memoryTimestampHistory.slice(-keepCount);
+      }
+
+      // 更新内存状态 (延迟执行，给应用一些时间进行清理)
+      setTimeout(() => {
+        if (this.memoryWatcher) {
+          this.updateMemorySample();
+        }
+      }, 300);
+    }
   }
 
   /**
@@ -1457,6 +1621,11 @@ export class MemoryManager {
       this.initialize();
     }
 
+    // 小程序环境一律视为低内存设备，采用保守策略
+    if (this.isInMiniProgramEnv()) {
+      return true;
+    }
+
     // 检测设备内存容量
     if (this.detectedCapacity) {
       return (
@@ -1472,6 +1641,55 @@ export class MemoryManager {
 
     // 无法判断，保守返回true
     return true;
+  }
+
+  /**
+   * 检测是否在小程序环境中运行
+   * 用于应用更严格的内存管理策略
+   */
+  private static isInMiniProgramEnv(): boolean {
+    return (
+      typeof wx !== 'undefined' ||
+      typeof my !== 'undefined' ||
+      typeof tt !== 'undefined' ||
+      typeof swan !== 'undefined'
+    );
+  }
+
+  /**
+   * 小程序环境专用内存优化
+   * 应用更激进的内存释放策略
+   */
+  public static applyMiniProgramOptimizations(): void {
+    if (!this.isInMiniProgramEnv()) {
+      return; // 非小程序环境不应用这些优化
+    }
+
+    // 更严格的内存阈值
+    this.CRITICAL_MEMORY_THRESHOLD = 0.8; // 从85%降至80%
+    this.HIGH_MEMORY_THRESHOLD = 0.65; // 从70%降至65%
+    this.NORMAL_MEMORY_THRESHOLD = 0.45; // 从50%降至45%
+
+    // 更保守的小程序环境基础值
+    this.memorySamplingRate = Math.max(1500, this.memorySamplingRate); // 至少1.5秒
+    this.MIN_GC_INTERVAL = 15000; // 垃圾回收间隔降至15秒
+    this.MAX_MEMORY_SAMPLES = 10; // 减少样本数量，节省内存
+
+    // 更主动的内存清理策略
+    this.dispatchEvent('miniProgramOptimizationsApplied', {
+      timestamp: Date.now(),
+      optimizations: [
+        'reducedThresholds',
+        'increasedSamplingInterval',
+        'reducedSamples',
+        'reducedGCInterval',
+      ],
+    });
+
+    // 记录日志
+    if (typeof console !== 'undefined') {
+      console.info('[MemoryManager] 已应用小程序环境的内存优化策略');
+    }
   }
 
   /**
