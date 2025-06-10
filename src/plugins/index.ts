@@ -26,6 +26,7 @@ import {
 import PipelinePlugin from './pipeline';
 import { WasmPlugin, WasmPluginOptions } from './WasmPlugin';
 import SmartRetryPlugin from './smartRetry';
+import { AdaptiveUploadPlugin } from './AdaptiveUploadPlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -56,6 +57,7 @@ export {
   WasmPluginOptions,
   // 导出智能重试插件
   SmartRetryPlugin,
+  AdaptiveUploadPlugin,
 };
 
 // 默认导出插件对象
@@ -77,4 +79,5 @@ export default {
   WasmPlugin,
   // 导出智能重试插件
   SmartRetryPlugin,
+  AdaptiveUploadPlugin,
 };
