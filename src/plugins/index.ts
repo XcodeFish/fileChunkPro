@@ -29,7 +29,35 @@ import SmartRetryPlugin from './smartRetry';
 import { AdaptiveUploadPlugin } from './AdaptiveUploadPlugin';
 import { MonitoringPlugin, MonitoringPluginOptions } from './MonitoringPlugin';
 import { DeveloperToolsPlugin } from './DeveloperToolsPlugin';
+import { ConcurrencyPlugin } from './ConcurrencyPlugin';
+import { StandardSecurityPlugin } from './security/StandardSecurityPlugin';
+import { AdvancedSecurityPlugin } from './security/AdvancedSecurityPlugin';
+import { AccessibilityPlugin } from './AccessibilityPlugin';
+import { I18nPlugin } from './I18nPlugin';
 // 导入安全插件
+
+// 导出所有插件
+// 核心插件
+export * from './ChunkPlugin';
+export * from './ConcurrencyPlugin';
+export * from './ResumePlugin';
+export * from './ValidatorPlugin';
+export * from './ProgressPlugin';
+export * from './PrecheckPlugin';
+export * from './SmartConcurrencyPlugin';
+export * from './PipelinePlugin';
+export * from './QueuePlugin';
+export * from './MonitoringPlugin';
+export * from './DeveloperToolsPlugin';
+
+// 安全插件
+export * from './security/BasicSecurityPlugin';
+export * from './security/StandardSecurityPlugin';
+export * from './security/AdvancedSecurityPlugin';
+
+// 国际化与无障碍插件
+export * from './AccessibilityPlugin';
+export * from './I18nPlugin';
 
 // 导出所有插件
 export {
@@ -88,4 +116,9 @@ export default {
   MonitoringPlugin,
   MonitoringPluginOptions,
   DeveloperToolsPlugin,
+  ConcurrencyPlugin,
+  StandardSecurityPlugin,
+  AdvancedSecurityPlugin,
+  AccessibilityPlugin,
+  I18nPlugin,
 };

@@ -732,4 +732,18 @@ export * from './storage';
 // 导出监控系统类型
 export * from './monitoring';
 // 导出debug模块类型
-export * from './debug'; 
+export * from './debug';
+
+// 导出所有类型定义
+// 核心类型
+export * from './core';
+// 适配器类型
+export * from './adapters';
+// 插件类型
+export * from './plugins';
+// 工具类型
+export * from './utils';
+// 无障碍相关类型
+export * from './accessibility';
+// 国际化相关类型
+export * from './i18n'; 
