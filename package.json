@@ -89,7 +89,10 @@
     "test:all": "bash tests/run-tests.sh",
     "size": "size-limit",
     "prepare": "husky install",
-    "release": "bumpp && pnpm build:prod && pnpm publish"
+    "release": "bumpp && pnpm build:prod && pnpm publish",
+    "build:wasm": "node scripts/copy-wasm-files.js",
+    "build:wasm:dev": "node scripts/copy-wasm-files.js",
+    "build:wasm:prod": "cd src/workers/wasm && bash build-all.sh"
   },
   "size-limit": [
     {

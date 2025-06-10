@@ -993,7 +993,7 @@ export class BrowserAdapter implements IAdapter {
    * @returns 功能支持情况
    */
   public detectFeatures(): Record<string, boolean> {
-    return {
+    const features = {
       fileReader: typeof FileReader !== 'undefined',
       blob: typeof Blob !== 'undefined',
       file: typeof File !== 'undefined',
@@ -1013,7 +1013,110 @@ export class BrowserAdapter implements IAdapter {
       sharedArrayBuffer: typeof SharedArrayBuffer !== 'undefined',
       localStorage: typeof localStorage !== 'undefined',
       sessionStorage: typeof sessionStorage !== 'undefined',
+
+      // WebAssembly 基础支持
+      webAssembly: typeof WebAssembly !== 'undefined',
+
+      // WebAssembly 具体功能支持
+      webAssemblyModule:
+        typeof WebAssembly !== 'undefined' &&
+        typeof WebAssembly.Module === 'function',
+      webAssemblyInstance:
+        typeof WebAssembly !== 'undefined' &&
+        typeof WebAssembly.Instance === 'function',
+      webAssemblyMemory:
+        typeof WebAssembly !== 'undefined' &&
+        typeof WebAssembly.Memory === 'function',
+      webAssemblyCompile:
+        typeof WebAssembly !== 'undefined' &&
+        typeof WebAssembly.compile === 'function',
+      webAssemblyInstantiate:
+        typeof WebAssembly !== 'undefined' &&
+        typeof WebAssembly.instantiate === 'function',
+
+      // 流和高级API支持
+      readableStream: typeof ReadableStream !== 'undefined',
+      writableStream: typeof WritableStream !== 'undefined',
+      transformStream: typeof TransformStream !== 'undefined',
+
+      // 高级文件API
+      fileSystem: 'showDirectoryPicker' in window,
+      fileSystemSync: typeof FileSystemDirectoryHandle !== 'undefined',
     };
+
+    // 检测WebAssembly的高级特性
+    if (features.webAssembly) {
+      try {
+        // 验证能否实例化一个简单模块
+        const module = new WebAssembly.Module(
+          new Uint8Array([
+            0x00,
+            0x61,
+            0x73,
+            0x6d, // WASM_BINARY_MAGIC
+            0x01,
+            0x00,
+            0x00,
+            0x00, // WASM_BINARY_VERSION
+          ])
+        );
+
+        features['webAssemblyValid'] = module instanceof WebAssembly.Module;
+
+        // 检测内存API
+        if (features['webAssemblyValid']) {
+          const memory = new WebAssembly.Memory({ initial: 1 });
+          features['webAssemblyMemoryValid'] =
+            memory instanceof WebAssembly.Memory &&
+            memory.buffer instanceof ArrayBuffer;
+
+          // 检测是否支持共享内存
+          try {
+            const sharedMemory = new WebAssembly.Memory({
+              initial: 1,
+              maximum: 1,
+              shared: true,
+            });
+            features['webAssemblySharedMemory'] =
+              sharedMemory.buffer instanceof SharedArrayBuffer;
+          } catch (e) {
+            features['webAssemblySharedMemory'] = false;
+          }
+
+          // 检测是否支持SIMD（向量化操作）
+          try {
+            // 检测SIMD是否可用需要动态加载带有SIMD指令的模块
+            // 这里只能提供一个占位符，实际实现需要更复杂的测试
+            features['webAssemblySIMD'] = false;
+          } catch (e) {
+            features['webAssemblySIMD'] = false;
+          }
+
+          // 检测是否支持多线程
+          features['webAssemblyThreads'] =
+            features['webAssemblySharedMemory'] &&
+            typeof Atomics !== 'undefined';
+        }
+      } catch (e) {
+        features['webAssemblyValid'] = false;
+        features['webAssemblyMemoryValid'] = false;
+        features['webAssemblySharedMemory'] = false;
+        features['webAssemblySIMD'] = false;
+        features['webAssemblyThreads'] = false;
+      }
+    }
+
+    return features;
+  }
+
+  /**
+   * 检查是否支持特定功能
+   * @param feature 功能名称
+   * @returns 是否支持
+   */
+  public supportsFeature(feature: string): boolean {
+    const features = this.detectFeatures();
+    return !!features[feature];
   }
 }
 

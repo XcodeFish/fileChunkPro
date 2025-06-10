@@ -3,6 +3,9 @@
  * 集中定义项目中使用的类型
  */
 
+// WebAssembly 类型导出
+export * from './wasm';
+
 // 上传选项
 export interface UploaderOptions {
   endpoint: string;           // 上传端点

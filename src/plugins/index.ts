@@ -24,6 +24,7 @@ import {
   QueueStats,
 } from './QueuePlugin';
 import PipelinePlugin from './pipeline';
+import { WasmPlugin, WasmPluginOptions } from './WasmPlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -49,6 +50,9 @@ export {
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
   PipelinePlugin,
+  // 导出WebAssembly优化插件
+  WasmPlugin,
+  WasmPluginOptions,
 };
 
 // 默认导出插件对象
@@ -66,4 +70,6 @@ export default {
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
   PipelinePlugin,
+  // 导出WebAssembly优化插件
+  WasmPlugin,
 };
