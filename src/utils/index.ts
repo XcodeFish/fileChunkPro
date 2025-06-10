@@ -27,6 +27,12 @@ export { default as ContentValidator } from './ContentValidator';
 export { default as CSRFProtection } from './CSRFProtection';
 export { default as IntegrityCheck } from './IntegrityCheck';
 
+// Web标准相关工具导出
+export { WebStandardDetector } from './WebStandardDetector';
+export { WebStandardValidator } from './WebStandardValidator';
+export { BrowserCompatibilityTester } from './BrowserCompatibilityTester';
+export { PerformanceBenchmark } from './PerformanceBenchmark';
+
 export type { SecurityErrorOptions } from './SecurityError';
 export type { FileContentDetectionResult } from './FileContentDetector';
 export type {
@@ -47,3 +53,27 @@ export type {
   IntegrityCheckResult,
   IntegrityCheckStatus,
 } from './IntegrityCheck';
+
+// Web标准相关类型导出
+export type {
+  IFeatureSupport,
+  IWebStandardSupport,
+} from './WebStandardDetector';
+export type {
+  IComplianceResult,
+  IComplianceIssue,
+  IValidationOptions,
+} from './WebStandardValidator';
+export type {
+  IBrowserInfo,
+  ICompatibilityTestResult,
+  ITestFailure,
+  ITestCase,
+} from './BrowserCompatibilityTester';
+export type {
+  IBenchmarkResult,
+  IBenchmarkSuite,
+  IBenchmarkOptions,
+  IBenchmarkSuiteResult,
+  IBenchmarkComparisonResult,
+} from './PerformanceBenchmark';
