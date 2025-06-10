@@ -1,1521 +1,927 @@
 /**
- * ResumePlugin - 断点续传功能增强插件
- * 支持多存储策略、更可靠的状态保存、文件指纹比对、部分上传检测与恢复、跨会话恢复支持、上传进度持久化
+ * ResumePlugin - 断点续传插件
+ *
+ * 负责协调各个管理器模块，实现文件的断点续传功能
  */
 
+import { IPlugin } from './interfaces';
+import { Logger } from '../utils/Logger';
+import { EventBus } from '../core/EventBus';
 import { UploaderCore } from '../core/UploaderCore';
+import { StorageManager, StorageEngine } from '../utils/StorageManager';
+import { HashGenerator } from '../utils/HashGenerator';
+import { ResumeStorageAdapter } from '../adapters/ResumeStorageAdapter';
+import { ResumeStateManager } from '../managers/ResumeStateManager';
+import { ChunkIndexManager } from '../managers/ChunkIndexManager';
+import { FileRecordManager } from '../managers/FileRecordManager';
+import { ResumeSessionManager } from '../managers/ResumeSessionManager';
 import {
-  IPlugin,
-  ChunkInfo,
-  Environment,
-  UploadErrorType,
-  PluginPriority,
-} from '../types';
-import EnvUtils from '../utils/EnvUtils';
-import {
-  IStorage,
-  LocalStorageAdapter,
-  SessionStorageAdapter,
-  MemoryStorageAdapter,
-} from '../utils/StorageUtils';
-
-// 尝试导入Taro，用于taro存储适配器
-let Taro: any;
-try {
-  // 在浏览器环境中可能会失败，使用动态导入避免直接报错
-  Taro = require('@tarojs/taro');
-} catch (e) {
-  // 忽略导入错误
-}
-
-/**
- * 文件进度信息
- */
-interface FileProgressInfo {
-  fileId: string; // 文件ID
-  fileName: string; // 文件名
-  fileSize: number; // 文件大小
-  fileMd5?: string; // 文件MD5（如果有）
-  fileType?: string; // 文件类型
-  chunks: ChunkInfo[]; // 分片信息
-  uploadedChunks: number[]; // 已上传分片索引
-  lastUpdated: number; // 最后更新时间
-  createdAt: number; // 创建时间
-  sessionId: string; // 会话ID
-  totalChunks: number; // 总分片数
-  progress: number; // 总进度(0-100)
-  uploadUrl?: string; // 上传URL（对于某些需要保持一致的服务）
-  metadata?: Record<string, unknown>; // 自定义元数据
-  errors?: ErrorInfo[]; // 上传错误信息
-  fingerprint?: string; // 文件指纹
-  resumeAttempts?: number; // 恢复尝试次数
-}
-
-/**
- * 错误信息结构
- */
-interface ErrorInfo {
-  type: string;
-  message: string;
-  timestamp?: number;
-  chunkIndex?: number; // 出错的分片索引
-  attemptCount?: number; // 尝试次数
-}
-
-/**
- * 存储类型
- */
-export type StorageType =
-  | 'localStorage'
-  | 'sessionStorage'
-  | 'indexedDB'
-  | 'miniprogram'
-  | 'taroStorage'
-  | 'uniappStorage'
-  | 'memoryStorage'
-  | 'custom';
-
-/**
- * 日志级别类型
- */
-export type LogLevel = 'none' | 'error' | 'warn' | 'info' | 'debug';
-
-/**
- * 文件指纹算法类型
- */
-export type FingerprintAlgorithm = 'md5' | 'sha1' | 'simple';
-
-/**
- * 断点续传插件配置选项
- */
-export interface ResumeOptions {
-  enabled?: boolean; // 是否启用断点续传
-  storageType?: StorageType; // 存储类型
-  keyPrefix?: string; // 存储键前缀
-  expiryTime?: number; // 过期时间(毫秒)
-  fingerprintAlgorithm?: FingerprintAlgorithm; // 文件指纹算法
-  autoResume?: boolean; // 是否自动恢复
-  customStorage?: IStorage; // 自定义存储
-  persistProgressInterval?: number; // 进度持久化间隔(毫秒)
-  enableCrossSession?: boolean; // 是否启用跨会话支持
-  autoCleanExpired?: boolean; // 是否自动清理过期数据
-  maxStorageItems?: number; // 最大存储项数
-  partialDetection?: boolean; // 是否启用部分上传检测
-  encryptData?: boolean; // 是否加密存储数据
-  encryptionKey?: string; // 加密密钥
-  logLevel?: LogLevel; // 日志级别
-  maxResumeAttempts?: number; // 最大恢复尝试次数
-  alternativeStorages?: StorageType[]; // 备选存储类型，当主存储不可用时使用
-  autoSyncStorages?: boolean; // 是否自动同步不同存储的数据
-  storeProgressOnPause?: boolean; // 是否在暂停时保存进度
-  useStrictFingerprint?: boolean; // 是否使用严格的文件指纹校验
-}
+  ChunkStatus,
+  ResumeData,
+  ResumeOptions,
+  StorageOptions,
+  UploadStatus,
+} from '../types/resume';
 
 /**
  * 断点续传插件
- * 实现断点续传功能增强
+ * 用于实现文件的断点续传功能
  */
-class ResumePlugin implements IPlugin {
-  public readonly version = '2.0.0';
-  private options: ResumeOptions;
-  private storage: IStorage;
-  private backupStorages: IStorage[] = []; // 备用存储
-  private uploader: UploaderCore | null = null;
-  private sessionId: string;
-  private progressTimers: Map<string, number> = new Map();
-  private readonly DEFAULT_EXPIRY_TIME = 7 * 24 * 60 * 60 * 1000; // 7天
-  private readonly DEFAULT_PERSIST_INTERVAL = 1000; // 1秒
-  private pendingChunkSaves: Map<string, Set<number>> = new Map(); // 等待保存的分片进度
-  private lastCompletePersistTime: Map<string, number> = new Map(); // 上次完整持久化时间
-  private resumeInProgress: Map<string, boolean> = new Map(); // 正在恢复的上传
-  private fileFingerprints: Map<string, string> = new Map(); // 文件指纹缓存
+export class ResumePlugin implements IPlugin {
+  /** 插件名称 */
+  public name = 'ResumePlugin';
+  /** 插件版本 */
+  public version = '1.0.0';
+
+  private logger: Logger;
+  private core: UploaderCore | null = null;
+  private eventBus: EventBus;
+
+  // 存储相关模块
+  private storageManager: StorageManager;
+  private storageAdapter: ResumeStorageAdapter;
+
+  // 管理模块
+  private stateManager: ResumeStateManager;
+  private chunkManager: ChunkIndexManager;
+  private fileRecordManager: FileRecordManager;
+  private sessionManager: ResumeSessionManager;
+
+  // 工具实例
+  private hashGenerator: HashGenerator;
+
+  // 配置选项
+  private options: Required<ResumeOptions>;
+  private isInitialized = false;
 
   /**
-   * 创建断点续传插件实例
-   * @param options 配置选项
+   * 构造函数
+   * @param options 插件配置选项
    */
   constructor(options: ResumeOptions = {}) {
+    this.logger = new Logger('ResumePlugin');
+    this.eventBus = EventBus.getInstance();
+    this.hashGenerator = new HashGenerator();
+
+    // 设置默认选项
     this.options = {
-      enabled: true,
-      storageType: 'localStorage',
-      keyPrefix: 'fileChunkPro_resume_',
-      expiryTime: this.DEFAULT_EXPIRY_TIME,
-      fingerprintAlgorithm: 'simple',
-      autoResume: true,
-      persistProgressInterval: this.DEFAULT_PERSIST_INTERVAL,
-      enableCrossSession: true,
-      autoCleanExpired: true,
-      maxStorageItems: 100,
-      partialDetection: true,
-      encryptData: false,
-      logLevel: 'warn',
-      maxResumeAttempts: 3, // 最多尝试恢复3次
-      alternativeStorages: ['memoryStorage'], // 默认内存作为备用存储
-      autoSyncStorages: true, // 默认自动同步存储
-      storeProgressOnPause: true, // 默认在暂停时保存进度
-      useStrictFingerprint: false, // 默认不使用严格指纹校验
-      ...options,
+      enabled: options.enabled !== undefined ? options.enabled : true,
+      storage: {
+        engine: options.storage?.engine ?? StorageEngine.LOCAL_STORAGE,
+        path: options.storage?.path ?? 'fileChunkPro',
+        namespace: options.storage?.namespace ?? 'resumeData',
+        customStorage: options.storage?.customStorage,
+      },
+      maxFileRecords: options.maxFileRecords || 100,
+      chunkMetaFields: options.chunkMetaFields || [
+        'index',
+        'start',
+        'end',
+        'size',
+        'md5',
+      ],
+      checkpointInterval: options.checkpointInterval || 30000, // 默认30秒
+      expirationTime: options.expirationTime || 7 * 24 * 60 * 60 * 1000, // 默认7天
+      autoSaveOnUnload:
+        options.autoSaveOnUnload !== undefined
+          ? options.autoSaveOnUnload
+          : true,
     };
 
-    // 生成唯一会话ID
-    this.sessionId = this.generateSessionId();
+    // 初始化存储管理器
+    this.storageManager = new StorageManager(
+      this.options.storage as StorageOptions
+    );
 
-    // 初始化主存储
-    this.storage = this.initStorage(this.options.storageType);
+    // 初始化存储适配器
+    this.storageAdapter = new ResumeStorageAdapter(this.storageManager, {
+      prefix: this.options.storage.path,
+      namespace: this.options.storage.namespace,
+      expirationTime: this.options.expirationTime,
+    });
 
-    // 初始化备用存储
-    if (
-      this.options.alternativeStorages &&
-      this.options.alternativeStorages.length > 0
-    ) {
-      for (const storageType of this.options.alternativeStorages) {
-        if (storageType !== this.options.storageType) {
-          const backupStorage = this.initStorage(storageType);
-          if (backupStorage) {
-            this.backupStorages.push(backupStorage);
-          }
-        }
-      }
-    }
+    // 初始化状态管理器
+    this.stateManager = new ResumeStateManager({
+      instanceId: this.getInstanceId(),
+      chunkMetaFields: this.options.chunkMetaFields,
+      expirationTime: this.options.expirationTime,
+    });
 
-    // 如果启用了自动清理过期数据，则立即执行清理
-    if (this.options.autoCleanExpired) {
-      this.cleanExpiredItems().catch(err =>
-        this.log('error', '清理过期数据失败', err)
-      );
-    }
+    // 初始化分片管理器
+    this.chunkManager = new ChunkIndexManager();
 
-    // 如果启用了自动同步存储，立即同步一次
-    if (this.options.autoSyncStorages && this.backupStorages.length > 0) {
-      this.syncStorages().catch(err =>
-        this.log('error', '同步存储数据失败', err)
-      );
-    }
+    // 初始化文件记录管理器
+    this.fileRecordManager = new FileRecordManager(this.storageManager, {
+      instanceId: this.getInstanceId(),
+      maxFileRecords: this.options.maxFileRecords,
+    });
+
+    // 初始化会话管理器
+    this.sessionManager = new ResumeSessionManager(this.storageManager, {
+      instanceId: this.getInstanceId(),
+      autoSaveOnUnload: this.options.autoSaveOnUnload,
+      checkpointInterval: this.options.checkpointInterval,
+    });
   }
 
   /**
-   * 生成唯一会话ID
-   * @returns 会话ID
+   * 安装插件
+   * @param core UploaderCore实例
    */
-  private generateSessionId(): string {
-    return `${Date.now()}-${Math.random().toString(36).substring(2, 15)}`;
-  }
-
-  /**
-   * 初始化适合环境的存储
-   * @param storageType 存储类型
-   * @returns 存储接口实现
-   */
-  private initStorage(storageType: StorageType | undefined): IStorage {
-    const env = EnvUtils.detectEnvironment();
-
-    // 如果提供了自定义存储，则优先使用
-    if (storageType === 'custom' && this.options.customStorage) {
-      return this.options.customStorage;
-    }
-
-    // 根据指定的存储类型创建存储适配器
-    switch (storageType) {
-      case 'localStorage':
-        if (
-          env === Environment.Browser &&
-          typeof localStorage !== 'undefined'
-        ) {
-          return new LocalStorageAdapter({ prefix: this.options.keyPrefix });
-        }
-        break;
-
-      case 'sessionStorage':
-        if (
-          env === Environment.Browser &&
-          typeof sessionStorage !== 'undefined'
-        ) {
-          return new SessionStorageAdapter({ prefix: this.options.keyPrefix });
-        }
-        break;
-
-      case 'memoryStorage':
-        return new MemoryStorageAdapter({ prefix: this.options.keyPrefix });
-
-      // 针对小程序环境的存储实现
-      case 'miniprogram':
-        if (typeof wx !== 'undefined') {
-          return this.createMiniprogramStorage('wx');
-        } else if (typeof my !== 'undefined') {
-          return this.createMiniprogramStorage('my');
-        } else if (typeof tt !== 'undefined') {
-          return this.createMiniprogramStorage('tt');
-        } else if (typeof swan !== 'undefined') {
-          return this.createMiniprogramStorage('swan');
-        }
-        break;
-
-      case 'taroStorage':
-        if (Taro) {
-          return this.createTaroStorage(Taro);
-        }
-        break;
-
-      case 'uniappStorage':
-        if (typeof uni !== 'undefined') {
-          return this.createUniAppStorage();
-        }
-        break;
-    }
-
-    // 默认使用内存存储
-    this.log('warn', `未找到支持的存储方式 ${storageType}，回退到内存存储`);
-    return new MemoryStorageAdapter({ prefix: this.options.keyPrefix });
-  }
-
-  /**
-   * 创建小程序存储适配器
-   */
-  private createMiniprogramStorage(
-    type: 'wx' | 'my' | 'tt' | 'swan'
-  ): IStorage {
-    // 获取小程序对象
-    const mp =
-      type === 'wx' ? wx : type === 'my' ? my : type === 'tt' ? tt : swan;
-
-    return {
-      getItem: async <T>(key: string): Promise<T | null> => {
-        try {
-          return new Promise<T | null>(resolve => {
-            mp.getStorage({
-              key: this.options.keyPrefix + key,
-              success: (res: any) => resolve(res.data),
-              fail: () => resolve(null),
-            });
-          });
-        } catch (e) {
-          return null;
-        }
-      },
-
-      setItem: async <T>(key: string, value: T): Promise<void> => {
-        return new Promise<void>((resolve, reject) => {
-          mp.setStorage({
-            key: this.options.keyPrefix + key,
-            data: value,
-            success: () => resolve(),
-            fail: (e: any) => reject(new Error(`存储失败: ${e.errMsg}`)),
-          });
-        });
-      },
-
-      removeItem: async (key: string): Promise<void> => {
-        return new Promise<void>(resolve => {
-          mp.removeStorage({
-            key: this.options.keyPrefix + key,
-            success: () => resolve(),
-            fail: () => resolve(),
-          });
-        });
-      },
-
-      clear: async (): Promise<void> => {
-        try {
-          const keys = await this.keys();
-          for (const key of keys) {
-            await this.removeItem(key);
-          }
-        } catch {
-          // 忽略错误
-        }
-      },
-
-      keys: async (): Promise<string[]> => {
-        return new Promise<string[]>(resolve => {
-          mp.getStorageInfo({
-            success: (res: any) => {
-              const keys = (res.keys || [])
-                .filter((k: string) =>
-                  k.startsWith(this.options.keyPrefix || '')
-                )
-                .map((k: string) =>
-                  k.substring((this.options.keyPrefix || '').length)
-                );
-              resolve(keys);
-            },
-            fail: () => resolve([]),
-          });
-        });
-      },
-    };
-  }
-
-  /**
-   * 创建Taro存储适配器
-   */
-  private createTaroStorage(taroInstance: any): IStorage {
-    const taroAPI = taroInstance;
-    return {
-      getItem: async <T>(key: string): Promise<T | null> => {
-        try {
-          const res = await taroAPI.getStorage({
-            key: this.options.keyPrefix + key,
-          });
-          return res.data;
-        } catch (e) {
-          return null;
-        }
-      },
-
-      setItem: async <T>(key: string, value: T): Promise<void> => {
-        await taroAPI.setStorage({
-          key: this.options.keyPrefix + key,
-          data: value,
-        });
-      },
-
-      removeItem: async (key: string): Promise<void> => {
-        try {
-          await taroAPI.removeStorage({ key: this.options.keyPrefix + key });
-        } catch {
-          // 忽略错误
-        }
-      },
-
-      clear: async (): Promise<void> => {
-        try {
-          const keys = await this.keys();
-          for (const key of keys) {
-            await this.removeItem(key);
-          }
-        } catch {
-          // 忽略错误
-        }
-      },
-
-      keys: async (): Promise<string[]> => {
-        try {
-          const res = await taroAPI.getStorageInfo();
-          return (res.keys || [])
-            .filter((k: string) => k.startsWith(this.options.keyPrefix || ''))
-            .map((k: string) =>
-              k.substring((this.options.keyPrefix || '').length)
-            );
-        } catch {
-          return [];
-        }
-      },
-    };
-  }
-
-  /**
-   * 创建UniApp存储适配器
-   */
-  private createUniAppStorage(): IStorage {
-    return {
-      getItem: async <T>(key: string): Promise<T | null> => {
-        try {
-          const data = uni.getStorageSync(this.options.keyPrefix + key);
-          return data || null;
-        } catch (e) {
-          return null;
-        }
-      },
-
-      setItem: async <T>(key: string, value: T): Promise<void> => {
-        try {
-          uni.setStorageSync(this.options.keyPrefix + key, value);
-        } catch (e) {
-          throw new Error(`UniApp存储失败: ${e}`);
-        }
-      },
-
-      removeItem: async (key: string): Promise<void> => {
-        try {
-          uni.removeStorageSync(this.options.keyPrefix + key);
-        } catch {
-          // 忽略错误
-        }
-      },
-
-      clear: async (): Promise<void> => {
-        try {
-          const keys = await this.keys();
-          for (const key of keys) {
-            await this.removeItem(key);
-          }
-        } catch {
-          // 忽略错误
-        }
-      },
-
-      keys: async (): Promise<string[]> => {
-        try {
-          const res = uni.getStorageInfoSync();
-          return (res.keys || [])
-            .filter(k => k.startsWith(this.options.keyPrefix || ''))
-            .map(k => k.substring((this.options.keyPrefix || '').length));
-        } catch {
-          return [];
-        }
-      },
-    };
-  }
-
-  /**
-   * 插件安装方法
-   * @param uploader 上传器实例
-   */
-  install(uploader: UploaderCore): void {
-    this.uploader = uploader;
-
-    // 注册各种事件监听
-    uploader.on('chunkSuccess', this.handleChunkSuccess.bind(this));
-    uploader.on('uploadComplete', this.handleUploadComplete.bind(this));
-    uploader.on('error', this.handleError.bind(this));
-    uploader.on('progress', this.handleProgress.bind(this));
-    uploader.on('uploadPaused', this.handleUploadPaused.bind(this));
-    uploader.on('uploadResumed', this.handleUploadResumed.bind(this));
-    uploader.on('uploadCancelled', this.handleUploadCancelled.bind(this));
-
-    // 监听创建分片前的钩子，用于恢复上传
-    uploader.hook('beforeCreateChunks', this.beforeCreateChunks.bind(this));
-
-    // 注册上传开始事件，用于初始化进度信息
-    uploader.on('uploadStart', this.handleUploadStart.bind(this));
-
-    // 设置插件优先级（如果UploaderCore支持此方法）
-    if (typeof uploader.setPluginPriority === 'function') {
-      uploader.setPluginPriority('ResumePlugin', PluginPriority.HIGH);
-    }
-  }
-
-  /**
-   * 同步不同存储之间的数据
-   * 用于提高数据可靠性
-   */
-  private async syncStorages(): Promise<void> {
-    if (this.backupStorages.length === 0) return;
-
-    try {
-      // 从主存储获取所有键
-      const primaryKeys = await this.storage.keys();
-
-      // 对每个键执行同步
-      for (const key of primaryKeys) {
-        const data = await this.storage.getItem(key);
-
-        // 数据存在且有效
-        if (data) {
-          // 同步到所有备份存储
-          for (const backupStorage of this.backupStorages) {
-            await backupStorage.setItem(key, data).catch(() => {
-              // 忽略备份存储写入错误
-            });
-          }
-        }
-      }
-
-      this.log('debug', '存储同步完成');
-    } catch (error) {
-      this.log('error', '存储同步失败', error);
-    }
-  }
-
-  /**
-   * 处理上传开始事件
-   * @param info 上传信息
-   */
-  private async handleUploadStart(
-    info: Record<string, unknown>
-  ): Promise<void> {
-    if (!this.options.enabled || !info.fileId) return;
-
-    const { fileId, fileName, fileSize, chunkSize } = info as {
-      fileId: string;
-      fileName: string;
-      fileSize: number;
-      chunkSize: number;
-    };
-
-    try {
-      // 清除进度保存定时器
-      this.clearProgressTimer(fileId);
-
-      // 检查是否有未完成的上传
-      const existingProgress = await this.getFileProgress(fileId);
-
-      // 如果没有现有进度或不启用自动恢复，则初始化新的进度信息
-      if (!existingProgress || !this.options.autoResume) {
-        // 计算文件指纹
-        const fingerprint = await this.calculateFileFingerprint(info);
-
-        // 创建新的进度信息
-        const newProgress: FileProgressInfo = {
-          fileId,
-          fileName,
-          fileSize,
-          chunks: [],
-          uploadedChunks: [],
-          lastUpdated: Date.now(),
-          createdAt: Date.now(),
-          sessionId: this.sessionId,
-          totalChunks: Math.ceil(fileSize / chunkSize),
-          progress: 0,
-          fingerprint,
-          resumeAttempts: 0,
-        };
-
-        // 保存文件的MIME类型(如果有)
-        if (info.fileType) {
-          newProgress.fileType = info.fileType as string;
-        }
-
-        // 保存上传URL(如果有)
-        if (info.uploadUrl) {
-          newProgress.uploadUrl = info.uploadUrl as string;
-        }
-
-        // 保存文件MD5(如果有)
-        if (info.fileMd5) {
-          newProgress.fileMd5 = info.fileMd5 as string;
-        }
-
-        // 保存进度信息
-        await this.saveFileProgress(fileId, newProgress);
-
-        // 设置暂存分片集合
-        this.pendingChunkSaves.set(fileId, new Set());
-
-        // 记录最后完整持久化时间
-        this.lastCompletePersistTime.set(fileId, Date.now());
-
-        this.log('debug', `初始化上传进度 ${fileName} (${fileId})`);
-      } else {
-        // 标记为正在恢复的上传
-        this.resumeInProgress.set(fileId, true);
-
-        // 增加恢复尝试次数
-        existingProgress.resumeAttempts =
-          (existingProgress.resumeAttempts || 0) + 1;
-
-        // 更新会话ID和最后更新时间
-        existingProgress.sessionId = this.sessionId;
-        existingProgress.lastUpdated = Date.now();
-
-        // 更新现有进度信息
-        await this.saveFileProgress(fileId, existingProgress);
-
-        // 设置暂存分片集合并填充已上传的分片
-        const pendingSet = new Set<number>();
-        for (let i = 0; i < existingProgress.totalChunks; i++) {
-          if (!existingProgress.uploadedChunks.includes(i)) {
-            pendingSet.add(i);
-          }
-        }
-        this.pendingChunkSaves.set(fileId, pendingSet);
-
-        // 记录最后完整持久化时间
-        this.lastCompletePersistTime.set(fileId, Date.now());
-
-        this.log(
-          'info',
-          `恢复上传 ${fileName} (${fileId}), 已上传 ${existingProgress.uploadedChunks.length}/${existingProgress.totalChunks} 分片`
-        );
-      }
-
-      // 启动定时保存进度
-      this.startProgressTimer(fileId);
-    } catch (error) {
-      this.log(
-        'error',
-        `初始化上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 创建分片前的钩子处理
-   * 用于恢复上传
-   */
-  private async beforeCreateChunks(
-    params: Record<string, unknown>
-  ): Promise<Record<string, unknown> | null> {
-    if (!this.options.enabled || !this.options.autoResume || !params.fileId) {
-      return params;
-    }
-
-    const fileId = params.fileId as string;
-
-    try {
-      // 获取已保存的上传进度
-      const progress = await this.getFileProgress(fileId);
-
-      // 没有找到进度，继续正常上传
-      if (!progress) {
-        return params;
-      }
-
-      // 如果设置了严格文件指纹校验，检查文件指纹是否匹配
-      if (this.options.useStrictFingerprint && progress.fingerprint) {
-        // 从参数中获取文件对象，计算当前文件的指纹
-        const currentFingerprint = await this.calculateFileFingerprint(params);
-
-        // 如果指纹不匹配，说明不是同一个文件，不应该恢复
-        if (currentFingerprint !== progress.fingerprint) {
-          this.log('warn', `文件指纹不匹配，不恢复上传: ${fileId}`);
-          // 清除旧的进度记录
-          await this.clearProgress(fileId);
-          return params;
-        }
-      }
-
-      // 如果恢复尝试次数超过最大值，不再恢复
-      if (
-        progress.resumeAttempts !== undefined &&
-        progress.resumeAttempts >= (this.options.maxResumeAttempts || 3)
-      ) {
-        this.log(
-          'warn',
-          `恢复尝试次数超过限制(${progress.resumeAttempts}次)，重新上传: ${fileId}`
-        );
-        await this.clearProgress(fileId);
-        return params;
-      }
-
-      // 部分上传检测：如果启用了分片上传检测并且有已上传的分片
-      if (this.options.partialDetection && progress.uploadedChunks.length > 0) {
-        // 修改参数，跳过已上传的分片
-        return {
-          ...params,
-          uploadedChunks: progress.uploadedChunks,
-          resumeFrom: Math.max(...progress.uploadedChunks) + 1,
-          resumeInfo: {
-            totalChunks: progress.totalChunks,
-            progress: progress.progress,
-            lastUpdated: progress.lastUpdated,
-          },
-        };
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `恢复上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-
-    return params;
-  }
-
-  /**
-   * 获取/生成文件唯一ID
-   */
-  private async getFileId(file: {
-    size: number;
-    name: string;
-  }): Promise<string> {
-    // 如果上传器支持获取文件ID，则使用其方法
-    if (
-      this.uploader &&
-      typeof (this.uploader as any).getFileId === 'function'
-    ) {
-      return await (this.uploader as any).getFileId(file);
-    }
-
-    // 否则生成基于文件名和大小的简单ID
-    return `${file.name}_${file.size}_${Date.now()}`;
-  }
-
-  /**
-   * 检测上传器是否支持文件MD5计算
-   */
-  private hasFileMd5Method(): boolean {
-    if (!this.uploader) return false;
-
-    // 检查上传器是否有计算文件MD5的方法
-    return typeof (this.uploader as any).calculateFileMd5 === 'function';
-  }
-
-  /**
-   * 计算文件指纹
-   * 根据配置选择合适的指纹算法
-   */
-  private async calculateFileFingerprint(info: unknown): Promise<string> {
-    const { fingerprintAlgorithm } = this.options;
-
-    try {
-      // 如果已有指纹缓存，直接返回
-      const fileId = (info as any).fileId as string;
-      if (fileId && this.fileFingerprints.has(fileId)) {
-        return this.fileFingerprints.get(fileId) as string;
-      }
-
-      let fingerprint: string;
-
-      // 如果上传器支持MD5计算并且指定使用MD5算法
-      if (
-        fingerprintAlgorithm === 'md5' &&
-        this.hasFileMd5Method() &&
-        (info as any).file
-      ) {
-        fingerprint = await (this.uploader as any).calculateFileMd5(
-          (info as any).file
-        );
-      }
-      // 使用简单算法
-      else {
-        const file = (info as any).file;
-        const fileName =
-          (info as any).fileName || (file ? file.name : 'unknown');
-        const fileSize = (info as any).fileSize || (file ? file.size : 0);
-        const lastModified =
-          file && file.lastModified ? file.lastModified : Date.now();
-
-        // 组合文件属性生成简单指纹
-        fingerprint = `${fileName}_${fileSize}_${lastModified}`;
-      }
-
-      // 缓存指纹
-      if (fileId) {
-        this.fileFingerprints.set(fileId, fingerprint);
-      }
-
-      return fingerprint;
-    } catch (error) {
-      this.log('error', '计算文件指纹失败', error);
-      // 返回基于时间戳的后备指纹
-      return `fallback_${Date.now()}_${Math.random().toString(36).substring(2, 15)}`;
-    }
-  }
-
-  /**
-   * 处理分片上传成功事件
-   */
-  private async handleChunkSuccess(info: {
-    fileId: string;
-    chunk: ChunkInfo;
-  }): Promise<void> {
-    if (!this.options.enabled || !info.fileId) return;
-
-    const { fileId, chunk } = info;
-
-    try {
-      // 记录成功上传的分片
-      await this.saveChunkProgress(fileId, chunk);
-
-      // 添加到暂存集合
-      const pendingChunks = this.pendingChunkSaves.get(fileId);
-      if (pendingChunks) {
-        pendingChunks.add(chunk.index);
-      }
-
-      // 更新内存中的最后持久化时间
-      this.lastCompletePersistTime.set(fileId, Date.now());
-    } catch (error) {
-      this.log(
-        'error',
-        `保存分片进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 处理上传完成事件
-   */
-  private async handleUploadComplete(info: { fileId: string }): Promise<void> {
-    if (!this.options.enabled || !info.fileId) return;
-
-    const { fileId } = info;
-
-    try {
-      // 清除进度保存定时器
-      this.clearProgressTimer(fileId);
-
-      // 清除上传进度信息
-      await this.clearProgress(fileId);
-
-      // 清除暂存分片集合
-      this.pendingChunkSaves.delete(fileId);
-      this.lastCompletePersistTime.delete(fileId);
-      this.resumeInProgress.delete(fileId);
-
-      // 清除文件指纹缓存
-      this.fileFingerprints.delete(fileId);
-
-      this.log('debug', `上传完成，清除进度信息: ${fileId}`);
-    } catch (error) {
-      this.log(
-        'error',
-        `清除进度信息失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 处理上传错误事件
-   */
-  private async handleError(error: any): Promise<void> {
-    // 如果未启用断点续传或错误对象无效，则直接返回
-    if (!this.options.enabled || !error || typeof error !== 'object') return;
-
-    // 获取文件ID
-    const fileId = error.fileId || (error.source && error.source.fileId);
-    if (!fileId) return;
-
-    try {
-      // 只有非致命错误才保存进度
-      if (!this.isTerminalError(error)) {
-        // 保存错误信息
-        await this.saveUploadError(fileId, {
-          type: error.type || 'UNKNOWN_ERROR',
-          message: error.message || '未知错误',
-          chunkInfo: error.chunkInfo,
-        });
-      } else {
-        // 清除进度保存定时器
-        this.clearProgressTimer(fileId);
-
-        // 如果是致命错误，清除上传进度
-        await this.clearProgress(fileId);
-
-        // 清除暂存信息
-        this.pendingChunkSaves.delete(fileId);
-        this.lastCompletePersistTime.delete(fileId);
-        this.resumeInProgress.delete(fileId);
-      }
-    } catch (err) {
-      this.log(
-        'error',
-        `处理上传错误失败: ${err instanceof Error ? err.message : String(err)}`
-      );
-    }
-  }
-
-  /**
-   * 处理上传进度事件
-   */
-  private async handleProgress(info: any): Promise<void> {
-    if (!this.options.enabled || !info || !info.fileId) return;
-
-    const { fileId, progress } = info;
-
-    try {
-      // 获取当前进度信息
-      const progressInfo = await this.getFileProgress(fileId);
-
-      if (progressInfo) {
-        // 更新进度
-        progressInfo.progress = progress;
-        progressInfo.lastUpdated = Date.now();
-
-        // 保存进度信息
-        await this.persistProgress(fileId);
-      }
-    } catch (error) {
-      this.log(
-        'debug',
-        `更新上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 处理上传暂停事件
-   */
-  private async handleUploadPaused(info: { fileId: string }): Promise<void> {
-    if (
-      !this.options.enabled ||
-      !info.fileId ||
-      !this.options.storeProgressOnPause
-    )
+  public install(core: UploaderCore): void {
+    if (this.core) {
+      this.logger.warn('断点续传插件已安装，忽略重复安装');
       return;
+    }
 
-    const { fileId } = info;
+    this.core = core;
+
+    if (!this.options.enabled) {
+      this.logger.info('断点续传功能已禁用');
+      return;
+    }
+
+    this.initialize().catch(error => {
+      this.logger.error('断点续传插件初始化失败', { error });
+    });
+
+    // 注册事件处理器
+    this.registerEventHandlers();
+
+    this.logger.info('断点续传插件已安装');
+  }
+
+  /**
+   * 卸载插件
+   */
+  public uninstall(): void {
+    if (!this.core) {
+      return;
+    }
+
+    // 保存当前状态
+    this.saveAllState().catch(error => {
+      this.logger.error('卸载插件时保存状态失败', { error });
+    });
+
+    // 清理和注销事件处理器
+    this.unregisterEventHandlers();
+
+    // 销毁会话管理器
+    this.sessionManager.destroy();
+
+    this.core = null;
+    this.isInitialized = false;
+    this.logger.info('断点续传插件已卸载');
+  }
+
+  /**
+   * 初始化插件
+   */
+  private async initialize(): Promise<void> {
+    if (this.isInitialized) {
+      return;
+    }
 
     try {
-      // 获取当前进度信息
-      const progressInfo = await this.getFileProgress(fileId);
+      // 初始化存储管理器
+      await this.storageManager.initialize();
 
-      if (progressInfo) {
-        // 更新最后更新时间
-        progressInfo.lastUpdated = Date.now();
+      // 初始化文件记录管理器
+      await this.fileRecordManager.initialize();
 
-        // 立即保存进度信息
-        await this.saveFileProgress(fileId, progressInfo);
+      // 初始化会话管理器
+      this.sessionManager.initialize();
 
-        this.log('debug', `已保存暂停状态: ${fileId}`);
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `保存暂停状态失败: ${error instanceof Error ? error.message : String(error)}`
+      // 执行过期数据清理
+      await this.storageAdapter.cleanupExpiredData();
+      await this.fileRecordManager.cleanupExpiredRecords(
+        this.options.expirationTime
       );
+
+      this.isInitialized = true;
+      this.logger.debug('断点续传插件初始化成功');
+    } catch (error) {
+      this.logger.error('断点续传插件初始化失败', { error });
+      throw error;
     }
   }
 
   /**
-   * 处理上传恢复事件
+   * 注册事件处理器
    */
-  private async handleUploadResumed(info: { fileId: string }): Promise<void> {
-    if (!this.options.enabled || !info.fileId) return;
+  private registerEventHandlers(): void {
+    if (!this.core) return;
 
-    const { fileId } = info;
+    // 文件添加前钩子
+    this.core.hooks.beforeFileAdd.tap(
+      this.name,
+      this.onBeforeFileAdd.bind(this)
+    );
 
-    // 恢复进度保存定时器
-    this.startProgressTimer(fileId);
+    // 文件添加后钩子
+    this.core.hooks.afterFileAdd.tap(this.name, this.onAfterFileAdd.bind(this));
+
+    // 分片上传前钩子
+    this.core.hooks.beforeChunkUpload.tap(
+      this.name,
+      this.onBeforeChunkUpload.bind(this)
+    );
+
+    // 分片上传成功钩子
+    this.core.hooks.afterChunkUpload.tap(
+      this.name,
+      this.onAfterChunkUpload.bind(this)
+    );
+
+    // 分片上传失败钩子
+    this.core.hooks.onChunkUploadError.tap(
+      this.name,
+      this.onChunkUploadError.bind(this)
+    );
+
+    // 文件上传成功钩子
+    this.core.hooks.afterFileUpload.tap(
+      this.name,
+      this.onAfterFileUpload.bind(this)
+    );
+
+    // 文件上传失败钩子
+    this.core.hooks.onFileUploadError.tap(
+      this.name,
+      this.onFileUploadError.bind(this)
+    );
+
+    // 暂停文件上传钩子
+    this.core.hooks.onFilePause.tap(this.name, this.onFilePause.bind(this));
+
+    // 恢复文件上传钩子
+    this.core.hooks.onFileResume.tap(this.name, this.onFileResume.bind(this));
+
+    // 文件上传取消钩子
+    this.core.hooks.onFileCancel.tap(this.name, this.onFileCancel.bind(this));
+
+    // 注册内部事件处理
+    this.eventBus.on('resume:saveState', this.handleSaveStateEvent.bind(this));
+
+    this.logger.debug('断点续传插件已注册事件处理器');
   }
 
   /**
-   * 处理上传取消事件
+   * 注销事件处理器
    */
-  private async handleUploadCancelled(info: { fileId: string }): Promise<void> {
-    if (!this.options.enabled || !info.fileId) return;
+  private unregisterEventHandlers(): void {
+    if (!this.core) return;
 
-    const { fileId } = info;
+    // 注销钩子
+    this.core.hooks.beforeFileAdd.untap(this.name);
+    this.core.hooks.afterFileAdd.untap(this.name);
+    this.core.hooks.beforeChunkUpload.untap(this.name);
+    this.core.hooks.afterChunkUpload.untap(this.name);
+    this.core.hooks.onChunkUploadError.untap(this.name);
+    this.core.hooks.afterFileUpload.untap(this.name);
+    this.core.hooks.onFileUploadError.untap(this.name);
+    this.core.hooks.onFilePause.untap(this.name);
+    this.core.hooks.onFileResume.untap(this.name);
+    this.core.hooks.onFileCancel.untap(this.name);
 
+    // 注销内部事件
+    this.eventBus.off('resume:saveState', this.handleSaveStateEvent.bind(this));
+
+    this.logger.debug('断点续传插件已注销事件处理器');
+  }
+
+  /**
+   * 处理文件添加前
+   */
+  private async onBeforeFileAdd(file: File): Promise<File> {
     try {
-      // 清除进度保存定时器
-      this.clearProgressTimer(fileId);
+      // 检查文件恢复
+      const fileId = await this.sessionManager.createFileId(file);
+      const resumeData = await this.sessionManager.loadState(fileId);
 
-      // 清除上传进度信息
-      await this.clearProgress(fileId);
+      // 如果找不到恢复数据，直接返回原始文件
+      if (!resumeData) {
+        return file;
+      }
 
-      // 清除暂存信息
-      this.pendingChunkSaves.delete(fileId);
-      this.lastCompletePersistTime.delete(fileId);
-      this.resumeInProgress.delete(fileId);
-      this.fileFingerprints.delete(fileId);
+      // 校验恢复数据有效性
+      const chunks = this.core.helpers.splitFileIntoChunks(file);
+      if (
+        !chunks ||
+        !this.stateManager.isResumeDataValid(resumeData, file, chunks)
+      ) {
+        // 恢复数据无效，清除数据
+        await this.sessionManager.clearState(fileId);
+        return file;
+      }
 
-      this.log('debug', `上传取消，清除进度信息: ${fileId}`);
+      // 附加恢复数据到文件对象
+      (file as any)._resumeData = resumeData;
+
+      this.logger.debug('已找到有效的恢复数据', {
+        fileId,
+        fileName: file.name,
+      });
+
+      // 通知用户可以恢复上传
+      this.eventBus.emit('resume:availableData', {
+        fileId,
+        fileName: file.name,
+        progress: resumeData.progress,
+        status: resumeData.status,
+      });
+
+      return file;
     } catch (error) {
-      this.log(
-        'error',
-        `清除取消上传进度信息失败: ${error instanceof Error ? error.message : String(error)}`
-      );
+      this.logger.error('处理文件恢复失败', { fileName: file.name, error });
+      return file;
     }
   }
 
   /**
-   * 保存分片上传进度
+   * 处理文件添加后
    */
-  private async saveChunkProgress(
-    fileId: string,
-    chunk: ChunkInfo
-  ): Promise<void> {
+  private async onAfterFileAdd({ file, fileId, chunks }): Promise<void> {
     try {
-      // 获取已保存的进度信息
-      const progressInfo = await this.getFileProgress(fileId);
+      // 检查文件是否携带恢复数据
+      const resumeData = (file as any)._resumeData as ResumeData;
 
-      if (!progressInfo) {
-        this.log('warn', `未找到上传进度信息: ${fileId}`);
-        return;
-      }
-
-      // 检查分片是否已记录
-      if (!progressInfo.uploadedChunks.includes(chunk.index)) {
-        // 添加分片信息
-        progressInfo.uploadedChunks.push(chunk.index);
-
-        // 对分片索引排序
-        progressInfo.uploadedChunks.sort((a, b) => a - b);
-
-        // 保存分片信息(可选)
-        const existingChunkIdx = progressInfo.chunks.findIndex(
-          c => c.index === chunk.index
-        );
-        if (existingChunkIdx >= 0) {
-          progressInfo.chunks[existingChunkIdx] = chunk;
-        } else {
-          progressInfo.chunks.push(chunk);
-        }
-
-        // 更新最后更新时间
-        progressInfo.lastUpdated = Date.now();
-
-        // 计算上传进度
-        progressInfo.progress =
-          (progressInfo.uploadedChunks.length / progressInfo.totalChunks) * 100;
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `保存分片进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 保存上传错误信息
-   */
-  private async saveUploadError(
-    fileId: string,
-    error: { type?: string; message?: string; chunkInfo?: { index: number } }
-  ): Promise<void> {
-    try {
-      // 获取已保存的进度信息
-      const progressInfo = await this.getFileProgress(fileId);
-
-      if (!progressInfo) {
-        this.log('warn', `未找到上传进度信息: ${fileId}`);
-        return;
-      }
-
-      // 创建错误信息
-      const errorInfo: ErrorInfo = {
-        type: error.type || 'UNKNOWN_ERROR',
-        message: error.message || '未知错误',
-        timestamp: Date.now(),
-      };
-
-      // 如果有分片信息，记录出错的分片索引
-      if (error.chunkInfo && typeof error.chunkInfo.index === 'number') {
-        errorInfo.chunkIndex = error.chunkInfo.index;
-      }
-
-      // 检查是否已有相同分片的错误
-      if (progressInfo.errors && errorInfo.chunkIndex !== undefined) {
-        const existingErrorIdx = progressInfo.errors.findIndex(
-          e => e.chunkIndex === errorInfo.chunkIndex
-        );
-
-        if (existingErrorIdx >= 0) {
-          // 更新现有错误
-          const existingError = progressInfo.errors[existingErrorIdx];
-          existingError.attemptCount = (existingError.attemptCount || 0) + 1;
-          existingError.timestamp = Date.now();
-          existingError.message = errorInfo.message;
-          existingError.type = errorInfo.type;
-        } else {
-          // 添加新错误
-          errorInfo.attemptCount = 1;
-          progressInfo.errors = [...(progressInfo.errors || []), errorInfo];
-        }
+      if (resumeData) {
+        // 应用恢复数据
+        this.stateManager.applyResumeData(fileId, resumeData, chunks);
+        this.chunkManager.applyResumeData(fileId, resumeData);
+        this.sessionManager.addToCurrentSession(fileId);
       } else {
-        // 无分片索引或首次错误
-        errorInfo.attemptCount = 1;
-        progressInfo.errors = [...(progressInfo.errors || []), errorInfo];
+        // 创建新的恢复数据
+        this.stateManager.createResumeData(fileId, file, chunks);
+        this.chunkManager.registerFileChunks(fileId, chunks);
       }
 
-      // 限制错误记录数量
-      if (progressInfo.errors && progressInfo.errors.length > 20) {
-        progressInfo.errors = progressInfo.errors.slice(-20);
+      // 更新文件记录
+      const currentData = this.stateManager.getResumeData(fileId);
+      if (currentData) {
+        await this.fileRecordManager.updateFileRecord(currentData);
       }
 
-      // 更新最后更新时间
-      progressInfo.lastUpdated = Date.now();
-
-      // 保存更新后的进度信息
-      await this.saveFileProgress(fileId, progressInfo);
+      this.logger.debug('文件已添加到断点续传管理', {
+        fileId,
+        fileName: file.name,
+      });
     } catch (error) {
-      this.log(
-        'error',
-        `保存上传错误失败: ${error instanceof Error ? error.message : String(error)}`
+      this.logger.error('添加文件到断点续传管理失败', {
+        fileId,
+        fileName: file.name,
+        error,
+      });
+    }
+  }
+
+  /**
+   * 处理分片上传前
+   */
+  private onBeforeChunkUpload({ fileId, chunkIndex, _chunk }): boolean {
+    try {
+      // 检查分片是否已上传
+      const chunkStatus = this.chunkManager.getChunkStatus(fileId, chunkIndex);
+
+      if (chunkStatus === ChunkStatus.UPLOADED) {
+        this.logger.debug('跳过已上传的分片', { fileId, chunkIndex });
+        return false; // 跳过上传
+      }
+
+      // 更新分片状态为上传中
+      this.chunkManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.UPLOADING
       );
+
+      // 更新上传状态
+      this.stateManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.UPLOADING
+      );
+
+      return true; // 允许上传
+    } catch (error) {
+      this.logger.error('处理分片上传前发生错误', {
+        fileId,
+        chunkIndex,
+        error,
+      });
+      return true; // 默认允许上传
+    }
+  }
+
+  /**
+   * 处理分片上传成功
+   */
+  private async onAfterChunkUpload({
+    fileId,
+    chunkIndex,
+    response,
+  }): Promise<void> {
+    try {
+      // 更新分片状态为已上传
+      this.chunkManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.UPLOADED
+      );
+
+      // 更新上传状态
+      this.stateManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.UPLOADED,
+        response
+      );
+
+      // 获取当前恢复数据
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存当前状态
+      await this.sessionManager.saveState(fileId, resumeData);
+
+      // 更新文件记录
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      // 检查是否所有分片都上传完成
+      const isAllUploaded = this.chunkManager.areAllChunksUploaded(fileId);
+
+      if (isAllUploaded) {
+        this.logger.debug('所有分片上传完成', { fileId });
+      } else {
+        this.logger.debug('分片上传成功', {
+          fileId,
+          chunkIndex,
+          progress: resumeData.progress,
+        });
+      }
+    } catch (error) {
+      this.logger.error('处理分片上传成功失败', { fileId, chunkIndex, error });
+    }
+  }
+
+  /**
+   * 处理分片上传错误
+   */
+  private async onChunkUploadError({
+    fileId,
+    chunkIndex,
+    error,
+  }): Promise<void> {
+    try {
+      // 更新分片状态为失败
+      this.chunkManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.FAILED
+      );
+
+      // 更新上传状态
+      this.stateManager.updateChunkStatus(
+        fileId,
+        chunkIndex,
+        ChunkStatus.FAILED
+      );
+
+      // 尝试保存当前状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (resumeData) {
+        await this.sessionManager.saveState(fileId, resumeData);
+        await this.fileRecordManager.updateFileRecord(resumeData);
+      }
+
+      this.logger.debug('分片上传失败', { fileId, chunkIndex, error });
+    } catch (error) {
+      this.logger.error('处理分片上传错误失败', { fileId, chunkIndex, error });
+    }
+  }
+
+  /**
+   * 处理文件上传成功
+   */
+  private async onAfterFileUpload({ fileId, response }): Promise<void> {
+    try {
+      // 更新上传状态
+      this.stateManager.updateStatus(fileId, UploadStatus.COMPLETED);
+      this.stateManager.updateResponse(fileId, response);
+
+      // 获取最终状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存最终状态
+      await this.sessionManager.saveState(fileId, resumeData);
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      this.logger.debug('文件上传完成，保存最终状态', { fileId });
+    } catch (error) {
+      this.logger.error('处理文件上传成功失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 处理文件上传错误
+   */
+  private async onFileUploadError({ fileId, error }): Promise<void> {
+    try {
+      // 更新上传状态
+      this.stateManager.updateStatus(fileId, UploadStatus.ERROR, error);
+
+      // 获取状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存状态
+      await this.sessionManager.saveState(fileId, resumeData);
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      this.logger.debug('文件上传失败，保存错误状态', { fileId, error });
+    } catch (error) {
+      this.logger.error('处理文件上传错误失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 处理文件暂停
+   */
+  private async onFilePause({ fileId }): Promise<void> {
+    try {
+      // 更新上传状态
+      this.stateManager.updateStatus(fileId, UploadStatus.PAUSED);
+
+      // 获取状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存状态
+      await this.sessionManager.saveState(fileId, resumeData);
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      this.logger.debug('文件上传已暂停', { fileId });
+    } catch (error) {
+      this.logger.error('处理文件暂停失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 处理文件恢复上传
+   */
+  private async onFileResume({ fileId }): Promise<void> {
+    try {
+      // 更新上传状态
+      this.stateManager.updateStatus(fileId, UploadStatus.UPLOADING);
+
+      // 获取状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存状态
+      await this.sessionManager.saveState(fileId, resumeData);
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      this.logger.debug('文件上传已恢复', { fileId });
+    } catch (error) {
+      this.logger.error('处理文件恢复上传失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 处理文件取消上传
+   */
+  private async onFileCancel({ fileId }): Promise<void> {
+    try {
+      // 更新上传状态
+      this.stateManager.updateStatus(fileId, UploadStatus.CANCELLED);
+
+      // 获取状态
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) return;
+
+      // 保存状态
+      await this.sessionManager.saveState(fileId, resumeData);
+      await this.fileRecordManager.updateFileRecord(resumeData);
+
+      this.logger.debug('文件上传已取消', { fileId });
+    } catch (error) {
+      this.logger.error('处理文件取消上传失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 获取实例ID
+   */
+  private getInstanceId(): string {
+    return `${this.name}_${Date.now().toString(36)}`;
+  }
+
+  /**
+   * 处理保存状态事件
+   */
+  private async handleSaveStateEvent(event: {
+    fileId: string;
+    action: string;
+  }): Promise<void> {
+    try {
+      const { fileId } = event;
+      const resumeData = this.stateManager.getResumeData(fileId);
+
+      if (resumeData) {
+        await this.sessionManager.saveState(fileId, resumeData);
+      }
+    } catch (error) {
+      this.logger.error('处理保存状态事件失败', { event, error });
+    }
+  }
+
+  /**
+   * 保存所有状态
+   */
+  private async saveAllState(): Promise<void> {
+    const promises = [];
+
+    // 保存所有文件的状态
+    for (const [fileId, resumeData] of this.stateManager.getAllResumeData()) {
+      promises.push(this.sessionManager.saveState(fileId, resumeData));
+    }
+
+    try {
+      await Promise.all(promises);
+      this.logger.debug('已保存所有文件状态');
+    } catch (error) {
+      this.logger.error('保存所有文件状态失败', { error });
+    }
+  }
+
+  /**
+   * 获取可恢复的上传列表
+   */
+  public async getResumableUploads(): Promise<any[]> {
+    try {
+      // 获取所有可恢复的文件记录
+      const fileRecords =
+        await this.fileRecordManager.getResumableFileRecords();
+      return fileRecords.map(record => ({
+        fileId: record.fileId,
+        fileName: record.fileName,
+        fileSize: record.fileSize,
+        progress: record.progress,
+        status: record.status,
+        uploadedSize: record.uploadedSize,
+        updatedAt: record.updatedAt,
+      }));
+    } catch (error) {
+      this.logger.error('获取可恢复上传列表失败', { error });
+      return [];
+    }
+  }
+
+  /**
+   * 尝试恢复上传
+   * @param fileId 文件ID
+   * @param file 文件对象(可选，如果提供则会校验)
+   */
+  public async resumeUpload(fileId: string, file?: File): Promise<boolean> {
+    if (!this.core) return false;
+
+    try {
+      // 获取存储的状态
+      const resumeData = await this.sessionManager.loadState(fileId);
+      if (!resumeData) {
+        this.logger.debug('找不到可恢复的上传数据', { fileId });
+        return false;
+      }
+
+      // 如果提供了文件对象，校验文件是否匹配
+      if (file) {
+        if (
+          resumeData.fileName !== file.name ||
+          resumeData.fileSize !== file.size ||
+          resumeData.lastModified !== file.lastModified
+        ) {
+          this.logger.debug('文件与恢复数据不匹配', { fileId });
+          return false;
+        }
+
+        // 添加文件到上传器
+        await this.core.addFile(file);
+      } else {
+        // 尝试通知上传器恢复特定文件ID的上传
+        this.eventBus.emit('uploader:resumeUpload', { fileId, resumeData });
+      }
+
+      return true;
+    } catch (error) {
+      this.logger.error('尝试恢复上传失败', { fileId, error });
+      return false;
+    }
+  }
+
+  /**
+   * 清理过期数据
+   */
+  public async cleanupExpiredData(): Promise<void> {
+    try {
+      await this.storageAdapter.cleanupExpiredData();
+      await this.fileRecordManager.cleanupExpiredRecords(
+        this.options.expirationTime
+      );
+      this.logger.info('清理过期数据完成');
+    } catch (error) {
+      this.logger.error('清理过期数据失败', { error });
+    }
+  }
+
+  /**
+   * 清除文件的恢复数据
+   * @param fileId 文件ID
+   */
+  public async clearFileData(fileId: string): Promise<boolean> {
+    try {
+      // 清理存储数据
+      await this.storageAdapter.clearFileData(fileId);
+
+      // 清理记录
+      await this.fileRecordManager.deleteFileRecord(fileId);
+
+      // 清理状态管理器
+      this.stateManager.removeResumeData(fileId);
+
+      // 清理分片管理器
+      this.chunkManager.cleanupFile(fileId);
+
+      // 清理会话管理器
+      this.sessionManager.clearState(fileId);
+      this.sessionManager.removeFromCurrentSession(fileId);
+
+      this.logger.debug('已清除文件恢复数据', { fileId });
+
+      return true;
+    } catch (error) {
+      this.logger.error('清除文件恢复数据失败', { fileId, error });
+      return false;
+    }
+  }
+
+  /**
+   * 检查文件是否存在恢复数据
+   * @param fileId 文件ID
+   */
+  public async hasResumeData(fileId: string): Promise<boolean> {
+    try {
+      const resumeData = await this.sessionManager.loadState(fileId);
+      return !!resumeData;
+    } catch (error) {
+      this.logger.error('检查文件恢复数据失败', { fileId, error });
+      return false;
     }
   }
 
   /**
    * 获取文件上传进度
+   * @param fileId 文件ID
    */
-  private async getFileProgress(
-    fileId: string
-  ): Promise<FileProgressInfo | null> {
+  public async getFileProgress(fileId: string): Promise<number | null> {
     try {
-      // 从主存储获取
-      let progress = await this.storage.getItem<FileProgressInfo>(fileId);
-
-      // 如果主存储没有找到且有备份存储
-      if (!progress && this.backupStorages.length > 0) {
-        // 尝试从备份存储获取
-        for (const backupStorage of this.backupStorages) {
-          const backupProgress =
-            await backupStorage.getItem<FileProgressInfo>(fileId);
-          if (backupProgress) {
-            progress = backupProgress;
-
-            // 同步回主存储
-            await this.storage.setItem(fileId, backupProgress).catch(() => {
-              // 忽略同步错误
-            });
-
-            break;
-          }
-        }
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (resumeData) {
+        return resumeData.progress;
       }
 
-      // 检查数据有效性
-      if (progress && typeof progress === 'object') {
-        // 检查是否过期
-        if (
-          this.options.expiryTime &&
-          Date.now() - progress.lastUpdated > this.options.expiryTime
-        ) {
-          this.log('info', `上传记录已过期: ${fileId}`);
-          await this.clearProgress(fileId);
-          return null;
-        }
-
-        return progress;
-      }
-
-      return null;
+      // 如果内存中没有，尝试从存储加载
+      const savedData = await this.sessionManager.loadState(fileId);
+      return savedData ? savedData.progress : null;
     } catch (error) {
-      this.log(
-        'error',
-        `获取上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
+      this.logger.error('获取文件上传进度失败', { fileId, error });
       return null;
     }
   }
 
   /**
-   * 保存文件上传进度
+   * 设置存储引擎
+   * @param engine 存储引擎
+   * @param options 存储选项
    */
-  private async saveFileProgress(
-    fileId: string,
-    progress: FileProgressInfo
-  ): Promise<void> {
+  public async setStorageEngine(
+    engine: StorageEngine,
+    options?: any
+  ): Promise<boolean> {
     try {
-      // 更新最后更新时间
-      progress.lastUpdated = Date.now();
+      // 先保存当前状态
+      await this.saveAllState();
 
-      // 如果启用了加密
-      let dataToSave: FileProgressInfo | string = progress;
-      if (this.options.encryptData && this.options.encryptionKey) {
-        dataToSave = this.encryptData(progress, this.options.encryptionKey);
+      // 更新存储引擎
+      await this.storageManager.setEngine(engine, options);
+
+      // 更新配置
+      this.options.storage.engine = engine;
+      if (options) {
+        this.options.storage = {
+          ...this.options.storage,
+          ...options,
+        };
       }
 
-      // 保存到主存储
-      await this.storage.setItem(fileId, dataToSave);
+      // 重新初始化各管理器
+      await this.storageAdapter.reinitialize(this.storageManager, {
+        prefix: this.options.storage.path,
+        namespace: this.options.storage.namespace,
+        expirationTime: this.options.expirationTime,
+      });
 
-      // 如果有备份存储且启用了自动同步
-      if (this.options.autoSyncStorages && this.backupStorages.length > 0) {
-        // 异步保存到备份存储
-        for (const backupStorage of this.backupStorages) {
-          backupStorage.setItem(fileId, dataToSave).catch(() => {
-            // 忽略备份存储错误
-          });
-        }
-      }
+      await this.fileRecordManager.reinitialize(this.storageManager, {
+        instanceId: this.getInstanceId(),
+        maxFileRecords: this.options.maxFileRecords,
+      });
+
+      this.logger.info('存储引擎已更新', { engine });
+      return true;
     } catch (error) {
-      this.log(
-        'error',
-        `保存上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
+      this.logger.error('设置存储引擎失败', { engine, error });
+      return false;
     }
   }
 
   /**
-   * 清除上传进度
+   * 获取当前插件统计信息
    */
-  private async clearProgress(fileId: string): Promise<void> {
-    try {
-      // 从主存储清除
-      await this.storage.removeItem(fileId);
-
-      // 从备份存储清除
-      for (const backupStorage of this.backupStorages) {
-        backupStorage.removeItem(fileId).catch(() => {
-          // 忽略错误
-        });
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `清除上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 清除进度保存定时器
-   */
-  private clearProgressTimer(fileId: string): void {
-    const timerId = this.progressTimers.get(fileId);
-    if (timerId) {
-      clearInterval(timerId);
-      this.progressTimers.delete(fileId);
-    }
-  }
-
-  /**
-   * 启动进度保存定时器
-   */
-  private startProgressTimer(fileId: string): void {
-    // 先清除已存在的定时器
-    this.clearProgressTimer(fileId);
-
-    // 设置新的定时器
-    const timerId = window.setInterval(
-      () => this.persistProgress(fileId),
-      this.options.persistProgressInterval
-    );
-
-    this.progressTimers.set(fileId, timerId);
-  }
-
-  /**
-   * 持久化上传进度
-   * 智能合并多个分片更新，减少存储写入频率
-   */
-  private async persistProgress(fileId: string): Promise<void> {
-    try {
-      // 获取当前进度信息
-      const progressInfo = await this.getFileProgress(fileId);
-
-      if (!progressInfo) {
-        this.log('warn', `未找到上传进度信息: ${fileId}`);
-        return;
-      }
-
-      // 获取等待保存的分片集合
-      const pendingChunks = this.pendingChunkSaves.get(fileId) || new Set();
-      const lastCompleteSave = this.lastCompletePersistTime.get(fileId) || 0;
-
-      // 当满足以下条件之一时执行完整保存：
-      // 1. 有挂起的分片更新
-      // 2. 自上次完整保存已超过Interval的5倍
-      // 3. 上传恢复后的首次保存
-      const forceSave =
-        pendingChunks.size > 0 ||
-        Date.now() - lastCompleteSave >
-          this.options.persistProgressInterval! * 5 ||
-        this.resumeInProgress.get(fileId);
-
-      if (forceSave) {
-        // 执行完整保存
-        await this.saveFileProgress(fileId, progressInfo);
-
-        // 清除待保存分片集合
-        pendingChunks.clear();
-
-        // 更新最后完整保存时间
-        this.lastCompletePersistTime.set(fileId, Date.now());
-
-        // 清除恢复标志
-        this.resumeInProgress.delete(fileId);
-
-        this.log('debug', `已保存完整上传进度: ${fileId}`);
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `持久化上传进度失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 清理过期的上传记录
-   */
-  private async cleanExpiredItems(): Promise<void> {
-    if (!this.options.autoCleanExpired || !this.options.expiryTime) return;
-
-    try {
-      // 获取所有键
-      const keys = await this.storage.keys();
-
-      // 当前时间
-      const now = Date.now();
-
-      // 检查每个键
-      for (const key of keys) {
-        try {
-          // 获取进度信息
-          const progress = await this.storage.getItem<FileProgressInfo>(key);
-
-          // 检查是否过期
-          if (
-            progress &&
-            progress.lastUpdated &&
-            now - progress.lastUpdated > this.options.expiryTime
-          ) {
-            // 删除过期记录
-            await this.storage.removeItem(key);
-
-            // 同时从备份存储删除
-            for (const backupStorage of this.backupStorages) {
-              backupStorage.removeItem(key).catch(() => {
-                // 忽略错误
-              });
-            }
-
-            this.log('debug', `已清除过期上传记录: ${key}`);
-          }
-        } catch {
-          // 忽略单个记录处理错误
-        }
-      }
-
-      // 检查存储项数量限制
-      if (this.options.maxStorageItems && this.options.maxStorageItems > 0) {
-        await this.enforceStorageLimit();
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `清理过期上传记录失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 强制执行存储项数量限制
-   */
-  private async enforceStorageLimit(): Promise<void> {
-    if (!this.options.maxStorageItems) return;
-
-    try {
-      // 获取所有进度记录
-      const keys = await this.storage.keys();
-      const items: { key: string; lastUpdated: number }[] = [];
-
-      // 获取每个记录的最后更新时间
-      for (const key of keys) {
-        try {
-          const progress = await this.storage.getItem<FileProgressInfo>(key);
-          if (progress && progress.lastUpdated) {
-            items.push({ key, lastUpdated: progress.lastUpdated });
-          }
-        } catch {
-          // 忽略单个项处理错误
-        }
-      }
-
-      // 如果超出限制
-      if (items.length > this.options.maxStorageItems) {
-        // 按最后更新时间排序，旧的在前
-        items.sort((a, b) => a.lastUpdated - b.lastUpdated);
-
-        // 计算需要删除的数量
-        const deleteCount = items.length - this.options.maxStorageItems;
-
-        // 删除最旧的记录
-        for (let i = 0; i < deleteCount; i++) {
-          const key = items[i].key;
-          await this.storage.removeItem(key);
-
-          // 同时从备份存储删除
-          for (const backupStorage of this.backupStorages) {
-            backupStorage.removeItem(key).catch(() => {
-              // 忽略错误
-            });
-          }
-
-          this.log('debug', `删除超出限制的上传记录: ${key}`);
-        }
-      }
-    } catch (error) {
-      this.log(
-        'error',
-        `执行存储限制失败: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-
-  /**
-   * 获取存储键
-   */
-  private getStorageKey(fileId: string): string {
-    return fileId;
-  }
-
-  /**
-   * 判断是否为致命错误(无法恢复的错误)
-   */
-  private isTerminalError(error: { type?: string }): boolean {
-    // 这些错误类型被认为是致命错误，不应该保存进度
-    const terminalErrorTypes = [
-      UploadErrorType.FILE_ERROR, // 文件错误
-      UploadErrorType.PERMISSION_ERROR, // 权限错误
-      UploadErrorType.VALIDATION_ERROR, // 验证错误
-      UploadErrorType.CANCEL_ERROR, // 取消错误
-    ];
-
-    return error.type
-      ? terminalErrorTypes.includes(error.type as UploadErrorType)
-      : false;
-  }
-
-  /**
-   * 日志记录
-   */
-  private log(level: LogLevel, message: string, data?: unknown): void {
-    const logLevels: Record<LogLevel, number> = {
-      none: 0,
-      error: 1,
-      warn: 2,
-      info: 3,
-      debug: 4,
+  public getStats(): object {
+    return {
+      version: this.version,
+      enabled: this.options.enabled,
+      storageEngine: this.options.storage.engine,
+      activeFiles: this.sessionManager.getCurrentSessionSize(),
+      fileRecordsCount: this.fileRecordManager.getRecordsCount(),
+      sessionId: this.sessionManager.getCurrentSessionId(),
     };
+  }
 
-    if (
-      this.options.logLevel &&
-      logLevels[level] <= logLevels[this.options.logLevel]
-    ) {
-      const prefix = `[ResumePlugin] ${level.toUpperCase()}:`;
+  /**
+   * 导出所有恢复数据
+   * 可用于在不同环境间迁移上传状态
+   */
+  public async exportAllResumeData(): Promise<string> {
+    try {
+      const allRecords = await this.fileRecordManager.getAllFileRecords();
+      const exportData = {
+        version: this.version,
+        timestamp: Date.now(),
+        records: allRecords,
+      };
 
-      switch (level) {
-        case 'error':
-          console.error(prefix, message, data);
-          break;
-        case 'warn':
-          console.warn(prefix, message, data);
-          break;
-        case 'info':
-          console.info(prefix, message, data);
-          break;
-        case 'debug':
-          console.debug(prefix, message, data);
-          break;
-      }
+      return JSON.stringify(exportData);
+    } catch (error) {
+      this.logger.error('导出恢复数据失败', { error });
+      throw error;
     }
   }
 
   /**
-   * 加密数据
-   * 简单实现，实际应用可使用更复杂的加密算法
+   * 导入恢复数据
+   * @param jsonData 之前导出的JSON数据
    */
-  private encryptData(data: any, key: string): string {
+  public async importResumeData(jsonData: string): Promise<number> {
     try {
-      // 将数据转为JSON字符串
-      const jsonString = JSON.stringify(data);
+      const importData = JSON.parse(jsonData);
 
-      // 简单的XOR加密
-      let encrypted = '';
-      for (let i = 0; i < jsonString.length; i++) {
-        const charCode =
-          jsonString.charCodeAt(i) ^ key.charCodeAt(i % key.length);
-        encrypted += String.fromCharCode(charCode);
+      if (
+        !importData.version ||
+        !importData.records ||
+        !Array.isArray(importData.records)
+      ) {
+        throw new Error('无效的恢复数据格式');
       }
 
-      // Base64编码
-      return btoa(encrypted);
+      let importedCount = 0;
+
+      for (const record of importData.records) {
+        if (record.fileId && record.fileName) {
+          await this.fileRecordManager.updateFileRecord(record);
+          await this.sessionManager.saveState(record.fileId, record);
+          importedCount++;
+        }
+      }
+
+      this.logger.info('恢复数据导入完成', { importedCount });
+      return importedCount;
     } catch (error) {
-      this.log('error', '数据加密失败', error);
-      // 加密失败，返回原始数据
-      return JSON.stringify(data);
+      this.logger.error('导入恢复数据失败', { error });
+      throw error;
     }
   }
 
   /**
-   * 解密数据
-   * 与加密方法对应
+   * 生成文件的断点续传ID
+   * 可用于自定义ID生成逻辑
+   * @param file 文件对象
    */
-  private decryptData(encryptedData: string, key: string): any {
-    try {
-      // Base64解码
-      const base64Decoded = atob(encryptedData);
-
-      // XOR解密
-      let decrypted = '';
-      for (let i = 0; i < base64Decoded.length; i++) {
-        const charCode =
-          base64Decoded.charCodeAt(i) ^ key.charCodeAt(i % key.length);
-        decrypted += String.fromCharCode(charCode);
-      }
-
-      // 解析JSON
-      return JSON.parse(decrypted);
-    } catch (error) {
-      this.log('error', '数据解密失败', error);
-      return null;
-    }
+  public async generateFileId(file: File): Promise<string> {
+    return this.sessionManager.createFileId(file);
   }
 }
 

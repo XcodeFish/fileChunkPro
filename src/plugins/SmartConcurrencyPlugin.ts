@@ -1,6 +1,6 @@
 /* eslint-disable @typescript-eslint/no-unused-vars */
 /**
- * SmartConcurrencyPlugin - 智能并发控制插件
+ * SmartConcurrencyPlugin - 智能并发控制插件 (重构版)
  *
  * 功能：
  * 1. 网络状况自适应：根据当前网络状况动态调整上传策略
@@ -10,47 +10,32 @@
  * 5. 自适应发送窗口：根据网络延迟动态调整发送窗口大小
  */
 
-import EventBus from '../core/EventBus';
-import { TaskScheduler } from '../core/TaskScheduler';
-import { UploaderCore } from '../core/UploaderCore';
+import EventBus from '../../core/EventBus';
+import { TaskScheduler } from '../../core/TaskScheduler';
+import { UploaderCore } from '../../core/UploaderCore';
+import { Logger } from '../../utils/Logger';
+import { NetworkDetector } from '../../utils/NetworkDetector';
+
+// 导入拆分后的模块
+import { ConcurrencyStrategy } from '../strategies/ConcurrencyStrategy';
+import {
+  DeviceCapabilityEvaluator,
+  ExtendedDeviceCapability,
+} from '../evaluators/DeviceCapabilityEvaluator';
+import {
+  NetworkPerformanceAnalyzer,
+  SpeedSample,
+} from '../analyzers/NetworkPerformanceAnalyzer';
+import { AdaptiveFactorManager } from '../adaptive/AdaptiveFactorManager';
+
 import {
   IPlugin,
   TaskPriority,
   NetworkQuality,
-  NetworkCondition,
   UploadStrategy,
   TaskMetadata,
-  BandwidthStats,
-  NetworkStatus,
-  DeviceCapability,
-  ConcurrencyAdjustmentEvent,
-} from '../types';
-import MemoryManager from '../utils/MemoryManager';
-import { NetworkDetector } from '../utils/NetworkDetector';
-
-// 定义网络速度采样数据结构
-interface SpeedSample {
-  timestamp: number;
-  bytesTransferred: number;
-  duration: number;
-  speed: number; // bytes/s
-  chunkSize?: number; // 分片大小
-  success: boolean; // 上传是否成功
-  latency?: number; // 请求延迟时间
-}
-
-// 网络质量评估配置
-interface NetworkQualityConfig {
-  thresholds: {
-    [key in NetworkQuality]?: number; // 速度阈值(kb/s)
-  };
-  stabilityThreshold: number; // 网络稳定性阈值
-  historySize: number; // 历史记录大小
-  latencyWeight: number; // 延迟权重
-  speedWeight: number; // 速度权重
-  jitterWeight: number; // 抖动权重
-  adaptationSpeed: number; // 适应速度(0-1)
-}
+  PriorityConfig,
+} from '../../types';
 
 // 并发配置
 interface ConcurrencyConfig {
@@ -62,24 +47,6 @@ interface ConcurrencyConfig {
   recoveryFactor: number; // 恢复因子
   adaptationEnabled: boolean; // 是否启用自适应
 }
-
-// 优先级配置
-interface PriorityConfig {
-  firstChunk: TaskPriority; // 首个分片优先级
-  lastChunk: TaskPriority; // 最后分片优先级
-  metadataChunk: TaskPriority; // 元数据分片优先级
-  retryIncrement: number; // 重试优先级增量
-  maxPriority: TaskPriority; // 最大优先级
-}
-
-// 默认网络质量速度阈值（单位：kb/s）
-const DEFAULT_NETWORK_QUALITY_THRESHOLD = {
-  [NetworkQuality.POOR]: 50, // 50 KB/s
-  [NetworkQuality.LOW]: 200, // 200 KB/s
-  [NetworkQuality.MEDIUM]: 500, // 500 KB/s
-  [NetworkQuality.GOOD]: 1000, // 1 MB/s
-  [NetworkQuality.EXCELLENT]: 2000, // 2 MB/s
-};
 
 // 默认优先级配置
 const DEFAULT_PRIORITY_CONFIG: PriorityConfig = {
@@ -96,25 +63,15 @@ const DEFAULT_PRIORITY_CONFIG: PriorityConfig = {
 };
 
 class SmartConcurrencyPlugin implements IPlugin {
-  public version = '2.0.0';
+  public version = '3.1.0';
   private core: UploaderCore | null = null;
   private taskScheduler: TaskScheduler | null = null;
   private eventBus: EventBus | null = null;
   private networkDetector: NetworkDetector | null = null;
+  private logger: Logger;
 
   // 网络状态监控
-  private networkCondition: NetworkCondition | null = null;
   private currentNetworkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
-  private speedSamples: SpeedSample[] = [];
-  private lastSampleTime = 0;
-  private totalBytesTransferred = 0;
-  private samplingStartTime = 0;
-  private isNetworkStable = false;
-  private consecutiveStableReadings = 0;
-  private lastNetworkEvent = 0;
-  private networkTrend: 'improving' | 'degrading' | 'stable' = 'stable';
-  private latencyHistory: number[] = [];
-  private jitterValue = 0;
 
   // 并发控制
   private baseConcurrency = 3; // 默认基础并发数
@@ -123,51 +80,29 @@ class SmartConcurrencyPlugin implements IPlugin {
   private currentConcurrency = 3;
   private adaptationEnabled = true;
   private initialConcurrencySet = false;
-  private concurrencyHistory: Array<{
-    concurrency: number;
-    timestamp: number;
-    quality: NetworkQuality;
-  }> = [];
-  private optimalConcurrencyMap = new Map<NetworkQuality, number>();
-
-  // 智能窗口控制
-  private windowSize = 3; // 默认窗口大小
-  private minWindowSize = 1;
-  private maxWindowSize = 10;
-  private rttSamples: number[] = []; // 往返时间样本
-  private congestionWindow = 1.0; // 拥塞窗口
 
   // 监控间隔
   private networkCheckInterval: any = null;
   private concurrencyAdjustInterval: any = null;
-  private speedCalculationInterval: any = null;
   private performanceAnalysisInterval: any = null;
 
   // 采样与配置
   private readonly SAMPLE_INTERVAL: number;
-  private readonly SAMPLE_HISTORY_SIZE: number;
-  private readonly STABLE_READINGS_THRESHOLD: number;
   private readonly CONCURRENCY_ADJUST_INTERVAL: number;
 
-  // 网络质量配置
-  private networkQualityConfig: NetworkQualityConfig;
+  // 配置项
   private concurrencyConfig: ConcurrencyConfig;
   private priorityConfig: PriorityConfig;
 
-  // 带宽使用情况
-  private currentSpeed = 0; // bytes/s
-  private avgSpeed = 0; // bytes/s
-  private peakSpeed = 0; // bytes/s
-  private targetUtilization = 0.85; // 目标带宽利用率，避免网络饱和
+  // 文件和进度信息
+  private fileSize = 0; // 当前处理的文件大小
+  private currentProgress = 0; // 当前上传进度
 
-  // 性能监控
-  private failureRates = new Map<number, number>(); // 并发数 -> 失败率
-  private successRates = new Map<number, number>(); // 并发数 -> 成功率
-  private performanceMatrix = new Map<
-    NetworkQuality,
-    Map<number, { success: number; total: number; avgSpeed: number }>
-  >();
-  private deviceCapabilities: DeviceCapability | null = null;
+  // 拆分出的组件
+  private performanceAnalyzer: NetworkPerformanceAnalyzer;
+  private adaptiveFactorManager: AdaptiveFactorManager;
+  private extendedDeviceCapability: ExtendedDeviceCapability | null = null;
+  private extremeNetworkDetected = false; // 是否检测到极端网络环境
 
   /**
    * 构造函数
@@ -184,10 +119,11 @@ class SmartConcurrencyPlugin implements IPlugin {
     stabilityThreshold?: number;
     priorityConfig?: Partial<PriorityConfig>;
   }) {
+    // 初始化logger
+    this.logger = new Logger('SmartConcurrencyPlugin');
+
     // 初始化采样配置
     this.SAMPLE_INTERVAL = options?.sampleInterval ?? 2000; // 2秒
-    this.SAMPLE_HISTORY_SIZE = 15; // 保留15个采样
-    this.STABLE_READINGS_THRESHOLD = 3; // 3次稳定读数后确认网络稳定
     this.CONCURRENCY_ADJUST_INTERVAL = 5000; // 5秒调整一次并发数
 
     // 初始化并发配置
@@ -207,27 +143,6 @@ class SmartConcurrencyPlugin implements IPlugin {
     this.baseConcurrency = this.concurrencyConfig.base;
     this.currentConcurrency = this.baseConcurrency;
     this.adaptationEnabled = this.concurrencyConfig.adaptationEnabled;
-    this.targetUtilization = options?.targetUtilization ?? 0.85;
-
-    // 初始化网络质量配置
-    const thresholds = {
-      [NetworkQuality.POOR]: 50, // 50 KB/s
-      [NetworkQuality.LOW]: 200, // 200 KB/s
-      [NetworkQuality.MEDIUM]: 500, // 500 KB/s
-      [NetworkQuality.GOOD]: 1000, // 1 MB/s
-      [NetworkQuality.EXCELLENT]: 2000, // 2 MB/s
-      ...options?.networkQualityThresholds,
-    };
-
-    this.networkQualityConfig = {
-      thresholds,
-      stabilityThreshold: options?.stabilityThreshold ?? 3,
-      historySize: 10,
-      latencyWeight: 0.3, // 延迟占权重30%
-      speedWeight: 0.6, // 速度占权重60%
-      jitterWeight: 0.1, // 抖动占权重10%
-      adaptationSpeed: 0.2, // 适应速度，较低的值意味着更渐进的变化
-    };
 
     // 初始化优先级配置
     this.priorityConfig = {
@@ -238,6 +153,16 @@ class SmartConcurrencyPlugin implements IPlugin {
       maxPriority: TaskPriority.CRITICAL,
       ...options?.priorityConfig,
     };
+
+    // 初始化性能分析器
+    this.performanceAnalyzer = new NetworkPerformanceAnalyzer({
+      maxSpeedSamples: 15,
+      maxRttSamples: 10,
+      stableReadingsThreshold: options?.stabilityThreshold ?? 3,
+    });
+
+    // 初始化自适应因子管理器
+    this.adaptiveFactorManager = new AdaptiveFactorManager();
   }
 
   /**
@@ -257,9 +182,7 @@ class SmartConcurrencyPlugin implements IPlugin {
 
     // 如果没有任务调度器，则不进行安装
     if (!this.taskScheduler) {
-      console.warn(
-        'SmartConcurrencyPlugin: TaskScheduler未找到，插件功能将受限'
-      );
+      this.logger.warn('TaskScheduler未找到，插件功能将受限');
       return;
     }
 
@@ -280,6 +203,12 @@ class SmartConcurrencyPlugin implements IPlugin {
 
     // 开始周期性性能分析
     this.startPerformanceAnalysis();
+
+    this.logger.info('SmartConcurrencyPlugin 已安装', {
+      version: this.version,
+      baseConcurrency: this.baseConcurrency,
+      adaptationEnabled: this.adaptationEnabled,
+    });
   }
 
   /**
@@ -298,963 +227,74 @@ class SmartConcurrencyPlugin implements IPlugin {
     // 根据环境确定最大并发数
     this.detectEnvironmentCapabilities();
 
+    // 根据设备性能调整最大并发数
+    this.adjustMaxConcurrencyByDevice();
+
     // 设置初始并发数
     this.setConcurrency(this.currentConcurrency);
   }
 
   /**
-   * 注册事件监听器
+   * 检测环境能力
    */
-  private registerEventListeners(): void {
-    if (!this.eventBus) return;
+  private detectEnvironmentCapabilities(): void {
+    // 使用DeviceCapabilityEvaluator检测设备能力
+    this.extendedDeviceCapability =
+      DeviceCapabilityEvaluator.evaluateDeviceCapabilities(
+        this.performanceAnalyzer.getRTTSamples()
+      );
 
-    // 监听上传开始事件
-    this.eventBus.on('upload:start', () => {
-      this.resetSpeedSamples();
-      this.startSpeedCalculation();
-    });
+    if (this.extendedDeviceCapability) {
+      // 计算初始自适应因子
+      this.calculateInitialAdaptiveFactors();
+    }
+  }
 
-    // 监听上传结束事件
-    this.eventBus.on('upload:complete', () => {
-      this.stopSpeedCalculation();
-      // 记录当前网络质量下的最优并发数
-      this.recordOptimalConcurrency();
-    });
+  /**
+   * 计算初始自适应因子
+   */
+  private calculateInitialAdaptiveFactors(): void {
+    if (!this.extendedDeviceCapability) return;
 
-    // 监听上传错误事件
-    this.eventBus.on('upload:error', () => {
-      this.stopSpeedCalculation();
-    });
-
-    // 监听分片上传成功事件，用于计算上传速度和RTT
-    this.eventBus.on(
-      'chunk:uploaded',
-      (data: { size: number; duration?: number }) => {
-        this.recordTransfer(data.size, true, data.duration);
-
-        if (data.duration) {
-          this.updateRTTSamples(data.duration);
-        }
-      }
+    // 设置设备性能因子
+    const deviceFactor = this.adaptiveFactorManager.calculateDeviceFactor(
+      this.extendedDeviceCapability
     );
+    this.adaptiveFactorManager.setFactor('device', deviceFactor);
 
-    // 监听分片上传失败事件
-    this.eventBus.on(
-      'chunk:error',
-      (data: { size?: number; retryCount: number }) => {
-        // 记录失败的传输（如果有大小信息）
-        if (data.size) {
-          this.recordTransfer(data.size, false);
-        }
-
-        this.handleChunkError();
-      }
+    // 设置网络质量因子
+    const networkFactor = this.adaptiveFactorManager.calculateNetworkFactor(
+      this.currentNetworkQuality
     );
+    this.adaptiveFactorManager.setFactor('network', networkFactor);
 
-    // 监听网络状态变化
-    this.networkDetector?.addQualityCallback((quality: NetworkQuality) => {
-      const previousQuality = this.currentNetworkQuality;
-
-      // 如果网络质量发生变化
-      if (previousQuality !== quality) {
-        this.currentNetworkQuality = quality;
-        this.handleNetworkQualityChange(previousQuality, quality);
-      }
-    });
+    // 设置RTT因子
+    const avgRTT = this.performanceAnalyzer.calculateAvgRTT();
+    const rttFactor = this.adaptiveFactorManager.calculateRttFactor(avgRTT);
+    this.adaptiveFactorManager.setFactor('rtt', rttFactor);
   }
 
   /**
-   * 处理网络质量变化
-   * @param previousQuality 之前的网络质量
-   * @param newQuality 新的网络质量
+   * 根据设备性能调整最大并发数
    */
-  private handleNetworkQualityChange(
-    previousQuality: NetworkQuality,
-    newQuality: NetworkQuality
-  ): void {
-    // 更新网络趋势
-    if (
-      this.qualityToLevel(newQuality) > this.qualityToLevel(previousQuality)
-    ) {
-      this.networkTrend = 'improving';
-    } else if (
-      this.qualityToLevel(newQuality) < this.qualityToLevel(previousQuality)
-    ) {
-      this.networkTrend = 'degrading';
+  private adjustMaxConcurrencyByDevice(): void {
+    if (!this.extendedDeviceCapability) return;
+
+    const { overallPerformanceScore, isMobile } = this.extendedDeviceCapability;
+
+    // 基于设备性能和移动性调整最大并发数
+    if (overallPerformanceScore < 3) {
+      // 低性能设备
+      this.maxConcurrency = Math.min(this.maxConcurrency, 2);
+    } else if (overallPerformanceScore < 5) {
+      // 中低性能设备
+      this.maxConcurrency = Math.min(this.maxConcurrency, 3);
+    } else if (overallPerformanceScore < 7) {
+      // 中等性能设备
+      this.maxConcurrency = Math.min(this.maxConcurrency, isMobile ? 4 : 5);
     } else {
-      this.networkTrend = 'stable';
-    }
-
-    // 通知事件
-    if (this.eventBus) {
-      this.eventBus.emit('network:quality:change', {
-        from: previousQuality,
-        to: newQuality,
-        trend: this.networkTrend,
-      });
-    }
-
-    // 调整并发
-    if (this.adaptationEnabled) {
-      // 如果网络质量有显著变化，立即调整并发数
-      const levelChange = Math.abs(
-        this.qualityToLevel(newQuality) - this.qualityToLevel(previousQuality)
-      );
-
-      if (levelChange >= 2) {
-        // 网络质量变化超过2个等级
-        this.adjustConcurrencyForQuality(newQuality);
-      } else {
-        // 否则，在下一个调整周期调整
-        this.scheduleConcurrencyAdjustment();
-      }
-    }
-  }
-
-  /**
-   * 将网络质量转换为数值级别
-   * @param quality 网络质量
-   * @returns 数值级别
-   */
-  private qualityToLevel(quality: NetworkQuality): number {
-    switch (quality) {
-      case NetworkQuality.OFFLINE:
-        return 0;
-      case NetworkQuality.POOR:
-        return 1;
-      case NetworkQuality.LOW:
-        return 2;
-      case NetworkQuality.MEDIUM:
-        return 3;
-      case NetworkQuality.GOOD:
-        return 4;
-      case NetworkQuality.EXCELLENT:
-        return 5;
-      default:
-        return 3; // UNKNOWN 默认为中等
-    }
-  }
-
-  /**
-   * 注册钩子
-   */
-  private registerHooks(): void {
-    if (!this.core) return;
-
-    const pluginManager = this.core.getPluginManager();
-
-    if (!pluginManager) {
-      console.warn('SmartConcurrencyPlugin: PluginManager未找到，无法注册钩子');
-      return;
-    }
-
-    // 注册分片创建前钩子，用于设置分片优先级
-    pluginManager.registerHook(
-      'beforeChunkUpload',
-      this.beforeChunkUploadHook.bind(this),
-      { plugin: 'SmartConcurrencyPlugin' }
-    );
-
-    // 注册上传策略调整钩子
-    pluginManager.registerHook(
-      'determineUploadStrategy',
-      this.determineUploadStrategyHook.bind(this),
-      { plugin: 'SmartConcurrencyPlugin' }
-    );
-
-    // 注册任务创建前钩子，调整窗口大小
-    pluginManager.registerHook(
-      'beforeTaskCreate',
-      this.beforeTaskCreateHook.bind(this),
-      { plugin: 'SmartConcurrencyPlugin' }
-    );
-  }
-
-  /**
-   * 分片上传前钩子，用于调整分片优先级
-   */
-  private async beforeChunkUploadHook(args: {
-    chunk: { index: number; size: number; total: number };
-    metadata?: TaskMetadata;
-  }): Promise<any> {
-    const { chunk, metadata } = args;
-    if (!chunk) return args;
-
-    // 确定分片优先级
-    let priority = TaskPriority.NORMAL;
-
-    // 首个分片优先级高
-    if (chunk.index === 0) {
-      priority = this.priorityConfig.firstChunk;
-    }
-    // 最后一个分片优先级高
-    else if (chunk.index === chunk.total - 1) {
-      priority = this.priorityConfig.lastChunk;
-    }
-
-    // 如果是元数据分片，优先级最高
-    if (metadata?.isMetadata) {
-      priority = this.priorityConfig.metadataChunk;
-    }
-
-    // 如果是重试分片，提高优先级
-    if (metadata?.retryCount && metadata.retryCount > 0) {
-      // 提高优先级，但不超过最大优先级
-      priority = Math.min(
-        priority + this.priorityConfig.retryIncrement,
-        this.priorityConfig.maxPriority
-      );
-    }
-
-    // 更新元数据中的优先级
-    if (metadata) {
-      metadata.priority = priority;
-    }
-
-    return { ...args, metadata: { ...metadata, priority } };
-  }
-
-  /**
-   * 确定上传策略钩子
-   */
-  private async determineUploadStrategyHook(args: {
-    strategy: UploadStrategy;
-    fileSize: number;
-  }): Promise<any> {
-    const { strategy, fileSize } = args;
-
-    // 只有在启用自适应时才修改策略
-    if (!this.adaptationEnabled) return args;
-
-    // 根据当前网络质量和文件大小调整策略
-    const optimizedStrategy = this.optimizeStrategy(strategy, fileSize);
-
-    return { ...args, strategy: optimizedStrategy };
-  }
-
-  /**
-   * 优化上传策略
-   */
-  private optimizeStrategy(
-    strategy: UploadStrategy,
-    fileSize: number
-  ): UploadStrategy {
-    const optimized = { ...strategy };
-
-    // 根据网络质量调整并发数
-    optimized.concurrency = this.currentConcurrency;
-
-    // 对于大文件，在较差网络下增加重试次数
-    if (
-      fileSize > 100 * 1024 * 1024 && // 100MB
-      (this.currentNetworkQuality === NetworkQuality.POOR ||
-        this.currentNetworkQuality === NetworkQuality.LOW)
-    ) {
-      optimized.retryCount = Math.max(strategy.retryCount, 5);
-      optimized.retryDelay = Math.min(strategy.retryDelay, 1000); // 快速重试
-    }
-
-    // 在网络很差的情况下，减小分片大小以提高成功率
-    if (this.currentNetworkQuality === NetworkQuality.POOR) {
-      const reducedChunkSize = Math.min(strategy.chunkSize, 512 * 1024); // 最大512KB
-      optimized.chunkSize = reducedChunkSize;
-    }
-
-    // 在网络质量好的情况下调整分片大小
-    if (this.currentNetworkQuality === NetworkQuality.GOOD) {
-      const increasedChunkSize = Math.max(strategy.chunkSize, 1 * 1024 * 1024); // 至少1MB
-      optimized.chunkSize = Math.min(increasedChunkSize, 4 * 1024 * 1024); // 最大4MB
-    } else if (this.currentNetworkQuality === NetworkQuality.EXCELLENT) {
-      // 但也不要过大，以防造成其他问题
-      const increasedChunkSize = Math.max(strategy.chunkSize, 2 * 1024 * 1024); // 至少2MB
-      optimized.chunkSize = Math.min(increasedChunkSize, 8 * 1024 * 1024); // 最大8MB
-    }
-
-    // 根据带宽利用率调整分片大小
-    const bandwidthUtilization =
-      this.currentSpeed / (this.peakSpeed || this.currentSpeed);
-
-    if (bandwidthUtilization < 0.3 && this.currentSpeed > 0) {
-      // 带宽利用率过低，可能需要增加分片大小
-      optimized.chunkSize = Math.min(
-        optimized.chunkSize * 1.2,
-        8 * 1024 * 1024
-      );
-    }
-
-    // 根据是否网络稳定调整优先级
-    if (!this.isNetworkStable) {
-      optimized.prioritizeFirstChunk = true; // 不稳定网络下优先完成第一个分片
-    }
-
-    // 调整重试延迟，不稳定网络增加延迟
-    if (!this.isNetworkStable && this.jitterValue > 50) {
-      // 抖动大于50ms
-      optimized.retryDelay = Math.max(strategy.retryDelay, 1000); // 至少1秒延迟
-    }
-
-    return optimized;
-  }
-
-  /**
-   * 开始网络监控
-   */
-  private startNetworkMonitoring(): void {
-    // 初始化网络状态
-    this.detectNetworkCondition();
-
-    // 定期检查网络状态
-    this.networkCheckInterval = setInterval(() => {
-      this.detectNetworkCondition();
-    }, this.SAMPLE_INTERVAL);
-
-    // 定期调整并发数
-    this.concurrencyAdjustInterval = setInterval(() => {
-      if (this.adaptationEnabled) {
-        this.adjustConcurrency();
-      }
-    }, this.CONCURRENCY_ADJUST_INTERVAL);
-  }
-
-  /**
-   * 开始速度计算
-   */
-  private startSpeedCalculation(): void {
-    this.samplingStartTime = Date.now();
-    this.totalBytesTransferred = 0;
-
-    // 定期计算速度
-    this.speedCalculationInterval = setInterval(() => {
-      this.calculateCurrentSpeed();
-    }, this.SAMPLE_INTERVAL);
-  }
-
-  /**
-   * 开始性能分析
-   */
-  private startPerformanceAnalysis(): void {
-    // 每30秒分析一次性能数据
-    this.performanceAnalysisInterval = setInterval(() => {
-      this.analyzePerformanceData();
-    }, 30000); // 30秒
-  }
-
-  /**
-   * 分析性能数据
-   */
-  private analyzePerformanceData(): void {
-    // 分析历史性能数据，找出每个网络质量下的最佳并发数
-    for (const [quality, dataMap] of this.performanceMatrix.entries()) {
-      let bestConcurrency = 3; // 默认值
-      let bestThroughput = 0;
-
-      for (const [concurrency, data] of dataMap.entries()) {
-        // 只考虑有足够样本的数据
-        if (data.total < 5) continue;
-
-        const successRate = data.success / data.total;
-        const throughput = data.avgSpeed * successRate;
-
-        // 找出吞吐量最高的并发数
-        if (throughput > bestThroughput) {
-          bestThroughput = throughput;
-          bestConcurrency = concurrency;
-        }
-      }
-
-      // 更新最佳并发数映射
-      this.optimalConcurrencyMap.set(quality, bestConcurrency);
-    }
-  }
-
-  /**
-   * 记录当前网络质量下的最优并发数
-   */
-  private recordOptimalConcurrency(): void {
-    if (
-      this.currentNetworkQuality === NetworkQuality.UNKNOWN ||
-      this.currentNetworkQuality === NetworkQuality.OFFLINE
-    ) {
-      return;
-    }
-
-    // 获取当前网络质量对应的性能数据映射
-    let qualityMap = this.performanceMatrix.get(this.currentNetworkQuality);
-    if (!qualityMap) {
-      qualityMap = new Map();
-      this.performanceMatrix.set(this.currentNetworkQuality, qualityMap);
-    }
-
-    // 获取当前并发数对应的性能数据
-    let concurrencyData = qualityMap.get(this.currentConcurrency);
-    if (!concurrencyData) {
-      concurrencyData = { success: 0, total: 0, avgSpeed: 0 };
-      qualityMap.set(this.currentConcurrency, concurrencyData);
-    }
-
-    // 更新性能数据
-    const successCount = this.taskScheduler?.getCompletedTaskCount() || 0;
-    const totalCount = this.taskScheduler?.getTotalTaskCount() || 0;
-
-    if (totalCount > 0) {
-      const newSuccess = successCount - concurrencyData.total;
-      const newTotal = totalCount - concurrencyData.total;
-
-      if (newTotal > 0) {
-        // 更新成功数和总数
-        concurrencyData.success += newSuccess;
-        concurrencyData.total += newTotal;
-
-        // 更新平均速度（指数移动平均）
-        if (concurrencyData.avgSpeed === 0) {
-          concurrencyData.avgSpeed = this.avgSpeed;
-        } else {
-          concurrencyData.avgSpeed =
-            0.7 * concurrencyData.avgSpeed + 0.3 * this.avgSpeed;
-        }
-      }
-    }
-  }
-
-  /**
-   * 停止速度计算
-   */
-  private stopSpeedCalculation(): void {
-    if (this.speedCalculationInterval) {
-      clearInterval(this.speedCalculationInterval);
-      this.speedCalculationInterval = null;
-    }
-  }
-
-  /**
-   * 重置速度采样
-   */
-  private resetSpeedSamples(): void {
-    this.speedSamples = [];
-    this.lastSampleTime = Date.now();
-    this.totalBytesTransferred = 0;
-    this.currentSpeed = 0;
-    this.avgSpeed = 0;
-    this.peakSpeed = 0;
-    this.rttSamples = [];
-    this.jitterValue = 0;
-  }
-
-  /**
-   * 记录数据传输
-   * @param bytes 传输字节数
-   * @param success 是否成功
-   * @param duration 传输持续时间(可选)
-   */
-  private recordTransfer(
-    bytes: number,
-    success: boolean,
-    duration?: number
-  ): void {
-    const now = Date.now();
-    this.totalBytesTransferred += bytes;
-
-    // 只有时间间隔大于指定值时才记录采样
-    if (now - this.lastSampleTime >= this.SAMPLE_INTERVAL) {
-      const sampleDuration = now - this.lastSampleTime;
-      const speed = (bytes / sampleDuration) * 1000; // bytes/s
-
-      // 添加采样
-      this.speedSamples.push({
-        timestamp: now,
-        bytesTransferred: bytes,
-        duration: sampleDuration,
-        speed,
-        success,
-        latency: duration,
-      });
-
-      // 限制历史记录大小
-      if (this.speedSamples.length > this.SAMPLE_HISTORY_SIZE) {
-        this.speedSamples.shift();
-      }
-
-      this.lastSampleTime = now;
-    }
-  }
-
-  /**
-   * 计算当前速度
-   */
-  private calculateCurrentSpeed(): void {
-    const now = Date.now();
-    const elapsedTime = now - this.samplingStartTime;
-
-    if (elapsedTime <= 0 || this.totalBytesTransferred <= 0) {
-      return;
-    }
-
-    // 计算平均速度 (bytes/s)
-    this.avgSpeed = (this.totalBytesTransferred / elapsedTime) * 1000;
-
-    // 计算当前速度 (使用最近的几个采样)
-    if (this.speedSamples.length > 0) {
-      const recentSamples = this.speedSamples.slice(-3); // 最近3个采样
-      let totalSpeed = 0;
-      let validSamples = 0;
-
-      recentSamples.forEach(sample => {
-        if (sample.success) {
-          totalSpeed += sample.speed;
-          validSamples++;
-        }
-      });
-
-      if (validSamples > 0) {
-        this.currentSpeed = totalSpeed / validSamples;
-      } else {
-        // 如果没有成功的样本，保持当前速度不变
-        this.currentSpeed = this.currentSpeed * 0.9; // 略微衰减
-      }
-
-      // 更新峰值速度
-      if (this.currentSpeed > this.peakSpeed) {
-        this.peakSpeed = this.currentSpeed;
-      }
-
-      // 根据当前速度评估网络质量
-      this.evaluateNetworkQuality();
-
-      // 发出速度更新事件
-      this.emitSpeedUpdate();
-    }
-  }
-
-  /**
-   * 发出速度更新事件
-   */
-  private emitSpeedUpdate(): void {
-    if (!this.eventBus) return;
-
-    this.eventBus.emit('network:speed', {
-      current: this.currentSpeed,
-      average: this.avgSpeed,
-      peak: this.peakSpeed,
-      quality: this.currentNetworkQuality,
-      samples: this.speedSamples.length,
-      jitter: this.jitterValue,
-      windowSize: this.windowSize,
-      stable: this.isNetworkStable,
-    });
-  }
-
-  /**
-   * 检测网络状况
-   */
-  private detectNetworkCondition(): void {
-    // 检测网络连接状态
-    const isOnline =
-      typeof navigator !== 'undefined' && navigator.onLine !== undefined
-        ? navigator.onLine
-        : true;
-
-    if (!isOnline) {
-      this.currentNetworkQuality = NetworkQuality.OFFLINE;
-      this.handleNetworkChange();
-      return;
-    }
-
-    // 使用NetworkDetector获取网络状态
-    if (this.networkDetector) {
-      this.currentNetworkQuality = this.networkDetector.getNetworkQuality();
-      this.networkCondition = this.networkDetector.getNetworkCondition();
-    }
-    // 兼容旧版检测逻辑
-    else if (typeof navigator !== 'undefined' && 'connection' in navigator) {
-      const connection = (navigator as any).connection;
-
-      if (connection) {
-        this.networkCondition = {
-          type: connection.type || 'unknown',
-          effectiveType: connection.effectiveType || '4g',
-          downlink: connection.downlink || 0,
-          rtt: connection.rtt || 0,
-          saveData: connection.saveData || false,
-        };
-
-        // 根据effectiveType估计网络质量
-        switch (this.networkCondition.effectiveType) {
-          case 'slow-2g':
-            this.currentNetworkQuality = NetworkQuality.POOR;
-            break;
-          case '2g':
-            this.currentNetworkQuality = NetworkQuality.LOW;
-            break;
-          case '3g':
-            this.currentNetworkQuality = NetworkQuality.MEDIUM;
-            break;
-          case '4g':
-            this.currentNetworkQuality = NetworkQuality.GOOD;
-            break;
-          default:
-            // 使用速度评估
-            this.evaluateNetworkQuality();
-        }
-      } else {
-        // 使用速度评估
-        this.evaluateNetworkQuality();
-      }
-    } else {
-      // 没有API，只能通过速度评估
-      this.evaluateNetworkQuality();
-    }
-
-    this.handleNetworkChange();
-  }
-
-  /**
-   * 根据测量的速度评估网络质量
-   */
-  private evaluateNetworkQuality(): void {
-    // 如果网络检测器可用，优先使用
-    if (this.networkDetector) {
-      this.currentNetworkQuality = this.networkDetector.getNetworkQuality();
-      return;
-    }
-
-    const kbps = this.currentSpeed / 1024; // 转换为KB/s
-
-    // 如果没有速度数据或没有阈值配置，保持当前状态
-    if (kbps <= 0 || !this.networkQualityConfig.thresholds) {
-      return;
-    }
-
-    // 根据阈值配置确定网络质量
-    let newQuality: NetworkQuality;
-
-    if (kbps < this.networkQualityConfig.thresholds[NetworkQuality.POOR]!) {
-      newQuality = NetworkQuality.POOR;
-    } else if (
-      kbps < this.networkQualityConfig.thresholds[NetworkQuality.LOW]!
-    ) {
-      newQuality = NetworkQuality.LOW;
-    } else if (
-      kbps < this.networkQualityConfig.thresholds[NetworkQuality.MEDIUM]!
-    ) {
-      newQuality = NetworkQuality.MEDIUM;
-    } else if (
-      kbps < this.networkQualityConfig.thresholds[NetworkQuality.GOOD]!
-    ) {
-      newQuality = NetworkQuality.GOOD;
-    } else {
-      newQuality = NetworkQuality.EXCELLENT;
-    }
-
-    // 检测网络稳定性
-    if (newQuality === this.currentNetworkQuality) {
-      this.consecutiveStableReadings++;
-      if (this.consecutiveStableReadings >= this.STABLE_READINGS_THRESHOLD) {
-        this.isNetworkStable = true;
-      }
-    } else {
-      this.consecutiveStableReadings = 0;
-      this.isNetworkStable = false;
-    }
-
-    // 更新当前网络质量
-    this.currentNetworkQuality = newQuality;
-  }
-
-  /**
-   * 处理网络变化
-   */
-  private handleNetworkChange(): void {
-    if (!this.eventBus) return;
-
-    // 发出网络状态变化事件
-    this.eventBus.emit('network:quality', {
-      quality: this.currentNetworkQuality,
-      condition: this.networkCondition,
-      stable: this.isNetworkStable,
-      trend: this.networkTrend,
-      jitter: this.jitterValue,
-      rttAvg: this.calculateAvgRTT(),
-    });
-
-    // 如果网络离线，暂停任务调度器
-    if (this.currentNetworkQuality === NetworkQuality.OFFLINE) {
-      if (this.taskScheduler && !this.taskScheduler.isPaused()) {
-        this.taskScheduler.pause();
-        this.eventBus.emit('network:offline', {
-          message: '网络连接已断开，上传已暂停',
-        });
-      }
-    }
-    // 如果网络恢复在线，恢复任务调度器
-    else if (this.taskScheduler && this.taskScheduler.isPaused()) {
-      this.taskScheduler.resume();
-      this.eventBus.emit('network:online', {
-        message: '网络连接已恢复，上传继续',
-      });
-    }
-
-    // 根据网络变化调整并发
-    if (this.adaptationEnabled) {
-      this.scheduleConcurrencyAdjustment();
-    }
-  }
-
-  /**
-   * 处理分片错误
-   */
-  private handleChunkError(): void {
-    // 记录错误发生时的网络质量和并发数
-    const quality = this.currentNetworkQuality;
-    const concurrency = this.currentConcurrency;
-
-    // 更新失败率统计
-    if (!this.failureRates.has(concurrency)) {
-      this.failureRates.set(concurrency, 0);
-    }
-
-    const newFailureRate = this.failureRates.get(concurrency)! + 0.05; // 增加5%的失败率
-    this.failureRates.set(concurrency, Math.min(newFailureRate, 1.0));
-
-    // 连续错误可能表示网络问题，降低并发数
-    if (this.adaptationEnabled) {
-      const newConcurrency = Math.max(
-        this.minConcurrency,
-        Math.floor(
-          this.currentConcurrency * this.concurrencyConfig.errorReduceFactor
-        )
-      );
-
-      if (newConcurrency !== this.currentConcurrency) {
-        this.setConcurrency(newConcurrency);
-
-        // 通知事件
-        if (this.eventBus) {
-          this.eventBus.emit('concurrency:reduced', {
-            reason: 'chunk_error',
-            from: this.currentConcurrency,
-            to: newConcurrency,
-            quality,
-            failureRate: this.failureRates.get(concurrency),
-          });
-        }
-      }
-
-      // 减小发送窗口以应对错误
-      if (this.windowSize > this.minWindowSize) {
-        this.windowSize = Math.max(
-          this.minWindowSize,
-          Math.floor(this.windowSize * 0.9)
-        );
-
-        // 重置拥塞窗口
-        this.congestionWindow = this.windowSize;
-      }
-    }
-  }
-
-  /**
-   * 安排并发调整
-   */
-  private scheduleConcurrencyAdjustment(): void {
-    // 如果网络不稳定或者刚刚发生变化，延迟调整
-    const now = Date.now();
-    if (!this.isNetworkStable || now - this.lastNetworkEvent < 5000) {
-      // 记录网络事件时间
-      this.lastNetworkEvent = now;
-
-      // 延迟调整，等待网络稳定
-      setTimeout(() => {
-        if (this.adaptationEnabled) {
-          this.adjustConcurrency();
-        }
-      }, this.CONCURRENCY_ADJUST_INTERVAL);
-    } else {
-      // 网络稳定，直接调整
-      this.adjustConcurrency();
-    }
-  }
-
-  /**
-   * 根据网络状况调整并发数
-   */
-  private adjustConcurrency(): void {
-    if (!this.taskScheduler || !this.adaptationEnabled) return;
-
-    let newConcurrency: number;
-
-    // 首先检查是否有针对当前网络质量的最佳并发数
-    if (this.optimalConcurrencyMap.has(this.currentNetworkQuality)) {
-      newConcurrency = this.optimalConcurrencyMap.get(
-        this.currentNetworkQuality
-      )!;
-    } else {
-      // 根据网络质量确定基础并发数
-      switch (this.currentNetworkQuality) {
-        case NetworkQuality.OFFLINE:
-          newConcurrency = 0; // 离线时不上传
-          break;
-        case NetworkQuality.POOR:
-          newConcurrency = this.minConcurrency; // 网络很差时使用最小并发
-          break;
-        case NetworkQuality.LOW:
-          newConcurrency = Math.max(
-            this.minConcurrency,
-            Math.floor(this.baseConcurrency * 0.5)
-          );
-          break;
-        case NetworkQuality.MEDIUM:
-          newConcurrency = this.baseConcurrency; // 中等网络使用基础并发
-          break;
-        case NetworkQuality.GOOD:
-          newConcurrency = Math.min(
-            this.maxConcurrency,
-            Math.floor(this.baseConcurrency * 1.5)
-          );
-          break;
-        case NetworkQuality.EXCELLENT:
-          newConcurrency = this.maxConcurrency; // 极好网络使用最大并发
-          break;
-        default:
-          newConcurrency = this.baseConcurrency; // 默认使用基础并发
-      }
-    }
-
-    // 调整因素：网络稳定性
-    if (!this.isNetworkStable && newConcurrency > this.minConcurrency) {
-      newConcurrency = Math.max(
-        this.minConcurrency,
-        Math.floor(newConcurrency * 0.8)
-      );
-    }
-
-    // 调整因素：抖动和延迟
-    if (this.jitterValue > 0) {
-      const avgRtt = this.calculateAvgRTT();
-      const jitterRatio = this.jitterValue / (avgRtt || 100);
-
-      if (jitterRatio > 0.5) {
-        // 抖动超过50%
-        newConcurrency = Math.max(
-          this.minConcurrency,
-          Math.floor(newConcurrency * 0.9)
-        );
-      }
-    }
-
-    // 调整因素：失败率
-    const failureRate = this.failureRates.get(this.currentConcurrency) || 0;
-    if (failureRate > 0.2) {
-      // 失败率超过20%
-      newConcurrency = Math.max(
-        this.minConcurrency,
-        Math.floor(newConcurrency * 0.9)
-      );
-    }
-
-    // 平滑并发变化，避免大幅度波动
-    if (newConcurrency > this.currentConcurrency) {
-      // 增加并发，缓慢增加
-      newConcurrency = Math.min(
-        newConcurrency,
-        Math.ceil(
-          this.currentConcurrency * this.concurrencyConfig.recoveryFactor
-        )
-      );
-    } else if (newConcurrency < this.currentConcurrency) {
-      // 降低并发，缓慢降低
-      newConcurrency = Math.max(
-        newConcurrency,
-        Math.floor(this.currentConcurrency * 0.8)
-      );
-    }
-
-    // 确保不超出限制
-    newConcurrency = Math.max(
-      this.minConcurrency,
-      Math.min(this.maxConcurrency, newConcurrency)
-    );
-
-    // 如果当前并发数不同，更新它
-    if (newConcurrency !== this.currentConcurrency) {
-      this.setConcurrency(newConcurrency);
-
-      // 通知事件
-      if (this.eventBus) {
-        this.eventBus.emit('concurrency:adjusted', {
-          reason: 'network_quality',
-          quality: this.currentNetworkQuality,
-          from: this.currentConcurrency,
-          to: newConcurrency,
-          stable: this.isNetworkStable,
-          jitter: this.jitterValue,
-          failureRate,
-        });
-      }
-    }
-  }
-
-  /**
-   * 根据特定网络质量调整并发数
-   */
-  private adjustConcurrencyForQuality(quality: NetworkQuality): void {
-    if (!this.taskScheduler || !this.adaptationEnabled) return;
-
-    let newConcurrency: number;
-
-    // 首先检查是否有针对此质量的最佳并发数
-    if (this.optimalConcurrencyMap.has(quality)) {
-      newConcurrency = this.optimalConcurrencyMap.get(quality)!;
-    } else {
-      // 根据质量等级设置并发
-      switch (quality) {
-        case NetworkQuality.OFFLINE:
-          newConcurrency = 0;
-          break;
-        case NetworkQuality.POOR:
-          newConcurrency = this.minConcurrency;
-          break;
-        case NetworkQuality.LOW:
-          newConcurrency = Math.max(
-            this.minConcurrency,
-            Math.round(this.baseConcurrency * 0.5)
-          );
-          break;
-        case NetworkQuality.MEDIUM:
-          newConcurrency = this.baseConcurrency;
-          break;
-        case NetworkQuality.GOOD:
-          newConcurrency = Math.min(
-            this.maxConcurrency,
-            Math.round(this.baseConcurrency * 1.25)
-          );
-          break;
-        case NetworkQuality.EXCELLENT:
-          newConcurrency = this.maxConcurrency;
-          break;
-        default:
-          newConcurrency = this.baseConcurrency;
-      }
-    }
-
-    // 限定范围
-    newConcurrency = Math.max(
-      this.minConcurrency,
-      Math.min(this.maxConcurrency, newConcurrency)
-    );
-
-    // 设置并发数
-    if (newConcurrency !== this.currentConcurrency) {
-      this.setConcurrency(newConcurrency);
-
-      // 通知事件
-      if (this.eventBus) {
-        this.eventBus.emit('concurrency:adjusted', {
-          reason: 'quality_change',
-          quality,
-          from: this.currentConcurrency,
-          to: newConcurrency,
-        });
-      }
+      // 高性能设备
+      this.maxConcurrency = Math.min(this.maxConcurrency, isMobile ? 5 : 8);
     }
   }
 
@@ -1267,16 +307,115 @@ class SmartConcurrencyPlugin implements IPlugin {
     this.currentConcurrency = concurrency;
     this.taskScheduler.setConcurrency(concurrency);
 
-    // 记录并发历史
-    this.concurrencyHistory.push({
-      concurrency,
-      timestamp: Date.now(),
-      quality: this.currentNetworkQuality,
+    this.logger.debug('设置并发数', { concurrency });
+  }
+
+  /**
+   * 注册事件监听
+   */
+  private registerEventListeners(): void {
+    if (!this.eventBus) return;
+
+    // 监听网络质量变化
+    this.eventBus.on(
+      'network:qualityChange',
+      this.handleNetworkQualityChange.bind(this)
+    );
+
+    // 监听网络在线/离线状态
+    this.eventBus.on('network:online', () => {
+      this.logger.info('网络已连接，调整并发策略');
+      this.scheduleConcurrencyAdjustment();
     });
 
-    // 保持历史记录在合理大小
-    if (this.concurrencyHistory.length > 50) {
-      this.concurrencyHistory.shift();
+    this.eventBus.on('network:offline', () => {
+      this.logger.warn('网络已断开，降低并发至最小值');
+      this.setConcurrency(this.minConcurrency);
+    });
+
+    // 监听分片上传开始
+    this.eventBus.on('chunkUploadStart', data => {
+      this.handleChunkStart(data);
+    });
+
+    // 监听分片上传成功
+    this.eventBus.on('chunkSuccess', data => {
+      this.handleChunkSuccess(data);
+    });
+
+    // 监听分片上传错误
+    this.eventBus.on('chunkError', data => {
+      this.handleChunkError(data);
+    });
+
+    // 监听上传进度
+    this.eventBus.on('progress', data => {
+      if (data.progress !== undefined) {
+        this.currentProgress = data.progress / 100;
+        this.checkProgressStageAndAdjust();
+      }
+    });
+
+    // 监听文件上传开始
+    this.eventBus.on('uploadStart', data => {
+      if (data.fileSize) {
+        this.fileSize = data.fileSize;
+        this.adjustConcurrencyByFileSize();
+      }
+    });
+  }
+
+  /**
+   * 注册上传流程钩子
+   */
+  private registerHooks(): void {
+    if (!this.core) return;
+
+    // 注册分片上传前的钩子
+    this.core.hook('beforeChunkUpload', this.beforeChunkUploadHook.bind(this));
+
+    // 注册上传策略确定前的钩子
+    this.core.hook(
+      'determineUploadStrategy',
+      this.determineUploadStrategyHook.bind(this)
+    );
+
+    // 注册任务创建前的钩子
+    this.core.hook('beforeTaskCreate', this.beforeTaskCreateHook.bind(this));
+  }
+
+  /**
+   * 开始网络监控
+   */
+  private startNetworkMonitoring(): void {
+    // 清除旧的定时器
+    if (this.networkCheckInterval) {
+      clearInterval(this.networkCheckInterval);
+    }
+
+    // 创建新的定时器
+    this.networkCheckInterval = setInterval(() => {
+      this.detectNetworkCondition();
+    }, this.SAMPLE_INTERVAL);
+  }
+
+  /**
+   * 检测网络条件
+   */
+  private detectNetworkCondition(): void {
+    if (!this.networkDetector) return;
+
+    // 获取当前网络状态
+    const quality = this.networkDetector.getCurrentNetworkQuality();
+
+    // 更新网络质量
+    if (this.currentNetworkQuality !== quality) {
+      const previousQuality = this.currentNetworkQuality;
+      this.currentNetworkQuality = quality;
+      this.handleNetworkQualityChange({
+        quality: this.currentNetworkQuality,
+        previousQuality,
+      });
     }
   }
 
@@ -1284,193 +423,321 @@ class SmartConcurrencyPlugin implements IPlugin {
    * 配置调度器使用优先级队列
    */
   private configureSchedulerPriorityQueue(): void {
-    if (!this.taskScheduler) return;
+    if (!this.taskScheduler || !this.taskScheduler.usePriorityQueue) return;
 
-    // 更新任务调度器配置，启用优先级队列
-    this.taskScheduler.updateConfig({
-      priorityQueue: true,
-      networkOptimization: true,
-    });
+    // 配置调度器使用优先级队列
+    this.taskScheduler.usePriorityQueue(true);
   }
 
   /**
-   * 检测环境能力，调整最大并发数和窗口限制
+   * 启动周期性性能分析
    */
-  private detectEnvironmentCapabilities(): void {
-    // 浏览器环境下检测设备内存和处理能力
-    if (typeof navigator !== 'undefined') {
-      // 检测设备内存
-      if ('deviceMemory' in navigator) {
-        const memory = (navigator as any).deviceMemory as number;
+  private startPerformanceAnalysis(): void {
+    // 清除旧的定时器
+    if (this.performanceAnalysisInterval) {
+      clearInterval(this.performanceAnalysisInterval);
+    }
 
-        // 记录设备能力信息
-        this.deviceCapabilities = {
-          memory: memory <= 2 ? 'low' : memory <= 6 ? 'normal' : 'high',
-          processor: 'normal', // 默认值
-          network: 'normal', // 默认值
-          storage: 'normal', // 默认值
-          battery: 'normal', // 默认值
-        };
+    // 创建新的定时器
+    this.performanceAnalysisInterval = setInterval(() => {
+      this.analyzePerformanceData();
+    }, this.CONCURRENCY_ADJUST_INTERVAL * 2);
+  }
 
-        // 根据设备内存调整最大并发数
-        if (memory <= 2) {
-          // 低内存设备
-          this.maxConcurrency = 3;
-          this.maxWindowSize = 5;
-        } else if (memory <= 4) {
-          // 中等内存设备
-          this.maxConcurrency = 4;
-          this.maxWindowSize = 7;
-        } else if (memory <= 8) {
-          // 高内存设备
-          this.maxConcurrency = 5;
-          this.maxWindowSize = 8;
-        } else {
-          // 超高内存设备
-          this.maxConcurrency = 6;
-          this.maxWindowSize = 10;
-        }
-      }
+  /**
+   * 分析性能数据
+   */
+  private analyzePerformanceData(): void {
+    // 分析抖动和延迟
+    this.extremeNetworkDetected =
+      this.performanceAnalyzer.detectExtremeNetworkConditions();
 
-      // 检测硬件并发数（CPU核心数）
-      if ('hardwareConcurrency' in navigator) {
-        const cores = navigator.hardwareConcurrency;
-
-        // 更新设备处理器能力评估
-        if (this.deviceCapabilities) {
-          this.deviceCapabilities.processor =
-            cores <= 2 ? 'low' : cores <= 6 ? 'normal' : 'high';
-        }
-
-        // 考虑CPU核心数，但避免设置过高的并发
-        if (cores <= 2) {
-          this.maxConcurrency = Math.min(this.maxConcurrency, 3);
-          this.windowSize = Math.min(this.windowSize, 4);
-          this.maxWindowSize = Math.min(this.maxWindowSize, 5);
-        } else if (cores <= 4) {
-          this.maxConcurrency = Math.min(this.maxConcurrency, 4);
-        }
-      }
-
-      // 检测电池状态（如果可用）
-      if ('getBattery' in navigator) {
-        (navigator as any)
-          .getBattery()
-          .then((battery: any) => {
-            const isCharging = battery.charging;
-            const level = battery.level;
-
-            // 更新设备电池评估
-            if (this.deviceCapabilities) {
-              this.deviceCapabilities.battery = isCharging
-                ? 'high'
-                : level < 0.3
-                  ? 'low'
-                  : 'normal';
-            }
-
-            // 如果电量低且未充电，减少资源使用
-            if (!isCharging && level < 0.3) {
-              this.maxConcurrency = Math.min(this.maxConcurrency, 3);
-              this.maxWindowSize = Math.min(this.maxWindowSize, 5);
-              this.targetUtilization = 0.7; // 降低目标带宽利用率
-            }
-          })
-          .catch(() => {
-            // 忽略错误，使用默认值
-          });
-      }
+    // 如果应该进行调整，安排一次并发调整
+    if (this.adaptationEnabled) {
+      this.scheduleConcurrencyAdjustment();
     }
   }
 
   /**
-   * 公开方法：手动设置基础并发数
-   * @param concurrency 并发数
+   * 安排并发调整
    */
-  public setBaseConcurrency(concurrency: number): void {
-    this.baseConcurrency = Math.max(
+  private scheduleConcurrencyAdjustment(): void {
+    // 延迟调整，等待网络稳定
+    setTimeout(() => {
+      if (this.adaptationEnabled) {
+        this.adjustConcurrency();
+      }
+    }, 500); // 短延迟，避免频繁调整
+  }
+
+  /**
+   * 调整并发数
+   */
+  private adjustConcurrency(): void {
+    // 保留原始并发数用于比较
+    const originalConcurrency = this.currentConcurrency;
+
+    // 检查是否是极端网络条件
+    if (this.extremeNetworkDetected) {
+      // 极端网络条件下的保守策略
+      this.adjustConcurrencyForExtremeNetwork();
+      return;
+    }
+
+    // 根据文件大小确定基础并发数
+    let newConcurrency = this.getFileSizeBasedConcurrency();
+
+    // 根据上传进度调整并发因子
+    const progressFactor = this.getProgressBasedFactor();
+    newConcurrency = Math.round(newConcurrency * progressFactor);
+
+    // 应用所有自适应因子
+    newConcurrency = this.applyAdaptiveFactors(newConcurrency);
+
+    // 确保不超出限制
+    newConcurrency = Math.max(
       this.minConcurrency,
-      Math.min(this.maxConcurrency, concurrency)
+      Math.min(this.maxConcurrency, newConcurrency)
     );
 
-    // 如果适应性调整已禁用，直接设置当前并发数
-    if (!this.adaptationEnabled) {
-      this.setConcurrency(this.baseConcurrency);
-    } else {
-      // 触发一次并发调整
-      this.adjustConcurrency();
+    // 如果当前并发数不同，更新它
+    if (newConcurrency !== originalConcurrency) {
+      this.setConcurrency(newConcurrency);
+
+      // 通知事件
+      if (this.eventBus) {
+        this.eventBus.emit('concurrency:adjusted', {
+          reason: 'adaptive_algorithm',
+          quality: this.currentNetworkQuality,
+          from: originalConcurrency,
+          to: newConcurrency,
+          stable: this.performanceAnalyzer.isNetworkStable(),
+          extremeNetwork: this.extremeNetworkDetected,
+        });
+      }
     }
   }
 
   /**
-   * 公开方法：启用/禁用自适应调整
-   * @param enabled 是否启用
+   * 处理网络质量变化
    */
-  public setAdaptationEnabled(enabled: boolean): void {
-    this.adaptationEnabled = enabled;
+  private handleNetworkQualityChange(data: any): void {
+    // 更新网络因子
+    const networkFactor = this.adaptiveFactorManager.calculateNetworkFactor(
+      this.currentNetworkQuality
+    );
+    this.adaptiveFactorManager.setFactor('network', networkFactor);
 
-    // 如果禁用了自适应调整，恢复到基础并发数
-    if (!enabled) {
-      this.setConcurrency(this.baseConcurrency);
+    // 日志记录网络质量变化
+    this.logger.info('网络质量变化', {
+      from: data.previousQuality,
+      to: data.quality,
+    });
+
+    // 触发并发数调整
+    this.scheduleConcurrencyAdjustment();
+
+    // 更新优化的上传策略
+    this.updateOptimalStrategy();
+  }
+
+  /**
+   * 处理分片开始上传
+   */
+  private handleChunkStart(data: any): void {
+    // 记录开始时间，用于后续计算RTT
+    this.performanceAnalyzer.recordChunkStart(data);
+  }
+
+  /**
+   * 处理分片上传成功
+   */
+  private handleChunkSuccess(data: any): void {
+    // 记录成功上传的数据
+    this.performanceAnalyzer.recordChunkSuccess(data);
+
+    // 获取RTT数据并更新
+    const uploadTime =
+      data.uploadTime || this.performanceAnalyzer.getChunkUploadTime(data);
+    if (uploadTime && data.size) {
+      const speedSample = {
+        timestamp: Date.now(),
+        bytesTransferred: data.size,
+        duration: uploadTime,
+        speed: (data.size / uploadTime) * 1000, // bytes/s
+        success: true,
+        latency: uploadTime,
+      };
+
+      this.performanceAnalyzer.addSpeedSample(speedSample);
     }
   }
 
   /**
-   * 公开方法：获取当前网络质量
-   * @returns 当前网络质量
+   * 处理分片上传错误
    */
-  public getCurrentNetworkQuality(): NetworkQuality {
-    return this.currentNetworkQuality;
+  private handleChunkError(data: any): void {
+    // 记录失败上传的数据
+    this.performanceAnalyzer.recordChunkError(data);
+
+    if (data.size) {
+      const speedSample = {
+        timestamp: Date.now(),
+        bytesTransferred: data.size,
+        duration: 0,
+        speed: 0,
+        success: false,
+      };
+
+      this.performanceAnalyzer.addSpeedSample(speedSample);
+    }
+
+    // 收集错误信息
+    const errorType = data.error?.type || 'UNKNOWN';
+    const isNetworkError =
+      errorType.includes('NETWORK') ||
+      errorType.includes('TIMEOUT') ||
+      errorType.includes('CONNECTION');
+
+    // 网络相关错误可能需要调整并发
+    if (isNetworkError && this.adaptationEnabled) {
+      this.scheduleConcurrencyAdjustment();
+    }
   }
 
   /**
-   * 公开方法：获取当前上传速度信息
-   * @returns 速度信息
+   * 分片上传前的钩子
    */
-  public getSpeedInfo(): {
-    current: number;
-    average: number;
-    peak: number;
-    quality: NetworkQuality;
-    jitter?: number;
-    stable: boolean;
-  } {
+  private async beforeChunkUploadHook(args: {
+    chunk: { index: number; size: number; total: number };
+    metadata?: TaskMetadata;
+  }): Promise<any> {
+    const { chunk, metadata } = args;
+
+    // 检查是否应该调整分片的优先级
+    let priority = TaskPriority.NORMAL;
+
+    // 如果是第一个分片，给予高优先级
+    if (chunk.index === 0) {
+      priority = this.priorityConfig.firstChunk;
+    }
+    // 如果是最后一个分片，给予高优先级
+    else if (chunk.index === chunk.total - 1) {
+      priority = this.priorityConfig.lastChunk;
+    }
+    // 如果是元数据分片，给予最高优先级
+    else if (metadata?.isMetadata) {
+      priority = this.priorityConfig.metadataChunk;
+    }
+    // 如果是重试分片，提高优先级
+    else if (metadata?.retryCount && metadata.retryCount > 0) {
+      // 根据重试次数提高优先级，但不超过最大优先级
+      priority = Math.min(
+        TaskPriority.NORMAL +
+          metadata.retryCount * this.priorityConfig.retryIncrement,
+        this.priorityConfig.maxPriority
+      );
+    }
+
+    // 返回修改后的参数
     return {
-      current: this.currentSpeed,
-      average: this.avgSpeed,
-      peak: this.peakSpeed,
-      quality: this.currentNetworkQuality,
-      jitter: this.jitterValue,
-      stable: this.isNetworkStable,
+      ...args,
+      metadata: {
+        ...metadata,
+        priority,
+      },
     };
   }
 
   /**
-   * 公开方法：获取当前设备能力评估
+   * 上传策略确定前的钩子
    */
-  public getDeviceCapabilities(): DeviceCapability | null {
-    return this.deviceCapabilities;
+  private async determineUploadStrategyHook(args: {
+    strategy: UploadStrategy;
+    fileSize: number;
+  }): Promise<any> {
+    const { strategy, fileSize } = args;
+
+    // 优化上传策略
+    const optimizedStrategy = this.optimizeStrategy(strategy, fileSize);
+
+    return {
+      ...args,
+      strategy: optimizedStrategy,
+    };
   }
 
   /**
-   * 公开方法：获取当前窗口大小
+   * 任务创建前的钩子
    */
-  public getWindowSize(): number {
-    return this.windowSize;
+  private async beforeTaskCreateHook(args: {
+    task: any;
+    metadata?: TaskMetadata;
+  }): Promise<any> {
+    const { task, metadata } = args;
+
+    // 如果没有设置优先级，使用默认优先级
+    if (!metadata?.priority) {
+      return {
+        ...args,
+        metadata: {
+          ...metadata,
+          priority: TaskPriority.NORMAL,
+        },
+      };
+    }
+
+    return args;
   }
 
   /**
-   * 公开方法：手动触发网络检测
+   * 根据文件大小调整并发数
    */
-  public forceNetworkDetection(): void {
-    this.detectNetworkCondition();
+  private adjustConcurrencyByFileSize(): void {
+    // 根据文件大小确定基础并发数
+    const newConcurrency = this.getFileSizeBasedConcurrency();
+
+    // 设置新的并发数
+    if (newConcurrency !== this.currentConcurrency) {
+      this.setConcurrency(newConcurrency);
+
+      if (this.eventBus) {
+        this.eventBus.emit('concurrency:adjusted', {
+          reason: 'file_size',
+          from: this.currentConcurrency,
+          to: newConcurrency,
+          fileSize: this.fileSize,
+        });
+      }
+    }
   }
 
   /**
-   * 销毁插件，清理资源
+   * 检查进度阶段并调整并发数
+   */
+  private checkProgressStageAndAdjust(): void {
+    // 获取基于进度的调整因子
+    const progressFactor = this.getProgressBasedFactor();
+
+    // 设置进度因子到自适应管理器
+    this.adaptiveFactorManager.setFactor('progress', progressFactor);
+
+    // 仅在特定进度节点触发调整
+    const progressMilestones = [0.25, 0.5, 0.75, 0.9, 0.95];
+    const isAtMilestone = progressMilestones.some(
+      milestone => Math.abs(this.currentProgress - milestone) < 0.02 // 2%误差范围内
+    );
+
+    if (isAtMilestone) {
+      this.scheduleConcurrencyAdjustment();
+    }
+  }
+
+  /**
+   * 销毁插件
    */
   public destroy(): void {
-    // 清除定时器
+    // 清除所有定时器
     if (this.networkCheckInterval) {
       clearInterval(this.networkCheckInterval);
       this.networkCheckInterval = null;
@@ -1481,178 +748,210 @@ class SmartConcurrencyPlugin implements IPlugin {
       this.concurrencyAdjustInterval = null;
     }
 
-    if (this.speedCalculationInterval) {
-      clearInterval(this.speedCalculationInterval);
-      this.speedCalculationInterval = null;
-    }
-
     if (this.performanceAnalysisInterval) {
       clearInterval(this.performanceAnalysisInterval);
       this.performanceAnalysisInterval = null;
     }
 
-    // 重置数据
-    this.speedSamples = [];
-    this.rttSamples = [];
-    this.currentSpeed = 0;
-    this.avgSpeed = 0;
-    this.peakSpeed = 0;
-    this.jitterValue = 0;
-
-    // 取消事件监听
+    // 移除事件监听
     if (this.eventBus) {
-      this.eventBus.off('upload:start');
-      this.eventBus.off('upload:complete');
-      this.eventBus.off('upload:error');
-      this.eventBus.off('chunk:uploaded');
-      this.eventBus.off('chunk:error');
+      this.eventBus.off('network:qualityChange');
+      this.eventBus.off('network:online');
+      this.eventBus.off('network:offline');
+      this.eventBus.off('chunkUploadStart');
+      this.eventBus.off('chunkSuccess');
+      this.eventBus.off('chunkError');
+      this.eventBus.off('progress');
+      this.eventBus.off('uploadStart');
     }
 
-    // 移除网络检测器回调
-    if (this.networkDetector) {
-      // 这里假设NetworkDetector有removeQualityCallback方法
-      // 需要确认这个方法的签名
-      // this.networkDetector.removeQualityCallback(...);
-    }
+    // 重置性能分析器
+    this.performanceAnalyzer.reset();
+    // 重置自适应因子管理器
+    this.adaptiveFactorManager.resetFactors();
 
-    // 移除钩子
-    if (this.core && this.core.getPluginManager()) {
-      this.core.getPluginManager()?.removePluginHooks('SmartConcurrencyPlugin');
-    }
-
-    // 清除引用
-    this.core = null;
-    this.taskScheduler = null;
-    this.eventBus = null;
-    this.networkDetector = null;
+    this.logger.info('SmartConcurrencyPlugin 已销毁');
   }
 
   /**
-   * 任务创建前钩子，调整窗口大小
+   * 应用所有自适应因子
    */
-  private async beforeTaskCreateHook(args: {
-    task: any;
-    metadata?: TaskMetadata;
-  }): Promise<any> {
-    // 根据当前窗口大小和网络状态调整任务
-    // 简单实现：如果有窗口大小控制，可以在这里进行任务的过滤或排队
-    return args;
+  private applyAdaptiveFactors(concurrency: number): number {
+    return this.adaptiveFactorManager.applyFactors(concurrency);
   }
 
   /**
-   * 更新RTT样本
-   * @param rtt 往返时间(ms)
+   * 极端网络条件下的并发调整
    */
-  private updateRTTSamples(rtt: number): void {
-    this.rttSamples.push(rtt);
-
-    // 保留最近的样本
-    if (this.rttSamples.length > 20) {
-      this.rttSamples.shift();
-    }
-
-    // 更新抖动值
-    if (this.rttSamples.length > 1) {
-      const lastRtt = this.rttSamples[this.rttSamples.length - 2];
-      const currentJitter = Math.abs(rtt - lastRtt);
-
-      // 指数移动平均更新抖动值
-      this.jitterValue = 0.8 * this.jitterValue + 0.2 * currentJitter;
-    }
-
-    // 更新发送窗口大小
-    this.updateCongestionWindow();
-  }
-
-  /**
-   * 更新拥塞窗口大小
-   */
-  private updateCongestionWindow(): void {
-    if (this.rttSamples.length < 3) return;
-
-    // 计算平均RTT
-    const avgRtt = this.calculateAvgRTT();
-
-    // 计算RTT变化趋势
-    const rttTrend = this.calculateRTTTrend();
-
-    // 拥塞避免算法简单实现
-    if (rttTrend === 'decreasing') {
-      // RTT减小，可以适当增加窗口
-      this.congestionWindow = Math.min(
-        this.congestionWindow * 1.05,
-        this.maxWindowSize
-      );
-    } else if (rttTrend === 'increasing') {
-      // RTT增加，可能拥塞，减小窗口
-      this.congestionWindow = Math.max(
-        this.congestionWindow * 0.95,
-        this.minWindowSize
-      );
-    }
-
-    // 更新窗口大小（取整）
-    this.windowSize = Math.max(
-      this.minWindowSize,
-      Math.min(Math.round(this.congestionWindow), this.maxWindowSize)
+  private adjustConcurrencyForExtremeNetwork(): void {
+    // 极端网络条件下使用更保守的策略
+    const extremeNetworkConcurrency = Math.max(
+      1,
+      Math.floor(this.minConcurrency * 1.5)
     );
 
-    // 抖动较大时适当减小窗口
-    if (this.jitterValue > avgRtt * 0.5) {
-      this.windowSize = Math.max(
-        this.minWindowSize,
-        Math.floor(this.windowSize * 0.9)
+    // 如果当前并发数较高，则迅速降低
+    if (this.currentConcurrency > extremeNetworkConcurrency) {
+      const newConcurrency = Math.max(1, extremeNetworkConcurrency);
+
+      this.setConcurrency(newConcurrency);
+
+      if (this.eventBus) {
+        this.eventBus.emit('concurrency:adjusted', {
+          reason: 'extreme_network',
+          quality: this.currentNetworkQuality,
+          from: this.currentConcurrency,
+          to: newConcurrency,
+          stable: false,
+          extremeNetwork: true,
+        });
+      }
+    }
+  }
+
+  /**
+   * 根据文件大小获取基础并发数
+   */
+  private getFileSizeBasedConcurrency(): number {
+    if (this.fileSize <= 0) return this.baseConcurrency;
+
+    return ConcurrencyStrategy.getFileSizeConcurrency(
+      this.fileSize,
+      this.baseConcurrency,
+      this.minConcurrency,
+      this.maxConcurrency
+    );
+  }
+
+  /**
+   * 根据上传进度获取调整因子
+   */
+  private getProgressBasedFactor(): number {
+    if (this.currentProgress <= 0) return 1.0;
+
+    return ConcurrencyStrategy.getProgressConcurrencyFactor(
+      this.currentProgress
+    );
+  }
+
+  /**
+   * 优化上传策略
+   */
+  private optimizeStrategy(
+    strategy: UploadStrategy,
+    fileSize: number
+  ): UploadStrategy {
+    // 优化上传策略
+    return ConcurrencyStrategy.optimizeUploadStrategy({
+      baseStrategy: strategy,
+      fileSize,
+      networkQuality: this.currentNetworkQuality,
+      concurrency: this.currentConcurrency,
+      extremeNetwork: this.extremeNetworkDetected,
+    });
+  }
+
+  /**
+   * 更新最佳上传策略
+   */
+  private updateOptimalStrategy(): void {
+    if (!this.core) return;
+
+    // 获取当前文件大小
+    const currentFileSize = this.fileSize;
+    if (currentFileSize <= 0) return;
+
+    // 根据网络质量和文件大小优化策略
+    const strategy = ConcurrencyStrategy.determineOptimalStrategy(
+      currentFileSize,
+      this.currentNetworkQuality,
+      this.currentConcurrency,
+      this.extremeNetworkDetected
+    );
+
+    // 应用策略
+    if (this.core.setUploadStrategy) {
+      this.core.setUploadStrategy(strategy);
+    }
+  }
+
+  /**
+   * 获取当前网络质量
+   */
+  public getCurrentNetworkQuality(): NetworkQuality {
+    return this.currentNetworkQuality;
+  }
+
+  /**
+   * 获取速度信息
+   */
+  public getSpeedInfo(): {
+    current: number;
+    average: number;
+    peak: number;
+    quality: NetworkQuality;
+    jitter?: number;
+    stable: boolean;
+  } {
+    const performanceStats = this.performanceAnalyzer.getPerformanceStats();
+
+    return {
+      current: performanceStats.currentSpeed,
+      average: performanceStats.avgSpeed,
+      peak: performanceStats.peakSpeed,
+      quality: this.currentNetworkQuality,
+      jitter: performanceStats.jitterValue,
+      stable: performanceStats.isNetworkStable,
+    };
+  }
+
+  /**
+   * 获取设备能力
+   */
+  public getDeviceCapabilities(): ExtendedDeviceCapability | null {
+    return this.extendedDeviceCapability;
+  }
+
+  /**
+   * 强制进行网络检测
+   */
+  public forceNetworkDetection(): void {
+    this.detectNetworkCondition();
+    this.performanceAnalyzer.updateNetworkPerformance();
+  }
+
+  /**
+   * 设置基础并发数
+   */
+  public setBaseConcurrency(concurrency: number): void {
+    if (
+      concurrency >= this.minConcurrency &&
+      concurrency <= this.maxConcurrency
+    ) {
+      this.baseConcurrency = concurrency;
+      this.logger.info(`基础并发数已设置为: ${concurrency}`);
+
+      // 如果适应性未启用，直接应用新的并发数
+      if (!this.adaptationEnabled) {
+        this.setConcurrency(concurrency);
+      }
+    } else {
+      this.logger.warn(
+        `并发数 ${concurrency} 超出范围 [${this.minConcurrency}-${this.maxConcurrency}]`
       );
     }
-
-    // 发出窗口变化事件
-    if (this.eventBus) {
-      this.eventBus.emit('window:size:change', {
-        windowSize: this.windowSize,
-        congestionWindow: this.congestionWindow,
-        avgRtt,
-        jitter: this.jitterValue,
-        trend: rttTrend,
-      });
-    }
   }
 
   /**
-   * 计算平均RTT
+   * 设置是否启用自适应
    */
-  private calculateAvgRTT(): number {
-    if (this.rttSamples.length === 0) return 0;
+  public setAdaptationEnabled(enabled: boolean): void {
+    this.adaptationEnabled = enabled;
+    this.logger.info(`自适应并发调整已${enabled ? '启用' : '禁用'}`);
 
-    const sum = this.rttSamples.reduce((acc, val) => acc + val, 0);
-    return sum / this.rttSamples.length;
-  }
-
-  /**
-   * 计算RTT变化趋势
-   */
-  private calculateRTTTrend(): 'stable' | 'increasing' | 'decreasing' {
-    if (this.rttSamples.length < 5) return 'stable';
-
-    const recentSamples = this.rttSamples.slice(-5);
-    const firstHalf = recentSamples.slice(0, 2);
-    const secondHalf = recentSamples.slice(-2);
-
-    const firstAvg =
-      firstHalf.reduce((sum, val) => sum + val, 0) / firstHalf.length;
-    const secondAvg =
-      secondHalf.reduce((sum, val) => sum + val, 0) / secondHalf.length;
-
-    const difference = secondAvg - firstAvg;
-    const threshold = firstAvg * 0.1; // 10%的变化视为显著变化
-
-    if (difference > threshold) {
-      return 'increasing';
-    } else if (difference < -threshold) {
-      return 'decreasing';
-    } else {
-      return 'stable';
+    // 如果禁用，则重置为基础并发数
+    if (!enabled) {
+      this.setConcurrency(this.baseConcurrency);
     }
   }
 }
-
-export default SmartConcurrencyPlugin;

@@ -1,616 +1,615 @@
 /**
- * NetworkDetector - 网络检测工具
- * 用于检测网络状态、质量和特性，提供网络变化监听
+ * NetworkDetector - 网络检测器 (重构版)
+ *
+ * 功能:
+ * 1. 监控网络状态
+ * 2. 检测网络质量
+ * 3. 提供实时网络信息
+ * 4. 网络故障预警
  */
 
-import { NetworkCondition, NetworkStatus } from '../types';
-
+import { EventBus } from '../core/EventBus';
 import { Logger } from './Logger';
-import { NetworkQuality } from './NetworkQuality';
+import {
+  NetworkQualityEvaluator,
+  NetworkQualityMetrics,
+} from '../evaluators/NetworkQualityEvaluator';
+import { NetworkSpeedMonitor } from '../monitors/NetworkSpeedMonitor';
+import {
+  NetworkStabilityAnalyzer,
+  ConnectionEvent,
+} from '../analyzers/NetworkStabilityAnalyzer';
+import { NetworkTrendPredictor } from '../predictors/NetworkTrendPredictor';
 
-// 网络测速结果
-export interface SpeedTestResult {
-  downloadSpeed: number; // 下载速度 (kb/s)
-  uploadSpeed?: number; // 上传速度 (kb/s)
-  latency: number; // 延迟 (ms)
-  jitter?: number; // 抖动 (ms)
-  timestamp: number; // 测试时间戳
-}
+import {
+  NetworkQuality,
+  NetworkType,
+  NetworkCondition,
+  EnvironmentType,
+} from '../types/network';
+import { DependencyContainer } from '../core/DependencyContainer';
 
-// 网络检测器配置
-export interface NetworkDetectorConfig {
-  pingUrl?: string; // ping 测试URL
-  speedTestUrl?: string; // 速度测试URL
-  sampleSize?: number; // 采样次数
-  pingTimeout?: number; // ping超时时间(ms)
-  speedTestTimeout?: number; // 速度测试超时时间(ms)
-  speedTestSampleSize?: number; // 速度测试采样大小(字节)
-  autoRefreshInterval?: number; // 自动刷新间隔(ms)
-  enableNetworkListener?: boolean; // 是否启用网络监听
-}
-
-// 网络变化回调
-type NetworkChangeCallback = (
-  status: NetworkStatus,
-  condition?: NetworkCondition
-) => void;
-
-/**
- * 网络检测器类
- * 提供网络状态检测、速度测试和变化监听功能
- */
 export class NetworkDetector {
-  private config: NetworkDetectorConfig;
-  private currentStatus: NetworkStatus = 'unknown';
-  private currentCondition?: NetworkCondition;
-  private lastSpeedTest?: SpeedTestResult;
-  private refreshInterval?: number;
-  private changeListeners: Set<NetworkChangeCallback> = new Set();
-  private logger: Logger = new Logger('NetworkDetector');
-  private static instance?: NetworkDetector;
-  private quality: NetworkQuality = NetworkQuality.UNKNOWN;
-  // @ts-ignore - 这些变量将在未来版本中使用
-  private isOnline = true;
-  // @ts-ignore - 这些变量将在未来版本中使用
-  private networkType = 'unknown';
-  // @ts-ignore - 这些变量将在未来版本中使用
-  private connectionSpeed = 0;
-  private lastCheckTime = 0;
-  private checkInterval = 10000; // 10秒检查一次
-  // @ts-ignore - 这些变量将在未来版本中使用
-  private _intervalId: any = null;
-  private callbacks: ((quality: NetworkQuality) => void)[] = [];
+  private static instance: NetworkDetector;
 
-  /**
-   * 获取网络检测器实例 (单例模式)
-   * @param config 配置
-   * @returns 网络检测器实例
-   */
-  public static getInstance(config?: NetworkDetectorConfig): NetworkDetector {
+  // 核心功能模块
+  private qualityEvaluator: NetworkQualityEvaluator;
+  private speedMonitor: NetworkSpeedMonitor;
+  private stabilityAnalyzer: NetworkStabilityAnalyzer;
+  private trendPredictor: NetworkTrendPredictor;
+
+  // 基础属性
+  private eventBus: EventBus;
+  private logger: Logger;
+  private isOnline = true;
+  private networkType: NetworkType = NetworkType.UNKNOWN;
+  private currentNetworkQuality: NetworkQuality = NetworkQuality.FAIR;
+  private environmentType: EnvironmentType = EnvironmentType.BROWSER;
+
+  // 测速相关
+  private speedTestUrl = 'https://www.cloudflare.com/cdn-cgi/trace'; // 使用可访问的真实URL
+  private speedTestInterval = 60000; // 1分钟
+  private speedTestTimer: ReturnType<typeof setInterval> | null = null;
+
+  // ping相关
+  private pingUrl = 'https://www.cloudflare.com/cdn-cgi/trace';
+  private pingInterval = 30000; // 30秒
+  private pingTimer: ReturnType<typeof setInterval> | null = null;
+
+  constructor(options?: {
+    autoRefreshInterval?: number;
+    enableNetworkListener?: boolean;
+  }) {
+    this.eventBus = EventBus.getInstance();
+    this.logger = new Logger('NetworkDetector');
+
+    // 初始化模块
+    this.qualityEvaluator = new NetworkQualityEvaluator();
+    this.speedMonitor = new NetworkSpeedMonitor();
+    this.stabilityAnalyzer = new NetworkStabilityAnalyzer();
+    this.trendPredictor = new NetworkTrendPredictor();
+
+    // 应用选项
+    if (options) {
+      if (options.autoRefreshInterval) {
+        this.speedTestInterval = options.autoRefreshInterval;
+      }
+    }
+
+    // 检测环境类型
+    this.detectEnvironmentType();
+
+    // 注册事件处理
+    this.registerEvents();
+
+    // 立即进行一次网络状态检测
+    this.detectNetworkState();
+
+    // 定时测速
+    this.startSpeedTest();
+
+    // 定时ping检测
+    this.startPingTest();
+  }
+
+  public static getInstance(options?: {
+    autoRefreshInterval?: number;
+    enableNetworkListener?: boolean;
+  }): NetworkDetector {
     if (!NetworkDetector.instance) {
-      NetworkDetector.instance = new NetworkDetector(config);
-    } else if (config) {
-      NetworkDetector.instance.updateConfig(config);
+      NetworkDetector.instance = new NetworkDetector(options);
+    } else if (options) {
+      // 如果提供了配置选项，应用它们
+      if (options.autoRefreshInterval) {
+        NetworkDetector.instance.speedTestInterval =
+          options.autoRefreshInterval;
+      }
     }
     return NetworkDetector.instance;
   }
 
   /**
-   * 创建一个网络检测器实例
+   * 检测环境类型
    */
-  public static create(): NetworkDetector {
-    return new NetworkDetector();
-  }
-
-  /**
-   * 构造函数
-   * @param config 配置
-   */
-  private constructor(config?: NetworkDetectorConfig) {
-    this.config = {
-      pingUrl: 'https://www.google.com/favicon.ico',
-      speedTestUrl:
-        'https://www.google.com/images/branding/googlelogo/2x/googlelogo_color_272x92dp.png',
-      sampleSize: 3,
-      pingTimeout: 3000,
-      speedTestTimeout: 10000,
-      speedTestSampleSize: 100 * 1024, // 100KB
-      autoRefreshInterval: 60000, // 1分钟
-      enableNetworkListener: true,
-      ...config,
-    };
-
-    // 初始化
-    this.initialize();
-  }
-
-  /**
-   * 初始化网络检测器
-   */
-  private initialize(): void {
-    // 获取当前网络状态
-    this.detectNetworkStatus()
-      .then(status => {
-        this.currentStatus = status;
-        this.logger.debug(`初始网络状态: ${status}`);
-      })
-      .catch(err => {
-        this.logger.error('初始网络状态检测失败', err);
-      });
-
-    // 获取当前网络条件
-    this.detectNetworkCondition()
-      .then(condition => {
-        this.currentCondition = condition;
-        this.logger.debug(`初始网络条件:`, condition);
-      })
-      .catch(err => {
-        this.logger.error('初始网络条件检测失败', err);
-      });
-
-    // 设置自动刷新
-    if (
-      this.config.autoRefreshInterval &&
-      this.config.autoRefreshInterval > 0
+  private detectEnvironmentType(): void {
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      this.environmentType = EnvironmentType.BROWSER;
+    } else if (typeof wx !== 'undefined' && wx.getSystemInfo) {
+      this.environmentType = EnvironmentType.WECHAT_MINIPROGRAM;
+    } else if (typeof my !== 'undefined' && my.getSystemInfo) {
+      this.environmentType = EnvironmentType.ALIPAY_MINIPROGRAM;
+    } else if (typeof tt !== 'undefined' && tt.getSystemInfo) {
+      this.environmentType = EnvironmentType.BYTEDANCE_MINIPROGRAM;
+    } else if (typeof swan !== 'undefined' && swan.getSystemInfo) {
+      this.environmentType = EnvironmentType.BAIDU_MINIPROGRAM;
+    } else if (typeof uni !== 'undefined') {
+      this.environmentType = EnvironmentType.UNI_APP;
+    } else if (
+      typeof process !== 'undefined' &&
+      process.versions &&
+      process.versions.node
     ) {
-      this.startAutoRefresh();
+      this.environmentType = EnvironmentType.NODE;
+    } else {
+      this.environmentType = EnvironmentType.UNKNOWN;
     }
 
-    // 设置网络变化监听
-    if (this.config.enableNetworkListener) {
-      this.setupNetworkListener();
-    }
+    this.logger.info('环境类型检测', { environmentType: this.environmentType });
   }
 
   /**
-   * 更新配置
-   * @param config 新配置
+   * 注册事件监听
    */
-  public updateConfig(config: Partial<NetworkDetectorConfig>): void {
-    const prevAutoRefresh = this.config.autoRefreshInterval;
-    const prevNetworkListener = this.config.enableNetworkListener;
+  private registerEvents(): void {
+    // 浏览器环境下注册网络状态变化事件
+    if (this.environmentType === EnvironmentType.BROWSER) {
+      window.addEventListener('online', this.handleOnline.bind(this));
+      window.addEventListener('offline', this.handleOffline.bind(this));
 
-    // 更新配置
-    this.config = { ...this.config, ...config };
+      // 监听网络连接变化
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection;
+        if (connection) {
+          connection.addEventListener(
+            'change',
+            this.handleConnectionChange.bind(this)
+          );
 
-    // 如果自动刷新配置变更，重新设置
-    if (prevAutoRefresh !== this.config.autoRefreshInterval) {
-      this.stopAutoRefresh();
-      if (
-        this.config.autoRefreshInterval &&
-        this.config.autoRefreshInterval > 0
-      ) {
-        this.startAutoRefresh();
-      }
-    }
-
-    // 如果网络监听配置变更，重新设置
-    if (prevNetworkListener !== this.config.enableNetworkListener) {
-      if (this.config.enableNetworkListener) {
-        this.setupNetworkListener();
-      } else {
-        this.removeNetworkListener();
-      }
-    }
-  }
-
-  /**
-   * 设置网络变化监听
-   */
-  private setupNetworkListener(): void {
-    if (typeof window !== 'undefined') {
-      // 监听在线状态变化
-      window.addEventListener('online', this.handleOnline);
-      window.addEventListener('offline', this.handleOffline);
-
-      // 监听Connection API (如果可用)
-      if ('connection' in navigator && navigator.connection) {
-        const connection = navigator.connection as any;
-        if (connection.addEventListener) {
-          connection.addEventListener('change', this.handleConnectionChange);
+          // 初始获取网络类型
+          this.updateNetworkType(connection.type);
         }
       }
     }
+    // 可以添加其他环境的事件监听
   }
 
   /**
-   * 移除网络变化监听
+   * 网络上线处理
    */
-  private removeNetworkListener(): void {
-    if (typeof window !== 'undefined') {
-      window.removeEventListener('online', this.handleOnline);
-      window.removeEventListener('offline', this.handleOffline);
-
-      if ('connection' in navigator && navigator.connection) {
-        const connection = navigator.connection as any;
-        if (connection.removeEventListener) {
-          connection.removeEventListener('change', this.handleConnectionChange);
-        }
-      }
-    }
-  }
-
-  /**
-   * 处理在线事件
-   */
-  private handleOnline = (): void => {
-    this.currentStatus = 'online';
+  private handleOnline(): void {
+    this.isOnline = true;
     this.logger.info('网络已连接');
 
-    // 重新检测网络条件
-    this.detectNetworkCondition().then(condition => {
-      this.currentCondition = condition;
-      this.notifyChangeListeners();
-    });
-  };
+    // 记录连接事件
+    const connectionEvent: ConnectionEvent = {
+      timestamp: Date.now(),
+      type: 'online',
+    };
+    this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
+
+    // 触发事件
+    this.eventBus.emit('network:online', { timestamp: Date.now() });
+
+    // 立即进行一次网络状态检测
+    this.detectNetworkState();
+  }
 
   /**
-   * 处理离线事件
+   * 网络离线处理
    */
-  private handleOffline = (): void => {
-    this.currentStatus = 'offline';
-    this.currentCondition = undefined;
+  private handleOffline(): void {
+    this.isOnline = false;
     this.logger.warn('网络已断开');
-    this.notifyChangeListeners();
-  };
+
+    // 记录连接事件
+    const connectionEvent: ConnectionEvent = {
+      timestamp: Date.now(),
+      type: 'offline',
+    };
+    this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
+
+    // 更新网络质量为不可用
+    this.updateNetworkQuality(NetworkQuality.UNUSABLE);
+
+    // 触发事件
+    this.eventBus.emit('network:offline', { timestamp: Date.now() });
+  }
 
   /**
-   * 处理连接变化事件
+   * 处理网络连接变化
    */
-  private handleConnectionChange = (): void => {
-    this.logger.debug('网络连接已变化');
+  private handleConnectionChange(_event: any): void {
+    const connection = (navigator as any).connection;
+    if (!connection) return;
 
-    // 重新检测网络条件
-    this.detectNetworkCondition().then(condition => {
-      this.currentCondition = condition;
-      this.notifyChangeListeners();
+    const oldNetworkType = this.networkType;
+
+    // 更新网络类型
+    this.updateNetworkType(connection.type);
+
+    this.logger.debug('网络连接变化', {
+      effectiveType: connection.effectiveType,
+      downlink: connection.downlink,
+      rtt: connection.rtt,
+      from: oldNetworkType,
+      to: this.networkType,
     });
-  };
 
-  /**
-   * 开始自动刷新
-   */
-  private startAutoRefresh(): void {
-    this.stopAutoRefresh();
+    // 记录类型变化事件
+    if (oldNetworkType !== this.networkType) {
+      const connectionEvent: ConnectionEvent = {
+        timestamp: Date.now(),
+        type: 'type_change',
+        previousType: oldNetworkType,
+        newType: this.networkType,
+      };
+      this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
 
-    if (
-      this.config.autoRefreshInterval &&
-      this.config.autoRefreshInterval > 0
-    ) {
-      this.refreshInterval = window.setInterval(() => {
-        this.refreshNetworkInfo();
-      }, this.config.autoRefreshInterval);
+      // 触发事件
+      this.eventBus.emit('network:typeChange', {
+        from: oldNetworkType,
+        to: this.networkType,
+        timestamp: Date.now(),
+      });
     }
+
+    // 更新网络质量评估
+    this.evaluateNetworkQuality();
   }
 
   /**
-   * 停止自动刷新
+   * 启动定时网速测试
    */
-  private stopAutoRefresh(): void {
-    if (this.refreshInterval) {
-      clearInterval(this.refreshInterval);
-      this.refreshInterval = undefined;
+  private startSpeedTest(): void {
+    if (this.speedTestTimer) {
+      clearInterval(this.speedTestTimer);
     }
+
+    // 立即执行一次
+    this.performSpeedTest();
+
+    // 设置定时器
+    this.speedTestTimer = setInterval(() => {
+      if (this.isOnline) {
+        this.performSpeedTest();
+      }
+    }, this.speedTestInterval);
+
+    this.logger.debug('启动网速定时测试', { interval: this.speedTestInterval });
   }
 
   /**
-   * 刷新网络信息
+   * 执行网速测试
    */
-  public async refreshNetworkInfo(): Promise<void> {
+  private async performSpeedTest(): Promise<void> {
     try {
-      // 检测网络状态
-      const status = await this.detectNetworkStatus();
-      const oldStatus = this.currentStatus;
-      this.currentStatus = status;
+      // 使用SpeedMonitor进行测速
+      const result = await this.speedMonitor.runSpeedTest(this.speedTestUrl);
 
-      // 检测网络条件
-      if (status === 'online') {
-        const condition = await this.detectNetworkCondition();
-        const oldCondition = this.currentCondition;
-        this.currentCondition = condition;
+      // 记录RTT样本
+      this.stabilityAnalyzer.recordRTTSample(result.latency);
 
-        // 如果状态或条件变化，通知监听器
-        if (
-          oldStatus !== status ||
-          JSON.stringify(oldCondition) !== JSON.stringify(condition)
-        ) {
-          this.notifyChangeListeners();
-        }
-      } else {
-        this.currentCondition = undefined;
-        if (oldStatus !== status) {
-          this.notifyChangeListeners();
-        }
+      // 更新网络质量评估
+      this.evaluateNetworkQuality();
+
+      // 触发事件
+      this.eventBus.emit('network:speedTest', {
+        download: result.downloadSpeed,
+        upload: result.uploadSpeed,
+        latency: result.latency,
+        timestamp: Date.now(),
+      });
+    } catch (error) {
+      this.logger.warn('网速测试失败', { error });
+    }
+  }
+
+  /**
+   * 启动定时ping测试
+   */
+  private startPingTest(): void {
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+    }
+
+    // 设置定时器
+    this.pingTimer = setInterval(() => {
+      if (this.isOnline) {
+        this.performPingTest();
+      }
+    }, this.pingInterval);
+
+    this.logger.debug('启动ping定时测试', { interval: this.pingInterval });
+  }
+
+  /**
+   * 执行ping测试
+   */
+  private async performPingTest(): Promise<void> {
+    try {
+      const startTime = Date.now();
+
+      // 简单的ping测试
+      const response = await fetch(this.pingUrl, {
+        method: 'HEAD',
+        cache: 'no-cache',
+      });
+
+      if (response.ok) {
+        const latency = Date.now() - startTime;
+
+        // 记录RTT样本
+        this.stabilityAnalyzer.recordRTTSample(latency);
+
+        // 触发事件
+        this.eventBus.emit('network:ping', {
+          latency,
+          timestamp: Date.now(),
+        });
+
+        this.logger.debug('Ping测试完成', { latency });
       }
     } catch (error) {
-      this.logger.error('刷新网络信息失败', error);
+      this.logger.warn('Ping测试失败', { error });
     }
   }
 
   /**
    * 检测网络状态
-   * @returns 网络状态
    */
-  public async detectNetworkStatus(): Promise<NetworkStatus> {
-    // 如果在浏览器环境，使用navigator.onLine
-    if (typeof navigator !== 'undefined' && 'onLine' in navigator) {
-      return navigator.onLine ? 'online' : 'offline';
-    }
+  private detectNetworkState(): void {
+    // 检测是否在线
+    if (this.environmentType === EnvironmentType.BROWSER) {
+      this.isOnline = navigator.onLine;
 
-    // 否则尝试ping服务器
-    try {
-      await this.ping();
-      return 'online';
-    } catch (error) {
-      return 'offline';
+      // 尝试获取网络类型
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection;
+        if (connection) {
+          this.updateNetworkType(connection.type);
+        }
+      }
+    }
+    // 可以添加其他环境的检测方法
+
+    // 如果在线，评估网络质量
+    if (this.isOnline) {
+      this.evaluateNetworkQuality();
+    } else {
+      this.updateNetworkQuality(NetworkQuality.UNUSABLE);
     }
   }
 
   /**
-   * 检测网络条件
-   * @returns 网络条件
+   * 评估网络质量
    */
-  public async detectNetworkCondition(): Promise<NetworkCondition> {
-    // 默认网络条件
-    const defaultCondition: NetworkCondition = {
-      type: 'unknown',
-      effectiveType: '4g',
-      downlink: 10,
-      rtt: 50,
-      saveData: false,
+  private evaluateNetworkQuality(): void {
+    // 构建评估指标
+    const metrics: NetworkQualityMetrics = {
+      networkType: this.networkType,
+      downloadSpeed: this.speedMonitor.getAverageDownloadSpeed(),
+      latency: this.speedMonitor.getAverageLatency(),
+      latencyVariation: this.stabilityAnalyzer.analyzeStability().jitter,
+      recentConnectionChanges:
+        this.stabilityAnalyzer.analyzeStability().typeChanges,
+      recentDisconnections:
+        this.stabilityAnalyzer.analyzeStability().disconnections,
     };
 
-    // 如果在浏览器环境，使用Connection API
-    if (typeof navigator !== 'undefined' && 'connection' in navigator) {
-      const connection = navigator.connection as any;
-      if (connection) {
-        return {
-          type: connection.type || 'unknown',
-          effectiveType: connection.effectiveType || '4g',
-          downlink: connection.downlink || 10,
-          rtt: connection.rtt || 50,
-          saveData: connection.saveData || false,
-        };
-      }
-    }
+    // 评估网络质量
+    const previousQuality = this.currentNetworkQuality;
+    const newQuality = this.qualityEvaluator.evaluateNetworkQuality(metrics);
 
-    // 否则尝试通过ping和速度测试推断
-    try {
-      // 测量ping
-      const pingResult = await this.ping();
-
-      // 根据ping值推断网络类型
-      let effectiveType = '4g';
-      if (pingResult > 600) {
-        effectiveType = '2g';
-      } else if (pingResult > 300) {
-        effectiveType = '3g';
-      }
-
-      return {
-        ...defaultCondition,
-        effectiveType,
-        rtt: pingResult,
-      };
-    } catch (error) {
-      return defaultCondition;
+    // 更新质量并触发事件
+    if (previousQuality !== newQuality) {
+      this.updateNetworkQuality(newQuality);
     }
   }
 
   /**
-   * 获取网络质量等级
-   * @returns 网络质量
+   * 更新网络质量
+   * @param quality 网络质量
    */
-  public getNetworkQuality(): NetworkQuality {
-    if (this.currentStatus !== 'online' || !this.currentCondition) {
-      return NetworkQuality.UNKNOWN;
-    }
+  private updateNetworkQuality(quality: NetworkQuality): void {
+    const previousQuality = this.currentNetworkQuality;
+    this.currentNetworkQuality = quality;
 
-    const { effectiveType, rtt, downlink } = this.currentCondition;
-
-    // 基于有效网络类型
-    if (effectiveType === '2g' || rtt > 600) {
-      return NetworkQuality.POOR;
-    }
-
-    if (effectiveType === '3g' || (rtt > 300 && rtt <= 600)) {
-      return NetworkQuality.MEDIUM;
-    }
-
-    if (effectiveType === '4g' || (rtt <= 300 && rtt > 100)) {
-      return NetworkQuality.GOOD;
-    }
-
-    if (effectiveType === '5g' || rtt <= 100 || downlink >= 10) {
-      return NetworkQuality.EXCELLENT;
-    }
-
-    return NetworkQuality.GOOD; // 默认为良好
-  }
-
-  /**
-   * Ping测试
-   * @returns 延迟时间 (ms)
-   */
-  public async ping(): Promise<number> {
-    const pingUrl = this.config.pingUrl || 'https://www.google.com/favicon.ico';
-    const timeout = this.config.pingTimeout || 3000;
-    const sampleSize = this.config.sampleSize || 3;
-
-    const results: number[] = [];
-
-    for (let i = 0; i < sampleSize; i++) {
-      try {
-        const start = Date.now();
-
-        // 添加时间戳和随机数防止缓存
-        const url = `${pingUrl}?t=${Date.now()}&r=${Math.random()}`;
-
-        // 使用fetch API
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-        await fetch(url, {
-          method: 'HEAD',
-          mode: 'no-cors',
-          cache: 'no-store',
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        const end = Date.now();
-        results.push(end - start);
-      } catch (error) {
-        // 如果超时或其他错误，记录一个大值
-        results.push(timeout);
-      }
-    }
-
-    // 计算平均ping (去除最高值和最低值后)
-    if (results.length >= 3) {
-      results.sort((a, b) => a - b);
-      results.pop(); // 移除最高值
-      results.shift(); // 移除最低值
-    }
-
-    // 计算平均值
-    const sum = results.reduce((acc, val) => acc + val, 0);
-    return Math.round(sum / results.length);
-  }
-
-  /**
-   * 速度测试
-   * @returns 速度测试结果
-   */
-  public async speedTest(): Promise<SpeedTestResult> {
-    const start = Date.now();
-    const speedTestUrl = this.config.speedTestUrl;
-    const timeout = this.config.speedTestTimeout || 10000;
-
-    try {
-      // 创建abort控制器
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), timeout);
-
-      // 发起请求并测量时间
-      const response = await fetch(`${speedTestUrl}?t=${Date.now()}`, {
-        signal: controller.signal,
-        cache: 'no-store',
+    if (previousQuality !== quality) {
+      this.logger.info('网络质量变化', {
+        from: NetworkQualityEvaluator.getQualityDescription(previousQuality),
+        to: NetworkQualityEvaluator.getQualityDescription(quality),
       });
 
-      const blob = await response.blob();
-      clearTimeout(timeoutId);
-
-      const end = Date.now();
-      const duration = (end - start) / 1000; // 秒
-
-      // 计算下载速度 (kb/s)
-      const fileSize = blob.size / 1024; // KB
-      const downloadSpeed = fileSize / duration;
-
-      // 计算大致延迟
-      const latency = await this.ping();
-
-      this.lastSpeedTest = {
-        downloadSpeed,
-        latency,
+      // 记录质量变化事件
+      const connectionEvent: ConnectionEvent = {
         timestamp: Date.now(),
+        type: 'quality_change',
+        previousQuality: previousQuality,
+        newQuality: quality,
+        isStable: NetworkQualityEvaluator.isNetworkStable(quality),
       };
+      this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
 
-      return this.lastSpeedTest;
-    } catch (error) {
-      this.logger.error('速度测试失败', error);
+      // 记录到趋势预测器
+      this.trendPredictor.recordNetworkQuality(quality);
 
-      // 返回一个默认结果
-      return {
-        downloadSpeed: 0,
-        latency: timeout,
+      // 触发事件
+      this.eventBus.emit('network:qualityChange', {
+        previousQuality,
+        quality,
         timestamp: Date.now(),
-      };
+      });
     }
   }
 
   /**
-   * 获取当前网络状态
-   * @returns 网络状态
+   * 更新网络类型
+   * @param type 网络类型
    */
-  public getNetworkStatus(): NetworkStatus {
-    return this.currentStatus;
-  }
+  private updateNetworkType(type: string): void {
+    // 将浏览器网络类型转换为统一类型
+    let networkType = NetworkType.UNKNOWN;
 
-  /**
-   * 获取当前网络条件
-   * @returns 网络条件
-   */
-  public getNetworkCondition(): NetworkCondition | undefined {
-    return this.currentCondition;
-  }
+    switch (type) {
+      case 'ethernet':
+        networkType = NetworkType.ETHERNET;
+        break;
+      case 'wifi':
+        networkType = NetworkType.WIFI;
+        break;
+      case 'cellular':
+        networkType = NetworkType.CELLULAR;
+        break;
+      case 'none':
+        networkType = NetworkType.NONE;
+        break;
+      default:
+        networkType = NetworkType.UNKNOWN;
+    }
 
-  /**
-   * 获取最后一次速度测试结果
-   * @returns 速度测试结果
-   */
-  public getLastSpeedTest(): SpeedTestResult | undefined {
-    return this.lastSpeedTest;
-  }
-
-  /**
-   * 添加网络变化监听器
-   * @param callback 回调函数
-   */
-  public addChangeListener(callback: NetworkChangeCallback): void {
-    this.changeListeners.add(callback);
-  }
-
-  /**
-   * 移除网络变化监听器
-   * @param callback 回调函数
-   */
-  public removeChangeListener(callback: NetworkChangeCallback): void {
-    this.changeListeners.delete(callback);
-  }
-
-  /**
-   * 通知所有变化监听器
-   */
-  private notifyChangeListeners(): void {
-    for (const callback of this.changeListeners) {
-      try {
-        callback(this.currentStatus, this.currentCondition);
-      } catch (error) {
-        this.logger.error('网络变化回调执行失败', error);
+    // 尝试获取更精确的移动网络类型
+    if (networkType === NetworkType.CELLULAR) {
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection;
+        if (connection && connection.effectiveType) {
+          switch (connection.effectiveType) {
+            case '4g':
+              networkType = NetworkType.CELLULAR_4G;
+              break;
+            case '3g':
+              networkType = NetworkType.CELLULAR_3G;
+              break;
+            case '2g':
+              networkType = NetworkType.CELLULAR_2G;
+              break;
+            case 'slow-2g':
+              networkType = NetworkType.CELLULAR_2G;
+              break;
+          }
+        }
       }
     }
+
+    this.networkType = networkType;
   }
 
   /**
-   * 释放资源
+   * 获取当前网络质量
+   * @returns 网络质量
    */
-  public dispose(): void {
-    this.stopAutoRefresh();
-    this.removeNetworkListener();
-    this.changeListeners.clear();
+  public getCurrentNetworkQuality(): NetworkQuality {
+    return this.currentNetworkQuality;
   }
 
   /**
-   * 开始监控网络质量
+   * 获取网络条件
+   * @returns 网络条件
    */
-  public startMonitoring(): void {
-    this._intervalId = setInterval(() => {
-      this.checkNetworkQuality();
-    }, this.checkInterval);
+  public getNetworkCondition(): NetworkCondition {
+    const isOnline = this.isOnline;
+    const networkType = this.networkType;
+    const quality = this.currentNetworkQuality;
+    const speedKBps = this.speedMonitor.getAverageDownloadSpeed();
+    const latency = this.speedMonitor.getAverageLatency();
+    const stability = this.stabilityAnalyzer.analyzeStability();
+
+    return {
+      isOnline,
+      networkType,
+      quality,
+      speedKBps,
+      latency,
+      isStable: stability.isStable,
+      jitter: stability.jitter,
+      timestamp: Date.now(),
+    };
   }
 
   /**
-   * 检查网络质量
+   * 网络是否在线
+   * @returns 是否在线
    */
-  private checkNetworkQuality(): void {
-    const currentTime = Date.now();
-    if (currentTime - this.lastCheckTime >= this.checkInterval) {
-      this.lastCheckTime = currentTime;
-      this.quality = this.getNetworkQuality();
-      this.callbacks.forEach(callback => callback(this.quality));
+  public isNetworkOnline(): boolean {
+    return this.isOnline;
+  }
+
+  /**
+   * 获取网络类型
+   * @returns 网络类型
+   */
+  public getNetworkType(): NetworkType {
+    return this.networkType;
+  }
+
+  /**
+   * 获取网络稳定性分析
+   * @returns 稳定性分析结果
+   */
+  public getNetworkStability() {
+    return this.stabilityAnalyzer.analyzeStability();
+  }
+
+  /**
+   * 预测未来网络质量
+   * @param timeWindowMs 预测窗口(ms)
+   * @returns 网络预测结果
+   */
+  public predictNetworkQuality(timeWindowMs = 5 * 60 * 1000) {
+    return this.trendPredictor.predictNetworkQuality(timeWindowMs);
+  }
+
+  /**
+   * 获取网络优化建议
+   * @returns 建议数组
+   */
+  public getNetworkOptimizationSuggestions(): string[] {
+    return this.trendPredictor.getNetworkOptimizationSuggestions();
+  }
+
+  /**
+   * 主动触发网络状态检测
+   */
+  public refreshNetworkState(): Promise<NetworkCondition> {
+    return new Promise(resolve => {
+      this.detectNetworkState();
+
+      // 执行一次speedTest
+      this.performSpeedTest()
+        .then(() => {
+          const condition = this.getNetworkCondition();
+          resolve(condition);
+        })
+        .catch(() => {
+          const condition = this.getNetworkCondition();
+          resolve(condition);
+        });
+    });
+  }
+
+  /**
+   * 销毁实例，清理资源
+   */
+  public destroy(): void {
+    // 清除定时器
+    if (this.speedTestTimer) {
+      clearInterval(this.speedTestTimer);
+      this.speedTestTimer = null;
     }
-  }
 
-  /**
-   * 添加网络质量回调
-   * @param callback 回调函数
-   */
-  public addQualityCallback(callback: (quality: NetworkQuality) => void): void {
-    this.callbacks.push(callback);
-  }
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
 
-  /**
-   * 移除网络质量回调
-   * @param callback 回调函数
-   */
-  public removeQualityCallback(
-    callback: (quality: NetworkQuality) => void
-  ): void {
-    this.callbacks = this.callbacks.filter(c => c !== callback);
+    // 移除浏览器环境的事件监听
+    if (this.environmentType === EnvironmentType.BROWSER) {
+      window.removeEventListener('online', this.handleOnline);
+      window.removeEventListener('offline', this.handleOffline);
+
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection;
+        if (connection) {
+          connection.removeEventListener('change', this.handleConnectionChange);
+        }
+      }
+    }
+
+    this.logger.info('NetworkDetector已销毁');
+    NetworkDetector.instance = undefined as unknown as NetworkDetector;
   }
 }
+
+// 注册DI容器
+DependencyContainer.register('NetworkDetector', NetworkDetector);
 
 export default NetworkDetector;
