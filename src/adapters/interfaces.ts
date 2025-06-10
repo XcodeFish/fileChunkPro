@@ -6,6 +6,22 @@
 import { NetworkQuality } from '../types';
 
 /**
+ * 环境类型枚举
+ */
+export enum EnvironmentType {
+  BROWSER = 'browser',
+  WECHAT = 'wechat',
+  ALIPAY = 'alipay',
+  BYTEDANCE = 'bytedance',
+  BAIDU = 'baidu',
+  TARO = 'taro',
+  UNI_APP = 'uni-app',
+  REACT_NATIVE = 'react-native',
+  NODE_JS = 'nodejs',
+  UNKNOWN = 'unknown',
+}
+
+/**
  * 基础适配器配置选项
  * 所有适配器配置的通用选项
  */

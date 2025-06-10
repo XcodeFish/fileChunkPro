@@ -18,8 +18,11 @@ import {
   IResponse,
   RequestOptions,
 } from './interfaces';
+import { NodeAdapter } from './NodeAdapter';
+import { ReactNativeAdapter } from './ReactNativeAdapter';
 import { BrowserStorage } from './storage/BrowserStorage';
 import { MiniProgramStorage } from './storage/MiniProgramStorage';
+import { NodeStorage } from './storage/NodeStorage';
 import TaroAdapter from './TaroAdapter';
 import UniAppAdapter from './UniAppAdapter';
 import WechatAdapter from './WechatAdapter';
@@ -36,6 +39,8 @@ export {
   BaiduAdapter,
   TaroAdapter,
   UniAppAdapter,
+  ReactNativeAdapter,
+  NodeAdapter,
 
   // 接口和基础类
   IAdapter,
@@ -53,6 +58,7 @@ export {
   // 存储适配器
   BrowserStorage,
   MiniProgramStorage,
+  NodeStorage,
 };
 
 // 默认导出
@@ -64,6 +70,8 @@ export default {
   BaiduAdapter,
   TaroAdapter,
   UniAppAdapter,
+  ReactNativeAdapter,
+  NodeAdapter,
 
   // 基础适配器
   BaseMiniProgramAdapter,
@@ -71,4 +79,5 @@ export default {
   // 存储适配器
   BrowserStorage,
   MiniProgramStorage,
+  NodeStorage,
 };

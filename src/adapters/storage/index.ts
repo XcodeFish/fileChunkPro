@@ -3,9 +3,13 @@
  */
 
 import { BrowserStorage } from './BrowserStorage';
+import { MiniProgramStorage } from './MiniProgramStorage';
+import { NodeStorage } from './NodeStorage';
 
-export { BrowserStorage };
+export { BrowserStorage, NodeStorage, MiniProgramStorage };
 
 export default {
   BrowserStorage,
+  NodeStorage,
+  MiniProgramStorage,
 };
