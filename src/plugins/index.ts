@@ -14,6 +14,7 @@ import { ResumePlugin } from './ResumePlugin';
 import { BasicSecurityPlugin, getSecurityPluginByLevel } from './security';
 import { SmartConcurrencyPlugin } from './SmartConcurrencyPlugin';
 import { ValidatorPlugin } from './ValidatorPlugin';
+import { StoragePlugin } from './StoragePlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -28,6 +29,7 @@ export {
   SmartConcurrencyPlugin,
   PWAPlugin,
   PWAPluginOptions,
+  StoragePlugin,
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
@@ -42,6 +44,7 @@ export default {
   PrecheckPlugin,
   SmartConcurrencyPlugin,
   PWAPlugin,
+  StoragePlugin,
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,

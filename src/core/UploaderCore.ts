@@ -21,6 +21,7 @@ import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
 import NetworkDetector from '../utils/NetworkDetector';
 import PerformanceMonitor from '../utils/PerformanceMonitor';
+import { IStorageAdapter } from '../types/storage';
 
 import ErrorCenter, { UploadError } from './ErrorCenter';
 import EventBus from './EventBus';
@@ -48,6 +49,14 @@ export class UploaderCore {
   private deviceCapabilities: DeviceCapability;
   private performanceMonitor: PerformanceMonitor;
 
+  // 日志记录器
+  public logger = {
+    debug: (message: string) => console.debug(`[FileChunkPro] ${message}`),
+    info: (message: string) => console.info(`[FileChunkPro] ${message}`),
+    warn: (message: string) => console.warn(`[FileChunkPro] ${message}`),
+    error: (message: string) => console.error(`[FileChunkPro] ${message}`),
+  };
+
   // 新增属性
   private memoryCheckInterval = 10000; // 10秒检查一次内存使用情况
   private uploadStrategies: Map<string, UploadStrategy> = new Map();
@@ -70,6 +79,11 @@ export class UploaderCore {
     maxConcurrency: 6,
     samplingInterval: 5000, // 采样间隔 5秒
   };
+
+  // 存储适配器管理
+  private _defaultStorageAdapter: IStorageAdapter | null = null;
+  private _additionalStorageAdapters: Map<string, IStorageAdapter> = new Map();
+  private _currentStorageAdapter: IStorageAdapter | null = null;
 
   /**
    * 创建UploaderCore实例
@@ -694,9 +708,13 @@ export class UploaderCore {
   /**
    * 上传文件
    * @param file 文件对象
+   * @param options 上传选项
    * @returns 上传结果
    */
-  public async upload(file: AnyFile): Promise<UploadResult> {
+  public async upload(
+    file: AnyFile,
+    options?: { storageKey?: string }
+  ): Promise<UploadResult> {
     try {
       // 验证文件
       await this.validateFile(file);
@@ -751,6 +769,17 @@ export class UploaderCore {
         chunks,
         options: this.options,
       });
+
+      // 设置当前存储适配器
+      const storageKey = options?.storageKey;
+      if (storageKey && this._additionalStorageAdapters.has(storageKey)) {
+        this._currentStorageAdapter =
+          this._additionalStorageAdapters.get(storageKey) ||
+          this._defaultStorageAdapter;
+        this.logger.info(`使用存储适配器: ${storageKey} 进行上传`);
+      } else if (this._defaultStorageAdapter) {
+        this._currentStorageAdapter = this._defaultStorageAdapter;
+      }
 
       // 初始化上传
       await this.initializeUpload(file, fileId, chunks.length);
@@ -2040,6 +2069,88 @@ export class UploaderCore {
    */
   public getPluginManager(): PluginManager {
     return this.pluginManager;
+  }
+
+  /**
+   * 设置默认存储适配器
+   * @param adapter 存储适配器
+   */
+  public setStorageAdapter(adapter: IStorageAdapter): this {
+    this._defaultStorageAdapter = adapter;
+    this._currentStorageAdapter = adapter;
+    const storageName =
+      typeof adapter.getStorageName === 'function'
+        ? adapter.getStorageName()
+        : 'unknown';
+    this.logger.info(`设置默认存储适配器: ${storageName}`);
+    return this;
+  }
+
+  /**
+   * 添加附加存储适配器
+   * @param key 存储适配器键名
+   * @param adapter 存储适配器
+   */
+  public addStorageAdapter(key: string, adapter: IStorageAdapter): this {
+    this._additionalStorageAdapters.set(key, adapter);
+    const storageName =
+      typeof adapter.getStorageName === 'function'
+        ? adapter.getStorageName()
+        : 'unknown';
+    this.logger.info(`添加附加存储适配器: ${key} - ${storageName}`);
+    return this;
+  }
+
+  /**
+   * 移除附加存储适配器
+   * @param key 存储适配器键名
+   */
+  public removeStorageAdapter(key: string): this {
+    const adapter = this._additionalStorageAdapters.get(key);
+    if (adapter) {
+      this._additionalStorageAdapters.delete(key);
+      this.logger.info(`移除附加存储适配器: ${key}`);
+    }
+    return this;
+  }
+
+  /**
+   * 重置为默认存储适配器
+   */
+  public resetStorageAdapter(): this {
+    if (this._defaultStorageAdapter) {
+      this._currentStorageAdapter = this._defaultStorageAdapter;
+      this.logger.info('重置为默认存储适配器');
+    }
+    return this;
+  }
+
+  /**
+   * 获取当前存储适配器
+   * @param storageKey 可选的存储键名
+   */
+  public getStorageAdapter(storageKey?: string): IStorageAdapter | null {
+    if (storageKey && this._additionalStorageAdapters.has(storageKey)) {
+      return this._additionalStorageAdapters.get(storageKey) || null;
+    }
+    return this._currentStorageAdapter;
+  }
+
+  /**
+   * 获取所有存储适配器
+   */
+  public getAllStorageAdapters(): Map<string, IStorageAdapter> {
+    const result = new Map<string, IStorageAdapter>();
+
+    if (this._defaultStorageAdapter) {
+      result.set('default', this._defaultStorageAdapter);
+    }
+
+    for (const [key, adapter] of this._additionalStorageAdapters.entries()) {
+      result.set(key, adapter);
+    }
+
+    return result;
   }
 }
 
