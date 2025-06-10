@@ -6,6 +6,9 @@
 // WebAssembly 类型导出
 export * from './wasm';
 
+// 智能重试系统类型导出
+export * from './retry';
+
 // 上传选项
 export interface UploaderOptions {
   endpoint: string;           // 上传端点

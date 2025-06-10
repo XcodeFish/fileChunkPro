@@ -25,6 +25,7 @@ import {
 } from './QueuePlugin';
 import PipelinePlugin from './pipeline';
 import { WasmPlugin, WasmPluginOptions } from './WasmPlugin';
+import SmartRetryPlugin from './smartRetry';
 // 导入安全插件
 
 // 导出所有插件
@@ -53,6 +54,8 @@ export {
   // 导出WebAssembly优化插件
   WasmPlugin,
   WasmPluginOptions,
+  // 导出智能重试插件
+  SmartRetryPlugin,
 };
 
 // 默认导出插件对象
@@ -72,4 +75,6 @@ export default {
   PipelinePlugin,
   // 导出WebAssembly优化插件
   WasmPlugin,
+  // 导出智能重试插件
+  SmartRetryPlugin,
 };
