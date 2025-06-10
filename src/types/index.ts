@@ -669,4 +669,7 @@ export interface SecurityValidationResult {
     code: string;
     message: string;
   }>;
-} 
+}
+
+// 导出环境检测相关类型
+export * from './environment'; 
