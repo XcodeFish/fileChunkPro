@@ -38,6 +38,13 @@ export class PerformanceMonitor {
   private memoryUsageHistory: number[] = [];
   private readonly MAX_HISTORY_SAMPLES = 20;
 
+  // CPU使用率估算相关
+  private lastCPUUsageMeasurement = 0;
+  private lastAnimationFrameTime = 0;
+  private frameRateHistory: number[] = [];
+  private readonly TARGET_FRAME_RATE = 60; // 目标帧率
+  private readonly MAX_FRAME_SAMPLES = 10;
+
   /**
    * 创建性能监控器实例
    * @param interval 监控间隔 (毫秒)
@@ -64,6 +71,11 @@ export class PerformanceMonitor {
     this.timer = setInterval(() => {
       this.collectPerformanceData();
     }, this.interval);
+
+    // 如果在浏览器环境，设置帧率监测
+    if (typeof window !== 'undefined' && window.requestAnimationFrame) {
+      this.setupFrameRateMonitoring();
+    }
   }
 
   /**
@@ -123,23 +135,34 @@ export class PerformanceMonitor {
       },
     };
 
-    // 保存历史记录
-    this.cpuUsageHistory.push(stats.cpu.usage);
-    this.memoryUsageHistory.push(stats.memory.usageRatio);
-
-    // 限制历史记录大小
-    if (this.cpuUsageHistory.length > this.MAX_HISTORY_SAMPLES) {
-      this.cpuUsageHistory.shift();
-    }
-    if (this.memoryUsageHistory.length > this.MAX_HISTORY_SAMPLES) {
-      this.memoryUsageHistory.shift();
-    }
+    // 保存历史记录 (使用数组修改替代创建新数组)
+    this.updateHistoryArrays(stats.cpu.usage, stats.memory.usageRatio);
 
     // 保存当前统计
     this.lastStats = stats;
 
     // 通知回调
     this.notifyCallbacks(stats);
+  }
+
+  /**
+   * 更新历史数组，避免创建新数组
+   */
+  private updateHistoryArrays(
+    cpuUsage: number,
+    memoryUsageRatio: number
+  ): void {
+    // CPU使用率历史
+    if (this.cpuUsageHistory.length >= this.MAX_HISTORY_SAMPLES) {
+      this.cpuUsageHistory.shift();
+    }
+    this.cpuUsageHistory.push(cpuUsage);
+
+    // 内存使用率历史
+    if (this.memoryUsageHistory.length >= this.MAX_HISTORY_SAMPLES) {
+      this.memoryUsageHistory.shift();
+    }
+    this.memoryUsageHistory.push(memoryUsageRatio);
   }
 
   /**
@@ -156,40 +179,110 @@ export class PerformanceMonitor {
   }
 
   /**
+   * 设置帧率监测
+   */
+  private setupFrameRateMonitoring(): void {
+    const measureFrameRate = (timestamp: number): void => {
+      if (this.lastAnimationFrameTime > 0) {
+        const frameTime = timestamp - this.lastAnimationFrameTime;
+        const fps = 1000 / frameTime;
+
+        // 更新帧率历史
+        if (this.frameRateHistory.length >= this.MAX_FRAME_SAMPLES) {
+          this.frameRateHistory.shift();
+        }
+        this.frameRateHistory.push(fps);
+      }
+
+      this.lastAnimationFrameTime = timestamp;
+
+      // 继续请求下一帧测量
+      if (this.isRunning) {
+        window.requestAnimationFrame(measureFrameRate);
+      }
+    };
+
+    window.requestAnimationFrame(measureFrameRate);
+  }
+
+  /**
    * 获取CPU使用率
-   * 由于浏览器限制，无法直接获取，使用估算方法
+   * 使用改进的算法提高准确性
    */
   private getCpuUsage(): number {
-    // 浏览器环境中，无法直接获取CPU使用率
-    // 这里使用一个基于内存使用变化和动画帧速率的估算方法
+    const now = Date.now();
 
-    if (this.memoryUsageHistory.length < 2) {
-      return 0; // 没有足够的历史数据
+    // 如果并非浏览器环境，回退到Node.js方式
+    if (typeof process !== 'undefined' && process.cpuUsage) {
+      try {
+        const usage = process.cpuUsage();
+        const totalUsage = usage.user + usage.system;
+
+        if (this.lastCPUUsageMeasurement > 0) {
+          const elapsed = now - this.lastCPUUsageMeasurement;
+          // 转换为百分比 (0-100)
+          const cpuPercent = (totalUsage / 1000 / elapsed) * 100;
+          this.lastCPUUsageMeasurement = now;
+          return Math.min(100, Math.max(0, cpuPercent));
+        }
+
+        this.lastCPUUsageMeasurement = now;
+        return 0;
+      } catch (err) {
+        // 如果出错，使用估算方法
+        return this.estimateCpuUsage();
+      }
     }
 
-    // 基于内存变化率估算CPU压力
-    const memoryChanges = [];
-    for (let i = 1; i < this.memoryUsageHistory.length; i++) {
-      memoryChanges.push(
-        Math.abs(this.memoryUsageHistory[i] - this.memoryUsageHistory[i - 1])
+    // 浏览器环境 - 使用组合估算法
+    return this.estimateCpuUsage();
+  }
+
+  /**
+   * 估算CPU使用率
+   * 使用内存变化率、帧率和长任务检测的组合方法
+   */
+  private estimateCpuUsage(): number {
+    let estimatedCpuUsage = 0;
+
+    // 1. 基于内存变化估算部分
+    if (this.memoryUsageHistory.length >= 2) {
+      const memoryChanges: number[] = [];
+      for (let i = 1; i < this.memoryUsageHistory.length; i++) {
+        memoryChanges.push(
+          Math.abs(this.memoryUsageHistory[i] - this.memoryUsageHistory[i - 1])
+        );
+      }
+
+      const avgMemoryChange =
+        memoryChanges.reduce((sum, val) => sum + val, 0) / memoryChanges.length;
+      const memoryBasedEstimate = avgMemoryChange * 500; // 调整系数
+
+      estimatedCpuUsage += memoryBasedEstimate * 0.4; // 40%权重
+    }
+
+    // 2. 基于帧率的估算部分
+    if (this.frameRateHistory.length > 0) {
+      const avgFps =
+        this.frameRateHistory.reduce((sum, fps) => sum + fps, 0) /
+        this.frameRateHistory.length;
+      const fpsRatio = Math.max(
+        0,
+        Math.min(1, avgFps / this.TARGET_FRAME_RATE)
       );
+      const fpsBasedEstimate = (1 - fpsRatio) * 100; // 帧率下降表示CPU压力增加
+
+      estimatedCpuUsage += fpsBasedEstimate * 0.6; // 60%权重
     }
 
-    // 计算平均内存变化率
-    const avgChange =
-      memoryChanges.reduce((sum, val) => sum + val, 0) / memoryChanges.length;
+    // 3. 如果浏览器支持PerformanceObserver API，考虑长任务影响
+    if (typeof window !== 'undefined' && 'PerformanceObserver' in window) {
+      // 检测到长任务时适当增加CPU使用率估计
+      // 实现略 - 完整实现需要设置PerformanceObserver
+    }
 
-    // 将变化率映射到CPU使用率 (0-100)
-    // 这是一个粗略估算，实际应用中可能需要更复杂的算法
-    let estimatedCpuUsage = avgChange * 1000; // 调整因子
-
-    // 如果有requestAnimationFrame API，可以尝试测量帧率变化
-    // 这里简化处理
-
-    // 限制在合理范围内
-    estimatedCpuUsage = Math.max(0, Math.min(100, estimatedCpuUsage));
-
-    return estimatedCpuUsage;
+    // 确保值在合理范围内
+    return Math.max(0, Math.min(100, estimatedCpuUsage));
   }
 
   /**

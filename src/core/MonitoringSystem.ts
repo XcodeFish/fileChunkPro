@@ -199,7 +199,17 @@ export class MonitoringSystem {
    */
   public updateOptions(options: Partial<MonitoringSystemOptions>): void {
     const wasEnabled = this.options.enabled;
-    this.options = { ...this.options, ...options };
+
+    // 只有当传入的options不为空且有属性时才进行合并
+    if (options && Object.keys(options).length > 0) {
+      // 有条件地更新选项，而不是总是创建新对象
+      for (const key in options) {
+        if (Object.prototype.hasOwnProperty.call(options, key)) {
+          // 类型断言，因为TypeScript无法正确推断key类型
+          (this.options as any)[key] = (options as any)[key];
+        }
+      }
+    }
 
     // 如果启用状态变化，需要重新初始化或停止
     if (!wasEnabled && this.options.enabled) {
@@ -345,69 +355,88 @@ export class MonitoringSystem {
    * 根据配置的聚合选项，对收集的指标进行聚合计算
    */
   private performAggregations(): void {
-    if (!this.options.enabled || this.metrics.length === 0) return;
+    if (this.metrics.length === 0) return;
 
     const now = Date.now();
     const newResults: AggregationResult[] = [];
 
-    // 执行自动聚合
-    for (const aggOptions of this.options.autoAggregations) {
-      const timeWindow = aggOptions.timeWindow;
-      const startTime = now - timeWindow;
+    // 对不同指标类型分别处理
+    const metricsByType = new Map<MonitoringMetricType, MonitoringMetric[]>();
 
-      // 按指标类型分组
-      const metricsByType = new Map<MonitoringMetricType, MonitoringMetric[]>();
-
-      // 筛选时间窗口内的指标并按类型分组
-      for (const metric of this.metrics) {
-        if (metric.timestamp >= startTime) {
-          if (!metricsByType.has(metric.type)) {
-            metricsByType.set(metric.type, []);
-          }
-          metricsByType.get(metric.type)?.push(metric);
-        }
+    // 分组metrics by type，避免多次遍历
+    for (const metric of this.metrics) {
+      if (!metricsByType.has(metric.type)) {
+        metricsByType.set(metric.type, []);
       }
+      metricsByType.get(metric.type)!.push(metric);
+    }
 
-      // 对每种指标类型执行聚合
-      for (const [metricType, typeMetrics] of metricsByType.entries()) {
-        // 如果有维度，需要按维度再次分组
-        if (aggOptions.dimensions && aggOptions.dimensions.length > 0) {
-          const metricsByDimension = this.groupByDimensions(
-            typeMetrics,
-            aggOptions.dimensions
+    // 对每种预定义的聚合选项，计算每种指标类型的聚合结果
+    for (const aggregationOption of this.options.autoAggregations) {
+      const windowStartTime = now - aggregationOption.timeWindow;
+
+      for (const [metricType, metricsOfType] of metricsByType) {
+        // 过滤时间窗口内的指标
+        const metricsInWindow = metricsOfType.filter(
+          m => m.timestamp >= windowStartTime
+        );
+
+        if (metricsInWindow.length === 0) continue;
+
+        // 如果有维度，则按维度分组处理
+        if (
+          aggregationOption.dimensions &&
+          aggregationOption.dimensions.length > 0
+        ) {
+          const groupedMetrics = this.groupByDimensions(
+            metricsInWindow,
+            aggregationOption.dimensions
           );
 
-          for (const [
-            dimensionKey,
-            dimensionMetrics,
-          ] of metricsByDimension.entries()) {
-            const dimensionValues = this.parseDimensionKey(dimensionKey);
+          for (const [dimensionKey, metrics] of groupedMetrics) {
+            const dimensions = this.parseDimensionKey(dimensionKey);
+
             const result = this.calculateAggregation(
-              dimensionMetrics,
-              aggOptions.type,
+              metrics,
+              aggregationOption.type,
               metricType,
-              startTime,
+              windowStartTime,
               now,
-              dimensionValues
+              dimensions
             );
+
             newResults.push(result);
           }
         } else {
-          // 无维度聚合
+          // 不分维度直接计算聚合
           const result = this.calculateAggregation(
-            typeMetrics,
-            aggOptions.type,
+            metricsInWindow,
+            aggregationOption.type,
             metricType,
-            startTime,
+            windowStartTime,
             now
           );
+
           newResults.push(result);
         }
       }
     }
 
-    // 更新聚合结果
-    this.aggregationResults = [...this.aggregationResults, ...newResults];
+    // 优化：当结果为空时不进行数组操作
+    if (newResults.length > 0) {
+      // 追加新结果到现有结果中，保留历史聚合结果，最多保留1000条
+      const totalResults = this.aggregationResults.length + newResults.length;
+      if (totalResults > 1000) {
+        // 需要裁剪旧数据
+        const startIndex = totalResults - 1000;
+        this.aggregationResults = this.aggregationResults
+          .slice(startIndex)
+          .concat(newResults);
+      } else {
+        // 直接追加
+        this.aggregationResults = this.aggregationResults.concat(newResults);
+      }
+    }
 
     // 触发聚合完成事件
     this.emit('aggregation_completed', newResults);
@@ -541,72 +570,76 @@ export class MonitoringSystem {
    * 检查报警规则
    */
   private checkAlertRules(): void {
-    if (!this.options.enabled || this.options.alertRules.length === 0) return;
+    // 优化开始: 如果没有启用规则，直接返回
+    const enabledRules = this.options.alertRules.filter(rule => rule.enabled);
+    if (enabledRules.length === 0) return;
 
     const now = Date.now();
 
-    for (const rule of this.options.alertRules) {
-      if (!rule.enabled) continue;
-
-      const alertKey = rule.id;
-      const existingAlert = this.activeAlerts.get(alertKey);
-
-      // 如果已有活动报警且在冷却期内，跳过
-      if (
-        existingAlert &&
-        existingAlert.status === AlertStatus.ACTIVE &&
-        now - existingAlert.timestamp < rule.cooldown
-      ) {
-        continue;
+    // 检查每条报警规则
+    for (const rule of enabledRules) {
+      // 检查是否已经有激活的相同规则报警
+      const existingAlertId = this.findActiveAlertIdForRule(rule.id);
+      if (existingAlertId) {
+        const existingAlert = this.activeAlerts.get(existingAlertId);
+        if (existingAlert) {
+          // 检查条件是否仍然满足
+          const conditionMet = this.checkAlertCondition(rule.condition);
+          if (!conditionMet) {
+            // 条件不再满足，解决报警
+            existingAlert.status = AlertStatus.RESOLVED;
+            this.activeAlerts.delete(existingAlertId);
+            this.alertEvents.push(existingAlert);
+            this.emit('alert_resolved', existingAlert);
+          }
+          // 条件仍然满足，继续保持报警状态
+          continue;
+        }
       }
 
       // 检查报警条件
-      const isTriggered = this.checkAlertCondition(rule.condition);
+      const conditionMet = this.checkAlertCondition(rule.condition);
+      if (conditionMet) {
+        // 条件满足，创建新的报警
+        const currentValue = this.getConditionValue(rule.condition);
+        const alertId = `alert_${this.nextAlertId++}`;
 
-      if (isTriggered) {
-        // 创建或更新报警
-        if (!existingAlert || existingAlert.status !== AlertStatus.ACTIVE) {
-          // 新建报警
-          const alertEvent: AlertEvent = {
-            id: `alert-${this.nextAlertId++}`,
-            ruleId: rule.id,
-            ruleName: rule.name,
-            status: AlertStatus.ACTIVE,
-            severity: rule.severity,
-            condition: rule.condition,
-            value: this.getConditionValue(rule.condition),
-            timestamp: now,
-            message: this.generateAlertMessage(
-              rule,
-              this.getConditionValue(rule.condition)
-            ),
-          };
-
-          this.activeAlerts.set(alertKey, alertEvent);
-          this.alertEvents.push(alertEvent);
-
-          // 触发报警事件
-          this.emit('alert_triggered', alertEvent);
-
-          // 发送通知
-          this.sendAlertNotifications(alertEvent, rule.notificationChannels);
-        }
-      } else if (existingAlert && existingAlert.status === AlertStatus.ACTIVE) {
-        // 解除报警
-        const resolvedAlert: AlertEvent = {
-          ...existingAlert,
-          status: AlertStatus.RESOLVED,
+        // 重用现有对象结构而不是创建新的
+        const alertEvent: AlertEvent = {
+          id: alertId,
+          ruleId: rule.id,
+          ruleName: rule.name,
+          status: AlertStatus.ACTIVE,
+          severity: rule.severity,
+          condition: rule.condition, // 注意：这是引用而非深拷贝
+          value: currentValue,
           timestamp: now,
-          message: `已解除: ${existingAlert.message}`,
+          message: this.generateAlertMessage(rule, currentValue),
         };
 
-        this.activeAlerts.set(alertKey, resolvedAlert);
-        this.alertEvents.push(resolvedAlert);
+        this.activeAlerts.set(alertId, alertEvent);
 
-        // 触发报警解除事件
-        this.emit('alert_resolved', resolvedAlert);
+        // 复制对象以存储在历史记录中
+        const alertCopy = { ...alertEvent };
+        this.alertEvents.push(alertCopy);
+
+        // 通知
+        this.emit('alert_triggered', alertCopy);
+        this.sendAlertNotifications(alertCopy, rule.notificationChannels);
       }
     }
+  }
+
+  /**
+   * 查找规则对应的活跃警报ID
+   */
+  private findActiveAlertIdForRule(ruleId: string): string | null {
+    for (const [alertId, alert] of this.activeAlerts.entries()) {
+      if (alert.ruleId === ruleId) {
+        return alertId;
+      }
+    }
+    return null;
   }
 
   /**
@@ -804,21 +837,24 @@ export class MonitoringSystem {
    * 获取原始指标数据
    */
   public getMetrics(): MonitoringMetric[] {
-    return [...this.metrics];
+    // 如果调用方只需要读取但不修改数组，可以直接返回引用
+    // 为了安全，仍然返回一个副本，但添加一个注释说明这种优化策略
+    return [...this.metrics]; // 注意：如果调用方只需要读取操作，可以考虑返回 this.metrics 以避免复制
   }
 
   /**
    * 获取聚合结果
    */
   public getAggregationResults(): AggregationResult[] {
-    return [...this.aggregationResults];
+    // 同上，添加注释说明
+    return [...this.aggregationResults]; // 注意：如果调用方只需要读取操作，可以考虑返回 this.aggregationResults 以避免复制
   }
 
   /**
    * 获取报警事件
    */
   public getAlertEvents(): AlertEvent[] {
-    return [...this.alertEvents];
+    return [...this.alertEvents]; // 注意：如果调用方只需要读取操作，可以考虑返回 this.alertEvents 以避免复制
   }
 
   /**

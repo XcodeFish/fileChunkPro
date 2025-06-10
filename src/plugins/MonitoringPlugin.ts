@@ -50,6 +50,78 @@ export interface MonitoringPluginOptions extends MonitoringSystemOptions {
    * @default false
    */
   enableConsoleLogging?: boolean;
+
+  /**
+   * 是否启用对象池优化
+   * @default true
+   */
+  useObjectPool?: boolean;
+}
+
+/**
+ * 对象池，用于减少重复创建对象
+ */
+class MetricObjectPool {
+  private static readonly DEFAULT_POOL_SIZE = 100;
+  private pool: MonitoringMetric[] = [];
+  private size: number;
+
+  constructor(size?: number) {
+    this.size = size || MetricObjectPool.DEFAULT_POOL_SIZE;
+    this.initPool();
+  }
+
+  /**
+   * 初始化对象池
+   */
+  private initPool(): void {
+    for (let i = 0; i < this.size; i++) {
+      this.pool.push({
+        type: MonitoringMetricType.CUSTOM,
+        value: 0,
+        timestamp: 0,
+        tags: {},
+      });
+    }
+  }
+
+  /**
+   * 从对象池中获取一个对象
+   */
+  public acquire(): MonitoringMetric {
+    if (this.pool.length > 0) {
+      return this.pool.pop()!;
+    }
+
+    // 池中没有可用对象，创建新对象
+    return {
+      type: MonitoringMetricType.CUSTOM,
+      value: 0,
+      timestamp: 0,
+      tags: {},
+    };
+  }
+
+  /**
+   * 将对象归还给对象池
+   */
+  public release(metric: MonitoringMetric): void {
+    // 重置对象状态
+    metric.value = 0;
+    metric.timestamp = 0;
+
+    // 清空tags对象而不是创建新对象
+    if (metric.tags) {
+      Object.keys(metric.tags).forEach(key => {
+        delete metric.tags![key];
+      });
+    }
+
+    // 如果池没有达到最大容量，则归还
+    if (this.pool.length < this.size) {
+      this.pool.push(metric);
+    }
+  }
 }
 
 /**
@@ -61,6 +133,7 @@ export class MonitoringPlugin implements IPlugin {
   private core: UploaderCore | null = null;
   private monitoringSystem: MonitoringSystem;
   private options: Required<MonitoringPluginOptions>;
+  private metricPool: MetricObjectPool | null = null;
 
   /**
    * 创建监控插件实例
@@ -88,10 +161,18 @@ export class MonitoringPlugin implements IPlugin {
       listenToErrors: options?.listenToErrors ?? true,
       integrateWithCoreEvents: options?.integrateWithCoreEvents ?? true,
       enableConsoleLogging: options?.enableConsoleLogging ?? false,
+      useObjectPool: options?.useObjectPool ?? true,
     };
 
     // 初始化监控系统
     this.monitoringSystem = MonitoringSystem.getInstance(this.options);
+
+    // 如果启用对象池，初始化对象池
+    if (this.options.useObjectPool) {
+      this.metricPool = new MetricObjectPool(
+        Math.floor(this.options.metricsBufferSize / 4)
+      );
+    }
   }
 
   /**
@@ -149,43 +230,32 @@ export class MonitoringPlugin implements IPlugin {
   private setupEventIntegration(core: UploaderCore): void {
     // 监听文件上传开始事件
     core.on('upload:start', (file: any) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.BUSINESS_TOTAL_UPLOADS,
-        value: 1,
-        timestamp: Date.now(),
-        tags: {
-          fileId: file.id || '',
-          fileName: file.name || '',
-          fileSize: file.size?.toString() || '0',
-        },
+      this.collectMetric(MonitoringMetricType.BUSINESS_TOTAL_UPLOADS, 1, {
+        fileId: file.id || '',
+        fileName: file.name || '',
+        fileSize: file.size?.toString() || '0',
       });
     });
 
     // 监听文件上传完成事件
     core.on('upload:success', (file: any, _result: any) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.UPLOAD_SUCCESS_RATE,
-        value: 100, // 成功率100%
-        timestamp: Date.now(),
-        tags: {
+      this.collectMetric(
+        MonitoringMetricType.UPLOAD_SUCCESS_RATE,
+        100, // 成功率100%
+        {
           fileId: file.id || '',
           fileName: file.name || '',
-        },
-      });
+        }
+      );
     });
 
     // 监听文件上传错误事件
     core.on('upload:error', (file: any, error: any) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.UPLOAD_ERROR_RATE,
-        value: 1,
-        timestamp: Date.now(),
-        tags: {
-          fileId: file.id || '',
-          fileName: file.name || '',
-          errorCode: error.code || '',
-          errorMessage: error.message || '',
-        },
+      this.collectMetric(MonitoringMetricType.UPLOAD_ERROR_RATE, 1, {
+        fileId: file.id || '',
+        fileName: file.name || '',
+        errorCode: error.code || '',
+        errorMessage: error.message || '',
       });
     });
 
@@ -194,28 +264,22 @@ export class MonitoringPlugin implements IPlugin {
       if (progress.loaded && progress.total && progress.timeElapsed) {
         const speed = (progress.loaded / progress.timeElapsed) * 1000; // 字节/秒
 
-        this.monitoringSystem.collect({
-          type: MonitoringMetricType.CHUNK_SPEED,
-          value: speed,
-          timestamp: Date.now(),
-          tags: {
-            fileId: chunk.fileId || '',
-            chunkIndex: chunk.index?.toString() || '',
-          },
+        this.collectMetric(MonitoringMetricType.CHUNK_SPEED, speed, {
+          fileId: chunk.fileId || '',
+          chunkIndex: chunk.index?.toString() || '',
         });
       }
     });
 
     // 监听并发上传数量变化
     core.on('concurrency:change', (data: any) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.BUSINESS_CONCURRENT_UPLOADS,
-        value: data.current || 0,
-        timestamp: Date.now(),
-        tags: {
+      this.collectMetric(
+        MonitoringMetricType.BUSINESS_CONCURRENT_UPLOADS,
+        data.current || 0,
+        {
           reason: data.reason || '',
-        },
-      });
+        }
+      );
     });
   }
 
@@ -224,17 +288,52 @@ export class MonitoringPlugin implements IPlugin {
    */
   private setupErrorListeners(core: UploaderCore): void {
     core.on('error', (error: any) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.UPLOAD_ERROR_RATE,
-        value: 1,
-        timestamp: Date.now(),
-        tags: {
-          errorCode: error.code || '',
-          errorType: error.type || '',
-          errorMessage: error.message || '',
-        },
+      this.collectMetric(MonitoringMetricType.UPLOAD_ERROR_RATE, 1, {
+        errorCode: error.code || '',
+        errorType: error.type || '',
+        errorMessage: error.message || '',
       });
     });
+  }
+
+  /**
+   * 收集指标，如果启用了对象池则使用池中对象
+   */
+  private collectMetric(
+    type: MonitoringMetricType,
+    value: number,
+    tags?: Record<string, string>
+  ): void {
+    if (this.options.useObjectPool && this.metricPool) {
+      // 从对象池获取对象
+      const metric = this.metricPool.acquire();
+
+      // 设置指标数据
+      metric.type = type;
+      metric.value = value;
+      metric.timestamp = Date.now();
+
+      // 添加标签
+      if (tags) {
+        for (const [key, val] of Object.entries(tags)) {
+          metric.tags![key] = val;
+        }
+      }
+
+      // 收集指标
+      this.monitoringSystem.collect(metric);
+
+      // 归还对象到池中
+      this.metricPool.release(metric);
+    } else {
+      // 不使用对象池，直接创建新对象
+      this.monitoringSystem.collect({
+        type,
+        value,
+        timestamp: Date.now(),
+        tags,
+      });
+    }
   }
 
   /**
@@ -272,61 +371,60 @@ export class MonitoringPlugin implements IPlugin {
    * 移除事件监听
    */
   private removeEventListeners(_core: UploaderCore): void {
-    // 这里可以做一些清理工作，但UploaderCore目前没有提供off方法来移除特定事件回调
-    // 因此，我们依赖插件卸载机制来处理这个问题
+    // 使用相同的事件名移除事件监听
+    if (this.core) {
+      this.core.off('upload:start');
+      this.core.off('upload:success');
+      this.core.off('upload:error');
+      this.core.off('chunk:progress');
+      this.core.off('concurrency:change');
+      this.core.off('error');
+    }
   }
 
   /**
    * 扩展UploaderCore
    */
   private extendUploaderCore(core: UploaderCore): void {
-    // 这里可以向UploaderCore添加一些监控相关的方法
-    // 由于TypeScript限制，这些方法将不会有完整的类型支持
-    // 但可以在插件文档中描述这些方法
+    // 向UploaderCore添加监控相关方法
+    const uploadCore = core as any;
 
-    // 例如，我们可以添加一个收集自定义指标的方法
-    (core as any).collectCustomMetric = (
-      name: string,
+    // 添加收集自定义指标的方法
+    uploadCore.collectMetric = (
+      metricType: MonitoringMetricType,
       value: number,
       tags?: Record<string, string>
-    ) => {
-      this.monitoringSystem.collect({
-        type: MonitoringMetricType.CUSTOM,
-        value,
-        timestamp: Date.now(),
-        tags: {
-          metricName: name,
-          ...tags,
-        },
-      });
+    ): void => {
+      this.collectMetric(metricType, value, tags);
     };
 
-    // 添加一个方法来获取当前监控数据
-    (core as any).getMonitoringMetrics = () => {
-      return this.monitoringSystem.getMetrics();
+    // 添加获取聚合数据的方法
+    uploadCore.getAggregationResults = (
+      metricType?: MonitoringMetricType
+    ): AggregationResult[] => {
+      const results = this.monitoringSystem.getAggregationResults();
+      if (metricType) {
+        return results.filter(r => r.metricType === metricType);
+      }
+      return results;
     };
 
-    // 添加一个方法来获取聚合结果
-    (core as any).getMonitoringAggregations = () => {
-      return this.monitoringSystem.getAggregationResults();
-    };
-
-    // 添加一个方法来获取报警事件
-    (core as any).getMonitoringAlerts = () => {
-      return this.monitoringSystem.getAlertEvents();
-    };
-
-    // 添加一个方法来执行即时聚合
-    (core as any).aggregateMetricsNow = (
+    // 添加执行聚合的方法
+    uploadCore.aggregateNow = (
       options: AggregationOptions,
       metricType: MonitoringMetricType
-    ) => {
+    ): AggregationResult | null => {
       return this.monitoringSystem.aggregateNow(options, metricType);
     };
 
-    // 添加一个方法来添加报警规则
-    (core as any).addMonitoringAlertRule = (rule: Omit<AlertRule, 'id'>) => {
+    // 添加注册报警规则的方法
+    uploadCore.addAlertRule = (rule: Omit<AlertRule, 'id'>): string => {
       return this.monitoringSystem.addAlertRule(rule);
+    };
+
+    // 添加删除报警规则的方法
+    uploadCore.removeAlertRule = (ruleId: string): boolean => {
+      return this.monitoringSystem.removeAlertRule(ruleId);
     };
   }
 
@@ -334,20 +432,16 @@ export class MonitoringPlugin implements IPlugin {
    * 移除UploaderCore扩展
    */
   private removeUploaderCoreExtensions(core: UploaderCore): void {
-    // 删除添加的方法
-    delete (core as any).collectCustomMetric;
-    delete (core as any).getMonitoringMetrics;
-    delete (core as any).getMonitoringAggregations;
-    delete (core as any).getMonitoringAlerts;
-    delete (core as any).aggregateMetricsNow;
-    delete (core as any).addMonitoringAlertRule;
-
-    // 移除监控系统引用
-    delete (core as any).monitoringSystem;
+    const uploadCore = core as any;
+    delete uploadCore.collectMetric;
+    delete uploadCore.getAggregationResults;
+    delete uploadCore.aggregateNow;
+    delete uploadCore.addAlertRule;
+    delete uploadCore.removeAlertRule;
   }
 
   /**
-   * 注册自定义指标映射
+   * 注册指标映射
    */
   public registerMetricMapping(mapping: MetricMappingConfig): void {
     this.monitoringSystem.registerMetricMapping(mapping);
