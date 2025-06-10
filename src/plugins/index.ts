@@ -15,6 +15,14 @@ import { BasicSecurityPlugin, getSecurityPluginByLevel } from './security';
 import { SmartConcurrencyPlugin } from './SmartConcurrencyPlugin';
 import { ValidatorPlugin } from './ValidatorPlugin';
 import { StoragePlugin } from './StoragePlugin';
+import {
+  QueuePlugin,
+  QueuePluginOptions,
+  QueueItem,
+  QueueItemStatus,
+  QueueSortMode,
+  QueueStats,
+} from './QueuePlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -30,6 +38,12 @@ export {
   PWAPlugin,
   PWAPluginOptions,
   StoragePlugin,
+  QueuePlugin,
+  QueuePluginOptions,
+  QueueItem,
+  QueueItemStatus,
+  QueueSortMode,
+  QueueStats,
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
@@ -45,6 +59,7 @@ export default {
   SmartConcurrencyPlugin,
   PWAPlugin,
   StoragePlugin,
+  QueuePlugin,
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,

@@ -672,4 +672,6 @@ export interface SecurityValidationResult {
 }
 
 // 导出环境检测相关类型
-export * from './environment'; 
+export * from './environment';
+// 导出存储相关类型
+export * from './storage'; 
