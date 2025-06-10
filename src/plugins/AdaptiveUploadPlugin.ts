@@ -15,6 +15,8 @@ import {
   PathOptimizer,
   CDNSelector,
 } from './adaptive';
+import { UploaderCore } from '../core/UploaderCore';
+import { NetworkQuality, UploadStrategy } from '../types';
 
 /**
  * 自适应上传策略插件
@@ -33,6 +35,11 @@ export class AdaptiveUploadPlugin implements IPlugin {
   private fileUploadPaths: Map<string, IUploadPath> = new Map();
   private fileCDNNodes: Map<string, ICDNNode> = new Map();
   private isInitialized = false;
+  private uploader: UploaderCore | null = null;
+  private options: AdaptiveUploadOptions;
+  private uploadStrategies: Map<string, UploadStrategy> = new Map();
+  private currentNetworkQuality: NetworkQuality = NetworkQuality.UNKNOWN;
+  private monitoringInterval: NodeJS.Timeout | null = null;
 
   /**
    * 自适应上传策略插件构造函数
@@ -57,6 +64,9 @@ export class AdaptiveUploadPlugin implements IPlugin {
       debug: false,
       ...config,
     };
+
+    // 初始化上传策略
+    this.initializeUploadStrategies();
   }
 
   /**
@@ -122,26 +132,34 @@ export class AdaptiveUploadPlugin implements IPlugin {
   private registerHooks(): void {
     const core = this.uploaderCore;
 
+    // 注册自适应上传钩子
+    core.hook('adaptiveUpload:configure', this.handleConfigure.bind(this));
+    core.hook('adaptiveUpload:enable', this.handleEnable.bind(this));
+    core.hook('adaptiveUpload:disable', this.handleDisable.bind(this));
+
     // 注册文件准备钩子
-    core.hooks.register('beforeFileUpload', this.onBeforeFileUpload.bind(this));
+    core.hook('beforeFileUpload', this.onBeforeFileUpload.bind(this));
+    core.hook('beforeUpload', this.onBeforeFileUpload.bind(this));
 
     // 注册分片准备钩子
-    core.hooks.register(
-      'beforeChunkUpload',
-      this.onBeforeChunkUpload.bind(this)
-    );
+    core.hook('beforeChunkUpload', this.onBeforeChunkUpload.bind(this));
 
     // 注册上传完成钩子
-    core.hooks.register(
-      'fileUploadSuccess',
-      this.onFileUploadSuccess.bind(this)
-    );
+    core.hook('fileUploadSuccess', this.onFileUploadSuccess.bind(this));
+    core.hook('uploadComplete', this.onFileUploadSuccess.bind(this));
 
     // 注册上传失败钩子
-    core.hooks.register('fileUploadError', this.onFileUploadError.bind(this));
+    core.hook('fileUploadError', this.onFileUploadError.bind(this));
+    core.hook('uploadError', this.onFileUploadError.bind(this));
+
+    // 注册网络质量变化钩子
+    core.hook(
+      'networkQualityChange',
+      this.handleNetworkQualityChange.bind(this)
+    );
 
     // 注册资源释放钩子
-    core.hooks.register('destroy', this.onDestroy.bind(this));
+    core.hook('destroy', this.onDestroy.bind(this));
   }
 
   /**
@@ -593,5 +611,303 @@ export class AdaptiveUploadPlugin implements IPlugin {
     this.fileUploadParams.delete(fileId);
     this.fileUploadPaths.delete(fileId);
     this.fileCDNNodes.delete(fileId);
+  }
+
+  /**
+   * 初始化上传策略
+   */
+  private initializeUploadStrategies(): void {
+    // 极差网络策略
+    this.uploadStrategies.set(NetworkQuality.POOR, {
+      concurrency: 1,
+      chunkSize: 256 * 1024, // 256KB
+      retryCount: 5,
+      retryDelay: 3000,
+      timeout: 60000, // 60秒
+    });
+
+    // 一般网络策略
+    this.uploadStrategies.set(NetworkQuality.MEDIUM, {
+      concurrency: 2,
+      chunkSize: 1 * 1024 * 1024, // 1MB
+      retryCount: 3,
+      retryDelay: 2000,
+      timeout: 30000, // 30秒
+    });
+
+    // 良好网络策略
+    this.uploadStrategies.set(NetworkQuality.GOOD, {
+      concurrency: 4,
+      chunkSize: 4 * 1024 * 1024, // 4MB
+      retryCount: 2,
+      retryDelay: 1000,
+      timeout: 20000, // 20秒
+    });
+
+    // 极好网络策略
+    this.uploadStrategies.set(NetworkQuality.EXCELLENT, {
+      concurrency: 6,
+      chunkSize: 8 * 1024 * 1024, // 8MB
+      retryCount: 1,
+      retryDelay: 500,
+      timeout: 15000, // 15秒
+    });
+  }
+
+  /**
+   * 选择上传策略
+   */
+  private selectUploadStrategy(file: any): UploadStrategy {
+    const fileSize = file.size;
+    const quality = this.currentNetworkQuality;
+
+    // 获取与当前网络质量匹配的策略
+    const strategy = this.getStrategyForNetworkQuality(quality);
+
+    // 根据文件大小调整分片大小
+    if (this.options.adjustChunkSize) {
+      // 对于大文件，增加分片大小以提高效率
+      if (fileSize > 100 * 1024 * 1024) {
+        // 100MB以上
+        strategy.chunkSize = Math.min(
+          strategy.chunkSize * 2,
+          this.options.maxChunkSize as number
+        );
+      }
+
+      // 对于小文件，减小分片大小
+      if (fileSize < 10 * 1024 * 1024) {
+        // 10MB以下
+        strategy.chunkSize = Math.max(
+          strategy.chunkSize / 2,
+          this.options.minChunkSize as number
+        );
+      }
+    }
+
+    return strategy;
+  }
+
+  /**
+   * 根据网络质量获取策略
+   */
+  private getStrategyForNetworkQuality(
+    quality: NetworkQuality
+  ): UploadStrategy {
+    // 默认使用中等网络策略
+    let strategy = this.uploadStrategies.get(
+      NetworkQuality.MEDIUM
+    ) as UploadStrategy;
+
+    // 如果存在指定质量的策略，使用对应策略
+    if (this.uploadStrategies.has(quality)) {
+      strategy = this.uploadStrategies.get(quality) as UploadStrategy;
+    }
+
+    return { ...strategy };
+  }
+
+  /**
+   * 应用策略到上传器
+   */
+  private applyStrategy(strategy: UploadStrategy): void {
+    if (!this.uploader) return;
+
+    // 调整调度器配置
+    const scheduler = this.uploader.getTaskScheduler();
+
+    if (scheduler) {
+      scheduler.updateConfig({
+        concurrency: strategy.concurrency,
+        retryCount: strategy.retryCount,
+        retryDelay: strategy.retryDelay,
+        timeout: strategy.timeout,
+      });
+    }
+
+    // 记录应用的策略
+    if (this.uploader) {
+      this.uploader.emit('adaptiveStrategyApplied', {
+        strategy,
+        networkQuality: this.currentNetworkQuality,
+      });
+    }
+  }
+
+  /**
+   * 开始监控
+   */
+  private startMonitoring(): void {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+    }
+
+    this.monitoringInterval = setInterval(() => {
+      this.checkNetworkQuality();
+    }, this.options.samplingInterval);
+  }
+
+  /**
+   * 停止监控
+   */
+  private stopMonitoring(): void {
+    if (this.monitoringInterval) {
+      clearInterval(this.monitoringInterval);
+      this.monitoringInterval = null;
+    }
+  }
+
+  /**
+   * 重启监控
+   */
+  private restartMonitoring(): void {
+    this.stopMonitoring();
+    this.startMonitoring();
+  }
+
+  /**
+   * 检查网络质量
+   */
+  private checkNetworkQuality(): void {
+    if (this.networkDetector) {
+      this.networkDetector.detectNetworkQuality();
+    }
+  }
+
+  /**
+   * 获取当前网络质量
+   */
+  public getCurrentNetworkQuality(): NetworkQuality {
+    return this.currentNetworkQuality;
+  }
+
+  /**
+   * 获取当前策略
+   */
+  public getCurrentStrategy(): UploadStrategy {
+    return this.getStrategyForNetworkQuality(this.currentNetworkQuality);
+  }
+
+  /**
+   * 销毁插件
+   */
+  public uninstall(): void {
+    this.stopMonitoring();
+
+    if (this.networkDetector) {
+      this.networkDetector.dispose();
+      this.networkDetector = null;
+    }
+
+    this.uploader = null;
+  }
+
+  /**
+   * 处理配置更新
+   */
+  private handleConfigure({ options }: { options: Partial<any> }): {
+    handled: boolean;
+  } {
+    if (this.config.debug) {
+      console.log('[AdaptiveUploadPlugin] 更新配置:', options);
+    }
+
+    // 合并配置
+    this.config = {
+      ...this.config,
+      ...options,
+    };
+
+    // 如果调整了采样间隔，重启监控
+    if (options.networkMonitoringInterval && this.networkDetector) {
+      this.networkDetector.stopMonitoring();
+      this.networkDetector.startMonitoring(options.networkMonitoringInterval);
+    }
+
+    return { handled: true };
+  }
+
+  /**
+   * 处理启用自适应上传
+   */
+  private handleEnable(): { handled: boolean } {
+    this.config.enableNetworkDetection = true;
+    this.config.enableParameterAdjustment = true;
+    this.config.enablePathOptimization = true;
+
+    if (this.networkDetector && !this.networkDetector.isMonitoring()) {
+      this.networkDetector.startMonitoring(
+        this.config.networkMonitoringInterval
+      );
+    }
+
+    if (this.config.debug) {
+      console.log('[AdaptiveUploadPlugin] 自适应上传已启用');
+    }
+
+    return { handled: true };
+  }
+
+  /**
+   * 处理禁用自适应上传
+   */
+  private handleDisable(): { handled: boolean } {
+    this.config.enableNetworkDetection = false;
+    this.config.enableParameterAdjustment = false;
+    this.config.enablePathOptimization = false;
+
+    if (this.networkDetector) {
+      this.networkDetector.stopMonitoring();
+    }
+
+    if (this.config.debug) {
+      console.log('[AdaptiveUploadPlugin] 自适应上传已禁用');
+    }
+
+    return { handled: true };
+  }
+
+  /**
+   * 处理网络质量变化
+   */
+  private handleNetworkQualityChange({
+    quality,
+  }: {
+    quality: NetworkQuality;
+  }): { handled: boolean } {
+    // 转换为内部网络质量类型
+    let internalQuality: NetworkQualityLevel;
+
+    switch (quality) {
+      case NetworkQuality.POOR:
+        internalQuality = NetworkQualityLevel.POOR;
+        break;
+      case NetworkQuality.MEDIUM:
+        internalQuality = NetworkQualityLevel.MODERATE;
+        break;
+      case NetworkQuality.GOOD:
+        internalQuality = NetworkQualityLevel.GOOD;
+        break;
+      case NetworkQuality.EXCELLENT:
+        internalQuality = NetworkQualityLevel.EXCELLENT;
+        break;
+      default:
+        internalQuality = NetworkQualityLevel.MODERATE;
+    }
+
+    // 创建网络质量结果对象
+    const networkQualityResult: INetworkQualityResult = {
+      qualityLevel: internalQuality,
+      downloadSpeed: 0, // 这些值可以从NetworkDetector获取
+      uploadSpeed: 0,
+      latency: 0,
+      isUnstable: false,
+      timestamp: Date.now(),
+    };
+
+    // 触发网络变化处理
+    this.handleNetworkChange(networkQualityResult);
+
+    return { handled: true };
   }
 }

@@ -60,6 +60,9 @@ export * from './security/AdvancedSecurityPlugin';
 export * from './AccessibilityPlugin';
 export * from './I18nPlugin';
 
+// 适应性上传
+export { AdaptiveUploadPlugin } from './AdaptiveUploadPlugin';
+
 // 导出所有插件
 export {
   ChunkPlugin,

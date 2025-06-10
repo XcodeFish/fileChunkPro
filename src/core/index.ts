@@ -2,27 +2,30 @@
  * 核心模块导出
  */
 
-import { ErrorCenter, UploadError } from './ErrorCenter';
-import EventBus from './EventBus';
-import PluginManager from './PluginManager';
-import TaskScheduler from './TaskScheduler';
-import UploaderCore from './UploaderCore';
-import WorkerManager from './WorkerManager';
-import { WorkerPoolManager } from './WorkerPoolManager';
-import { DebugCenter } from './DebugCenter';
-import { ServiceWorkerManager } from './ServiceWorkerManager';
+import { UploaderCore } from './UploaderCore';
+import { EventBus } from './EventBus';
+import { ErrorCenter } from './ErrorCenter';
+import { FileProcessor } from './FileProcessor';
+import { NetworkManager } from './NetworkManager';
+import { UploadStrategyManager } from './UploadStrategyManager';
+import { TaskScheduler } from './TaskScheduler';
+import { WorkerManager } from './WorkerManager';
+import { PluginManager } from './PluginManager';
+import { DependencyContainer } from './DependencyContainer';
 
+// 导出所有核心模块
 export {
   UploaderCore,
   EventBus,
-  PluginManager,
-  TaskScheduler,
   ErrorCenter,
-  UploadError,
+  FileProcessor,
+  NetworkManager,
+  UploadStrategyManager,
+  TaskScheduler,
   WorkerManager,
-  WorkerPoolManager,
-  DebugCenter,
-  ServiceWorkerManager,
+  PluginManager,
+  DependencyContainer,
 };
 
+// 导出默认实例
 export default UploaderCore;

@@ -53,7 +53,7 @@ export interface ServiceWorkerOptions {
 }
 
 /**
- * ServiceWorkerManager接口
+ * ServiceWorker管理器接口
  */
 export interface IServiceWorkerManager {
   /**
@@ -115,4 +115,50 @@ export interface IServiceWorkerManager {
    * 清理资源
    */
   dispose(): void;
+}
+
+/**
+ * ServiceWorker插件接口
+ * 定义ServiceWorker插件必须实现的方法
+ */
+export interface IServiceWorkerPlugin {
+  /**
+   * 获取ServiceWorker配置
+   */
+  getConfig(): {
+    swPath: string;
+    useOfflineCache: boolean;
+    enableBackgroundUploads: boolean;
+    enableRequestCache: boolean;
+  };
+  
+  /**
+   * 启用离线上传功能
+   */
+  enableOfflineUpload(): this;
+  
+  /**
+   * 禁用离线上传功能
+   */
+  disableOfflineUpload(): this;
+  
+  /**
+   * 启用后台上传功能
+   */
+  enableBackgroundUploads(): this;
+  
+  /**
+   * 禁用后台上传功能
+   */
+  disableBackgroundUploads(): this;
+  
+  /**
+   * 启用请求缓存功能
+   */
+  enableRequestCache(): this;
+  
+  /**
+   * 禁用请求缓存功能
+   */
+  disableRequestCache(): this;
 } 

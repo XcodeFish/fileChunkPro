@@ -4,7 +4,7 @@
  */
 
 import { ServiceWorkerManager } from '../core/ServiceWorkerManager';
-import { ServiceWorkerOptions } from '../types/services';
+import { ServiceWorkerOptions, IServiceWorkerPlugin } from '../types/services';
 import { UploaderCore } from '../core/UploaderCore';
 import EnvUtils from '../utils/EnvUtils';
 
@@ -13,14 +13,24 @@ import EnvUtils from '../utils/EnvUtils';
  */
 export interface ServiceWorkerPluginOptions extends ServiceWorkerOptions {
   /**
-   * 是否启用离线上传
+   * ServiceWorker脚本路径
    */
-  enableOfflineUpload?: boolean;
+  swPath?: string;
+
+  /**
+   * 是否启用离线上传缓存
+   */
+  useOfflineCache?: boolean;
 
   /**
    * 是否启用后台上传
    */
-  enableBackgroundUpload?: boolean;
+  enableBackgroundUploads?: boolean;
+
+  /**
+   * 是否启用请求缓存
+   */
+  enableRequestCache?: boolean;
 
   /**
    * 是否开启自动清理缓存
@@ -52,7 +62,7 @@ export interface ServiceWorkerPluginOptions extends ServiceWorkerOptions {
  * ServiceWorkerPlugin类
  * 通过ServiceWorker提供离线上传、后台上传等功能
  */
-export class ServiceWorkerPlugin {
+export class ServiceWorkerPlugin implements IServiceWorkerPlugin {
   private manager: ServiceWorkerManager | null = null;
   private uploader: UploaderCore | null = null;
   private options: ServiceWorkerPluginOptions;
@@ -62,14 +72,21 @@ export class ServiceWorkerPlugin {
   private syncRegistered = false;
 
   /**
+   * 插件名称
+   */
+  public name = 'serviceWorker';
+
+  /**
    * 创建ServiceWorkerPlugin实例
    * @param options 配置选项
    */
   constructor(options: ServiceWorkerPluginOptions) {
     this.options = {
       scriptURL: options.scriptURL || '/sw.js',
-      enableOfflineUpload: options.enableOfflineUpload !== false,
-      enableBackgroundUpload: options.enableBackgroundUpload !== false,
+      swPath: options.swPath || '/serviceWorker.js',
+      useOfflineCache: options.useOfflineCache !== false,
+      enableBackgroundUploads: options.enableBackgroundUploads !== false,
+      enableRequestCache: options.enableRequestCache !== false,
       autoCleanCache: options.autoCleanCache !== false,
       maxOfflineRetries: options.maxOfflineRetries || 5,
       offlineRetryInterval: options.offlineRetryInterval || 60000, // 默认1分钟
@@ -77,6 +94,74 @@ export class ServiceWorkerPlugin {
       offlineUploadTimeout: options.offlineUploadTimeout || 5 * 60 * 1000, // 默认5分钟
       ...options,
     };
+  }
+
+  /**
+   * 获取ServiceWorker配置
+   */
+  public getConfig(): {
+    swPath: string;
+    useOfflineCache: boolean;
+    enableBackgroundUploads: boolean;
+    enableRequestCache: boolean;
+  } {
+    return {
+      swPath: this.options.swPath || '/serviceWorker.js',
+      useOfflineCache: this.options.useOfflineCache !== false,
+      enableBackgroundUploads: this.options.enableBackgroundUploads !== false,
+      enableRequestCache: this.options.enableRequestCache !== false,
+    };
+  }
+
+  /**
+   * 启用离线上传功能
+   */
+  public enableOfflineUpload(): this {
+    this.options.useOfflineCache = true;
+    return this;
+  }
+
+  /**
+   * 禁用离线上传功能
+   */
+  public disableOfflineUpload(): this {
+    this.options.useOfflineCache = false;
+    return this;
+  }
+
+  /**
+   * 启用后台上传功能
+   */
+  public enableBackgroundUploads(): this {
+    this.options.enableBackgroundUploads = true;
+    if (this.uploader && this.manager) {
+      this.registerBackgroundSync();
+    }
+    return this;
+  }
+
+  /**
+   * 禁用后台上传功能
+   */
+  public disableBackgroundUploads(): this {
+    this.options.enableBackgroundUploads = false;
+    return this;
+  }
+
+  /**
+   * 启用请求缓存功能
+   */
+  public enableRequestCache(): this {
+    this.options.enableRequestCache = true;
+    return this;
+  }
+
+  /**
+   * 禁用请求缓存功能
+   */
+  public disableRequestCache(): this {
+    this.options.enableRequestCache = false;
+    return this;
   }
 
   /**
@@ -93,25 +178,37 @@ export class ServiceWorkerPlugin {
 
     this.uploader = uploader;
 
-    // 创建ServiceWorkerManager
-    this.manager = new ServiceWorkerManager(this.options);
+    // 监听核心初始化ServiceWorker的钩子
+    uploader.hook('core:initServiceWorker', ({ options, manager }) => {
+      this.manager = manager;
 
-    // 注册事件监听
-    this.registerEvents();
+      // 更新插件配置
+      this.options = {
+        ...this.options,
+        swPath: options.swPath || this.options.swPath,
+        useOfflineCache: options.useOfflineCache,
+        enableBackgroundUploads: options.enableBackgroundUploads,
+        enableRequestCache: options.enableRequestCache,
+      };
 
-    // 如果支持后台同步，注册后台同步
-    if (this.options.enableBackgroundUpload) {
-      this.registerBackgroundSync();
-    }
+      // 注册事件监听
+      this.registerEvents();
 
-    // 初始化离线重试机制
-    if (this.options.enableOfflineUpload) {
-      this.initOfflineRetry();
-    }
+      // 如果支持后台同步，注册后台同步
+      if (this.options.enableBackgroundUploads) {
+        this.registerBackgroundSync();
+      }
 
-    // 将ServiceWorkerManager实例暴露给UploaderCore
-    uploader['_serviceWorkerManager'] = this.manager;
-    uploader['_internalPlugins'].serviceWorker = this;
+      // 初始化离线重试机制
+      if (this.options.useOfflineCache) {
+        this.initOfflineRetry();
+      }
+
+      return { handled: true };
+    });
+
+    // 注册插件
+    uploader.getPluginManager().registerPlugin(this.name, this);
   }
 
   /**
@@ -156,7 +253,7 @@ export class ServiceWorkerPlugin {
     this.uploader.hook('beforeUpload', async (file, options) => {
       // 仅当显式指定使用ServiceWorker或启用后台上传时才使用ServiceWorker
       if (
-        (options?.useServiceWorker || this.options.enableBackgroundUpload) &&
+        (options?.useServiceWorker || this.options.enableBackgroundUploads) &&
         this.manager?.isReady()
       ) {
         // 生成唯一文件ID
@@ -204,7 +301,7 @@ export class ServiceWorkerPlugin {
     // 添加到相应队列
     if (options?.background) {
       this.backgroundQueue.add(fileId);
-    } else if (this.options.enableOfflineUpload) {
+    } else if (this.options.useOfflineCache) {
       this.offlineQueue.add(fileId);
     }
 

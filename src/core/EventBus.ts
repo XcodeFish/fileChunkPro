@@ -1,255 +1,663 @@
 /**
- * EventBus - 事件总线系统
- * 提供事件注册、取消和触发功能
+ * EventBus - 事件总线
+ * 提供类型安全的事件发布订阅机制
  */
 
 /**
- * 事件对象接口
+ * 事件处理器类型
  */
-export interface EventObject {
-  type: string; // 事件类型
-  timestamp: number; // 事件发生时间戳
-  data?: any; // 事件数据
-  defaultPrevented: boolean; // 是否阻止了默认行为
-  propagationStopped: boolean; // 是否停止传播
-  source?: any; // 事件源
-  target?: any; // 事件目标
+export type EventHandler<T = any> = (data: T) => void;
+
+/**
+ * 事件订阅选项
+ */
+export interface SubscriptionOptions {
+  /**
+   * 是否只监听一次
+   */
+  once?: boolean;
 
   /**
-   * 阻止事件默认行为
+   * 订阅优先级，数字越大优先级越高
    */
-  preventDefault(): void;
+  priority?: number;
 
   /**
-   * 停止事件传播
+   * 订阅标识，用于分组和批量取消
    */
-  stopPropagation(): void;
-
-  /**
-   * 同时阻止默认行为和停止传播
-   */
-  stop(): void;
+  tag?: string;
 }
 
 /**
- * 创建事件对象
- * @param type 事件类型
- * @param data 事件数据
- * @param source 事件源
+ * 订阅信息
  */
-export function createEventObject(
-  type: string,
-  data?: any,
-  source?: any
-): EventObject {
-  const event: EventObject = {
-    type,
-    timestamp: Date.now(),
-    data,
-    defaultPrevented: false,
-    propagationStopped: false,
-    source,
-    target: null,
-
-    preventDefault() {
-      this.defaultPrevented = true;
-    },
-
-    stopPropagation() {
-      this.propagationStopped = true;
-    },
-
-    stop() {
-      this.preventDefault();
-      this.stopPropagation();
-    },
-  };
-
-  return event;
-}
-
-type EventHandler = (event: EventObject, ...args: any[]) => void;
-type EventHandlerOptions = {
-  once?: boolean; // 是否只执行一次
-  priority?: number; // 优先级（值越大优先级越高）
-};
-
-interface EventHandlerInfo {
-  handler: EventHandler;
-  options?: EventHandlerOptions;
-}
-
-export class EventBus {
-  private events: Map<string, EventHandlerInfo[]> = new Map();
+interface Subscription<T = any> {
+  /**
+   * 事件处理器
+   */
+  handler: EventHandler<T>;
 
   /**
-   * 注册事件监听器
-   * @param event 事件名称
-   * @param handler 事件处理函数
-   * @param options 选项配置
+   * 是否只监听一次
    */
-  public on(
-    event: string,
-    handler: EventHandler,
-    options?: EventHandlerOptions
-  ): void {
-    if (!this.events.has(event)) {
-      this.events.set(event, []);
+  once: boolean;
+
+  /**
+   * 订阅优先级
+   */
+  priority: number;
+
+  /**
+   * 订阅标识
+   */
+  tag?: string;
+}
+
+/**
+ * 事件流水线
+ */
+export interface EventPipeline<T> {
+  /**
+   * 添加处理器到流水线
+   * @param handler 处理器函数
+   * @returns 更新后的流水线
+   */
+  pipe<R>(handler: (data: T) => R): EventPipeline<R>;
+
+  /**
+   * 异步添加处理器到流水线
+   * @param handler 异步处理器函数
+   * @returns 更新后的流水线
+   */
+  pipeAsync<R>(handler: (data: T) => Promise<R>): EventPipeline<Promise<R>>;
+
+  /**
+   * 获取流水线结果
+   * @returns 处理结果
+   */
+  getValue(): T;
+}
+
+/**
+ * 事件总线接口
+ */
+export interface IEventBus {
+  /**
+   * 订阅事件
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @param options 订阅选项
+   * @returns 取消订阅的函数
+   */
+  on<T = any>(
+    eventName: string,
+    handler: EventHandler<T>,
+    options?: SubscriptionOptions
+  ): () => void;
+
+  /**
+   * 订阅事件（只触发一次）
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @param options 订阅选项
+   * @returns 取消订阅的函数
+   */
+  once<T = any>(
+    eventName: string,
+    handler: EventHandler<T>,
+    options?: SubscriptionOptions
+  ): () => void;
+
+  /**
+   * 发布事件
+   * @param eventName 事件名称
+   * @param data 事件数据
+   * @returns 是否有监听器处理了事件
+   */
+  emit<T = any>(eventName: string, data?: T): boolean;
+
+  /**
+   * 通过流水线处理事件数据
+   * @param eventName 事件名称
+   * @param data 初始数据
+   * @returns 事件流水线
+   */
+  pipe<T = any>(eventName: string, data: T): EventPipeline<T>;
+
+  /**
+   * 取消订阅
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @returns 是否成功取消订阅
+   */
+  off<T = any>(eventName: string, handler?: EventHandler<T>): boolean;
+
+  /**
+   * 取消指定标签的所有订阅
+   * @param tag 标签名称
+   * @returns 取消的订阅数量
+   */
+  offByTag(tag: string): number;
+
+  /**
+   * 取消指定事件的所有订阅
+   * @param eventName 事件名称
+   * @returns 是否成功取消
+   */
+  offAll(eventName: string): boolean;
+
+  /**
+   * 获取指定事件的订阅者数量
+   * @param eventName 事件名称
+   * @returns 订阅者数量
+   */
+  listenerCount(eventName: string): number;
+
+  /**
+   * 检查是否有指定事件的订阅者
+   * @param eventName 事件名称
+   * @returns 是否有订阅者
+   */
+  hasListeners(eventName: string): boolean;
+
+  /**
+   * 获取所有已注册的事件名称
+   * @returns 事件名称数组
+   */
+  eventNames(): string[];
+
+  /**
+   * 清空所有订阅
+   */
+  clear(): void;
+
+  /**
+   * 创建事件空间，隔离事件处理
+   * @param namespace 命名空间
+   * @returns 命名空间事件总线
+   */
+  createNamespace(namespace: string): IEventBus;
+}
+
+/**
+ * 事件流水线实现
+ */
+class EventPipelineImpl<T> implements EventPipeline<T> {
+  /**
+   * 构造函数
+   * @param value 当前值
+   */
+  constructor(private value: T) {}
+
+  /**
+   * 添加处理器到流水线
+   * @param handler 处理器函数
+   * @returns 更新后的流水线
+   */
+  pipe<R>(handler: (data: T) => R): EventPipeline<R> {
+    return new EventPipelineImpl<R>(handler(this.value));
+  }
+
+  /**
+   * 异步添加处理器到流水线
+   * @param handler 异步处理器函数
+   * @returns 更新后的流水线
+   */
+  async pipeAsync<R>(
+    handler: (data: T) => Promise<R>
+  ): Promise<EventPipeline<R>> {
+    const result = await handler(this.value);
+    return new EventPipelineImpl<R>(result);
+  }
+
+  /**
+   * 获取流水线结果
+   * @returns 处理结果
+   */
+  getValue(): T {
+    return this.value;
+  }
+}
+
+/**
+ * 事件总线
+ */
+export class EventBus implements IEventBus {
+  /**
+   * 所有事件的订阅者映射
+   */
+  private subscriptions = new Map<string, Array<Subscription>>();
+
+  /**
+   * 事件命名空间映射
+   */
+  private namespaces = new Map<string, EventBus>();
+
+  /**
+   * 当前命名空间名称
+   */
+  private namespaceName = '';
+
+  /**
+   * 父事件总线
+   */
+  private parent: EventBus | null = null;
+
+  /**
+   * 是否启用调试模式
+   */
+  private debug = false;
+
+  /**
+   * 最大事件历史记录数量
+   */
+  private readonly MAX_HISTORY_SIZE = 100;
+
+  /**
+   * 事件历史记录
+   */
+  private eventHistory: Array<{
+    name: string;
+    data: any;
+    timestamp: number;
+  }> = [];
+
+  /**
+   * 创建事件总线
+   * @param options 配置选项
+   */
+  constructor(options?: {
+    debug?: boolean;
+    namespaceName?: string;
+    parent?: EventBus;
+  }) {
+    this.debug = options?.debug || false;
+    this.namespaceName = options?.namespaceName || '';
+    this.parent = options?.parent || null;
+
+    if (this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 初始化`
+      );
+    }
+  }
+
+  /**
+   * 获取事件完整名称（带命名空间）
+   * @param eventName 事件名称
+   * @returns 完整事件名称
+   */
+  private getFullEventName(eventName: string): string {
+    return this.namespaceName
+      ? `${this.namespaceName}:${eventName}`
+      : eventName;
+  }
+
+  /**
+   * 获取事件订阅列表
+   * @param eventName 事件名称
+   * @param createIfNotExist 如果不存在是否创建
+   * @returns 订阅列表
+   */
+  private getSubscriptions<T = any>(
+    eventName: string,
+    createIfNotExist = false
+  ): Array<Subscription<T>> {
+    const fullEventName = this.getFullEventName(eventName);
+
+    if (!this.subscriptions.has(fullEventName) && createIfNotExist) {
+      this.subscriptions.set(fullEventName, []);
     }
 
-    const handlerInfo: EventHandlerInfo = {
+    return (
+      (this.subscriptions.get(fullEventName) as Array<Subscription<T>>) || []
+    );
+  }
+
+  /**
+   * 订阅事件
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @param options 订阅选项
+   * @returns 取消订阅的函数
+   */
+  on<T = any>(
+    eventName: string,
+    handler: EventHandler<T>,
+    options: SubscriptionOptions = {}
+  ): () => void {
+    if (typeof handler !== 'function') {
+      throw new Error('事件处理器必须是一个函数');
+    }
+
+    const subscription: Subscription<T> = {
       handler,
-      options,
+      once: options.once || false,
+      priority: options.priority || 0,
+      tag: options.tag,
     };
 
-    const handlers = this.events.get(event)!;
+    const subs = this.getSubscriptions<T>(eventName, true);
+    subs.push(subscription);
 
-    // 如果设置了优先级，按照优先级插入
-    if (options && typeof options.priority === 'number') {
-      const priority = options.priority;
-      const index = handlers.findIndex(h => {
-        const hPriority =
-          h.options && typeof h.options.priority === 'number'
-            ? h.options.priority
-            : 0;
-        return hPriority < priority;
+    // 按优先级排序，优先级高的先执行
+    subs.sort((a, b) => b.priority - a.priority);
+
+    const fullEventName = this.getFullEventName(eventName);
+    this.subscriptions.set(fullEventName, subs as Array<Subscription>);
+
+    if (this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 订阅事件: ${eventName}${subscription.once ? ' (一次性)' : ''}${subscription.tag ? ` [${subscription.tag}]` : ''}`
+      );
+    }
+
+    // 返回取消订阅的函数
+    return () => this.off(eventName, handler);
+  }
+
+  /**
+   * 订阅事件（只触发一次）
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @param options 订阅选项
+   * @returns 取消订阅的函数
+   */
+  once<T = any>(
+    eventName: string,
+    handler: EventHandler<T>,
+    options: SubscriptionOptions = {}
+  ): () => void {
+    return this.on(eventName, handler, { ...options, once: true });
+  }
+
+  /**
+   * 发布事件
+   * @param eventName 事件名称
+   * @param data 事件数据
+   * @returns 是否有监听器处理了事件
+   */
+  emit<T = any>(eventName: string, data?: T): boolean {
+    const fullEventName = this.getFullEventName(eventName);
+
+    // 记录事件历史
+    if (this.debug) {
+      this.eventHistory.push({
+        name: eventName,
+        data,
+        timestamp: Date.now(),
       });
 
-      if (index !== -1) {
-        handlers.splice(index, 0, handlerInfo);
-        return;
+      // 保持历史记录在最大数量以内
+      if (this.eventHistory.length > this.MAX_HISTORY_SIZE) {
+        this.eventHistory.shift();
       }
     }
 
-    // 默认添加到末尾
-    handlers.push(handlerInfo);
-  }
+    const subs = this.getSubscriptions<T>(eventName);
 
-  /**
-   * 注册只执行一次的事件监听器
-   * @param event 事件名称
-   * @param handler 事件处理函数
-   * @param options 选项配置
-   */
-  public once(
-    event: string,
-    handler: EventHandler,
-    options?: EventHandlerOptions
-  ): void {
-    this.on(event, handler, { ...options, once: true });
-  }
-
-  /**
-   * 移除事件监听器
-   * @param event 事件名称
-   * @param handler 事件处理函数（可选，不提供则移除该事件所有监听器）
-   */
-  public off(event: string, handler?: EventHandler): void {
-    if (!this.events.has(event)) return;
-
-    if (!handler) {
-      this.events.delete(event);
-      return;
+    if (subs.length === 0) {
+      if (this.debug) {
+        console.debug(
+          `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 事件无订阅者: ${eventName}`
+        );
+      }
+      return false;
     }
 
-    const handlers = this.events.get(event) || [];
-    const index = handlers.findIndex(h => h.handler === handler);
-
-    if (index !== -1) {
-      handlers.splice(index, 1);
+    if (this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 发布事件: ${eventName}`,
+        data
+      );
     }
 
-    if (handlers.length === 0) {
-      this.events.delete(event);
-    }
-  }
+    // 收集需要移除的一次性订阅
+    const onceSubs: Subscription<T>[] = [];
 
-  /**
-   * 触发事件
-   * @param event 事件名称或事件对象
-   * @param args 事件参数
-   * @returns 事件对象
-   */
-  public emit(event: string | EventObject, ...args: any[]): EventObject {
-    // 如果传入的是字符串，创建事件对象
-    const eventObj: EventObject =
-      typeof event === 'string' ? createEventObject(event, args[0]) : event;
-
-    const eventType = eventObj.type;
-
-    if (!this.events.has(eventType)) {
-      return eventObj;
-    }
-
-    // 获取处理函数列表的副本，防止在处理过程中修改原列表
-    const handlers = [...(this.events.get(eventType) || [])];
-    const onceHandlers: EventHandler[] = [];
-
-    // 按照注册顺序执行所有处理函数
-    for (const handlerInfo of handlers) {
+    // 调用所有订阅者的处理函数
+    for (const sub of subs) {
       try {
-        // 如果事件已经停止传播，终止执行
-        if (eventObj.propagationStopped) {
-          break;
-        }
+        sub.handler(data as T);
 
-        // 执行处理函数，传递事件对象作为第一个参数
-        handlerInfo.handler(eventObj);
-
-        // 收集一次性处理函数，稍后统一移除
-        if (handlerInfo.options?.once) {
-          onceHandlers.push(handlerInfo.handler);
+        if (sub.once) {
+          onceSubs.push(sub);
         }
       } catch (error) {
-        console.error(
-          `[EventBus] Error in event handler for "${eventType}":`,
-          error
+        console.error(`[EventBus] 事件处理器错误:`, error);
+      }
+    }
+
+    // 移除一次性订阅
+    if (onceSubs.length > 0) {
+      const filteredSubs = subs.filter(sub => !onceSubs.includes(sub));
+      if (filteredSubs.length === 0) {
+        this.subscriptions.delete(fullEventName);
+      } else {
+        this.subscriptions.set(
+          fullEventName,
+          filteredSubs as Array<Subscription>
         );
       }
     }
 
-    // 移除一次性处理函数
-    onceHandlers.forEach(handler => this.off(eventType, handler));
-
-    return eventObj;
+    return true;
   }
 
   /**
-   * 移除所有事件监听器
-   * @param eventName 可选，指定要清除的事件名称
+   * 通过流水线处理事件数据
+   * @param eventName 事件名称
+   * @param data 初始数据
+   * @returns 事件流水线
    */
-  public removeAllListeners(eventName?: string): void {
-    if (eventName) {
-      this.events.delete(eventName);
+  pipe<T = any>(eventName: string, data: T): EventPipeline<T> {
+    const subs = this.getSubscriptions<T>(eventName);
+
+    if (subs.length === 0) {
+      return new EventPipelineImpl<T>(data);
+    }
+
+    // 创建初始流水线
+    let pipeline = new EventPipelineImpl<T>(data);
+
+    // 应用每个处理器
+    for (const sub of subs) {
+      pipeline = pipeline.pipe(value => {
+        sub.handler(value);
+        return value;
+      }) as EventPipelineImpl<T>;
+    }
+
+    return pipeline;
+  }
+
+  /**
+   * 取消订阅
+   * @param eventName 事件名称
+   * @param handler 事件处理器
+   * @returns 是否成功取消订阅
+   */
+  off<T = any>(eventName: string, handler?: EventHandler<T>): boolean {
+    const fullEventName = this.getFullEventName(eventName);
+
+    if (!this.subscriptions.has(fullEventName)) {
+      return false;
+    }
+
+    if (!handler) {
+      // 移除所有该事件的订阅
+      this.subscriptions.delete(fullEventName);
+      return true;
+    }
+
+    const subs = this.getSubscriptions<T>(eventName);
+    const originalLength = subs.length;
+    const filteredSubs = subs.filter(sub => sub.handler !== handler);
+
+    if (filteredSubs.length === originalLength) {
+      return false; // 没有找到匹配的处理器
+    }
+
+    if (filteredSubs.length === 0) {
+      this.subscriptions.delete(fullEventName);
     } else {
-      this.events.clear();
+      this.subscriptions.set(
+        fullEventName,
+        filteredSubs as Array<Subscription>
+      );
+    }
+
+    if (this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消订阅事件: ${eventName}`
+      );
+    }
+
+    return true;
+  }
+
+  /**
+   * 取消指定标签的所有订阅
+   * @param tag 标签名称
+   * @returns 取消的订阅数量
+   */
+  offByTag(tag: string): number {
+    let count = 0;
+
+    for (const [eventName, subs] of this.subscriptions.entries()) {
+      const originalLength = subs.length;
+      const filteredSubs = subs.filter(sub => sub.tag !== tag);
+
+      if (filteredSubs.length !== originalLength) {
+        count += originalLength - filteredSubs.length;
+
+        if (filteredSubs.length === 0) {
+          this.subscriptions.delete(eventName);
+        } else {
+          this.subscriptions.set(eventName, filteredSubs);
+        }
+      }
+    }
+
+    if (this.debug && count > 0) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消标签订阅: ${tag}, 数量: ${count}`
+      );
+    }
+
+    return count;
+  }
+
+  /**
+   * 取消指定事件的所有订阅
+   * @param eventName 事件名称
+   * @returns 是否成功取消
+   */
+  offAll(eventName: string): boolean {
+    const fullEventName = this.getFullEventName(eventName);
+    const result = this.subscriptions.delete(fullEventName);
+
+    if (result && this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消所有订阅: ${eventName}`
+      );
+    }
+
+    return result;
+  }
+
+  /**
+   * 获取指定事件的订阅者数量
+   * @param eventName 事件名称
+   * @returns 订阅者数量
+   */
+  listenerCount(eventName: string): number {
+    return this.getSubscriptions(eventName).length;
+  }
+
+  /**
+   * 检查是否有指定事件的订阅者
+   * @param eventName 事件名称
+   * @returns 是否有订阅者
+   */
+  hasListeners(eventName: string): boolean {
+    return this.listenerCount(eventName) > 0;
+  }
+
+  /**
+   * 获取所有已注册的事件名称
+   * @returns 事件名称数组
+   */
+  eventNames(): string[] {
+    const prefix = this.namespaceName ? `${this.namespaceName}:` : '';
+    const names: string[] = [];
+
+    for (const name of this.subscriptions.keys()) {
+      if (prefix && name.startsWith(prefix)) {
+        names.push(name.substring(prefix.length));
+      } else if (!prefix) {
+        names.push(name);
+      }
+    }
+
+    return names;
+  }
+
+  /**
+   * 清空所有订阅
+   */
+  clear(): void {
+    this.subscriptions.clear();
+
+    if (this.debug) {
+      console.debug(
+        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 清空所有订阅`
+      );
     }
   }
 
   /**
-   * 清除所有事件监听器（与removeAllListeners功能相同）
+   * 创建事件空间，隔离事件处理
+   * @param namespace 命名空间
+   * @returns 命名空间事件总线
    */
-  public clear(): void {
-    this.removeAllListeners();
+  createNamespace(namespace: string): EventBus {
+    if (this.namespaces.has(namespace)) {
+      return this.namespaces.get(namespace)!;
+    }
+
+    const namespaceBus = new EventBus({
+      debug: this.debug,
+      namespaceName: namespace,
+      parent: this,
+    });
+
+    this.namespaces.set(namespace, namespaceBus);
+    return namespaceBus;
   }
 
   /**
-   * 获取指定事件的监听器数量
-   * @param event 事件名称
-   * @returns 监听器数量
+   * 获取事件历史记录
+   * @returns 事件历史记录
    */
-  public listenerCount(event: string): number {
-    return this.events.has(event) ? this.events.get(event)!.length : 0;
+  getEventHistory() {
+    return [...this.eventHistory];
   }
 
   /**
-   * 检查是否注册了指定事件
-   * @param event 事件名称
-   * @returns 是否已注册
+   * 开启调试模式
    */
-  public hasListeners(event: string): boolean {
-    return this.listenerCount(event) > 0;
+  enableDebug(): void {
+    this.debug = true;
+  }
+
+  /**
+   * 关闭调试模式
+   */
+  disableDebug(): void {
+    this.debug = false;
   }
 }
 
+// 导出默认实例
 export default EventBus;

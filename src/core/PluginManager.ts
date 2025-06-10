@@ -1,170 +1,552 @@
 /**
- * PluginManager - 插件管理系统
- * 负责插件的注册与管理，以及钩子系统的实现
+ * PluginManager - 插件管理器
+ * 负责管理插件的安装、卸载、依赖管理和钩子注册
  */
 
-import { IPlugin, PluginPriority, HookResult } from '../types';
-import { Logger } from '../utils/Logger';
-
+import {
+  IPlugin,
+  PluginConfig,
+  PluginPriority,
+  PluginRegistration,
+  PluginInterfaceMap,
+  HookType,
+  HookHandler,
+  HookResult,
+} from '../types/plugin';
 import { EventBus } from './EventBus';
+import DependencyContainer from './DependencyContainer';
+import { UploadError, ErrorCenter } from './ErrorCenter';
+import { UploadErrorType } from '../types';
 
-// 钩子处理函数
-export type HookHandler = (...args: any[]) => any;
-
-// 钩子处理函数注册信息
-interface HookRegistration {
-  handler: HookHandler;
-  priority: PluginPriority;
-  plugin: string;
-}
-
-// 插件注册信息
-interface PluginRegistration {
-  instance: IPlugin;
-  version: string;
-  enabled: boolean;
-  dependencies: string[];
-  loadedAt: number;
-}
-
+/**
+ * 插件管理器类
+ */
 export class PluginManager {
-  private plugins: Map<string, any> = new Map();
-  private hooks: Map<string, HookRegistration[]> = new Map();
-  private pluginDependencies: Map<string, Set<string>> = new Map();
-  private logger: Logger = new Logger('PluginManager');
-  private eventBus?: EventBus;
+  /**
+   * 已注册的插件
+   */
+  private plugins: Map<string, PluginRegistration> = new Map();
 
   /**
-   * 构造函数
-   * @param eventBus 可选的事件总线实例
+   * 钩子处理函数
    */
-  constructor(eventBus?: EventBus) {
-    this.eventBus = eventBus;
+  private hooks: Map<
+    string,
+    Array<{
+      handler: HookHandler;
+      plugin: string;
+      priority: PluginPriority;
+    }>
+  > = new Map();
+
+  /**
+   * 事件总线
+   */
+  private eventBus: EventBus;
+
+  /**
+   * 核心上传器引用
+   */
+  private uploader: any;
+
+  /**
+   * 依赖容器
+   */
+  private container: DependencyContainer;
+
+  /**
+   * 错误处理中心
+   */
+  private errorCenter: ErrorCenter;
+
+  /**
+   * 插件接口类型映射
+   */
+  private interfaceMap: Map<string, keyof PluginInterfaceMap> = new Map();
+
+  /**
+   * 创建插件管理器
+   * @param uploader 上传器实例
+   * @param container 依赖容器
+   */
+  constructor(uploader: any, container: DependencyContainer) {
+    this.uploader = uploader;
+    this.container = container;
+    this.eventBus = container.resolve('eventBus');
+    this.errorCenter = container.resolve('errorCenter');
+
+    // 初始化插件接口类型映射
+    this.initInterfaceMap();
+  }
+
+  /**
+   * 初始化插件接口类型映射
+   */
+  private initInterfaceMap(): void {
+    // 注册标准插件类型
+    this.interfaceMap.set('ChunkPlugin', 'chunk');
+    this.interfaceMap.set('ResumePlugin', 'resume');
+    this.interfaceMap.set('ConcurrencyPlugin', 'concurrency');
+    this.interfaceMap.set('ValidatorPlugin', 'validator');
+    this.interfaceMap.set('ProgressPlugin', 'progress');
+    this.interfaceMap.set('PrecheckPlugin', 'precheck');
+    this.interfaceMap.set('AdaptiveUploadPlugin', 'adaptive-upload');
+    this.interfaceMap.set('ServiceWorkerPlugin', 'service-worker');
+    this.interfaceMap.set('SecurityPlugin', 'security');
+    this.interfaceMap.set('MonitoringPlugin', 'monitoring');
+    this.interfaceMap.set('UIPlugin', 'ui');
   }
 
   /**
    * 注册插件
-   * @param name 插件名称
    * @param plugin 插件实例
-   * @param dependencies 依赖的其他插件
-   * @returns 当前实例，用于链式调用
+   * @param config 插件配置
+   * @returns 是否成功注册
    */
-  public registerPlugin(
-    name: string,
-    plugin: IPlugin,
-    dependencies: string[] = []
-  ): this {
-    if (this.plugins.has(name)) {
-      this.logger.warn(`插件"${name}"已注册，将被覆盖`);
-    }
-
-    // 检查循环依赖
-    if (this.hasCircularDependency(name, dependencies)) {
-      throw new Error(`插件"${name}"存在循环依赖`);
-    }
-
-    // 检查依赖是否已注册
-    for (const dep of dependencies) {
-      if (!this.plugins.has(dep)) {
-        this.logger.warn(`插件"${name}"依赖的"${dep}"未注册`);
+  public register(plugin: IPlugin, config: PluginConfig = {}): boolean {
+    try {
+      // 检查插件是否有名称
+      if (!plugin.name) {
+        throw new UploadError(UploadErrorType.PLUGIN_ERROR, '插件必须有名称');
       }
+
+      // 检查是否已注册
+      if (this.plugins.has(plugin.name)) {
+        throw new UploadError(
+          UploadErrorType.PLUGIN_ERROR,
+          `插件 "${plugin.name}" 已经注册`
+        );
+      }
+
+      // 合并默认配置
+      const mergedConfig: PluginConfig = {
+        enabled: true,
+        priority: PluginPriority.NORMAL,
+        ...config,
+      };
+
+      // 注册插件
+      this.plugins.set(plugin.name, {
+        plugin,
+        config: mergedConfig,
+        installed: false,
+      });
+
+      // 发出插件注册事件
+      this.eventBus.emit('plugin:registered', {
+        name: plugin.name,
+        version: plugin.version,
+        config: mergedConfig,
+      });
+
+      // 尝试匹配插件接口类型
+      this.detectPluginInterface(plugin);
+
+      // 自动安装
+      if (mergedConfig.enabled) {
+        this.install(plugin.name);
+      }
+
+      return true;
+    } catch (error) {
+      this.errorCenter.handleError(
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.PLUGIN_ERROR,
+              `注册插件 "${plugin.name}" 失败: ${error instanceof Error ? error.message : String(error)}`
+            )
+      );
+
+      return false;
     }
-
-    // 保存插件信息
-    this.plugins.set(name, {
-      instance: plugin,
-      version: plugin.version || '1.0.0',
-      enabled: true,
-      dependencies,
-      loadedAt: Date.now(),
-    });
-
-    // 更新依赖关系
-    this.pluginDependencies.set(name, new Set(dependencies));
-
-    // 重新计算插件加载顺序
-    this.recalculatePluginOrder();
-
-    // 触发事件
-    this.eventBus?.emit('plugin:registered', { name, plugin });
-
-    return this;
   }
 
   /**
-   * 检查是否存在循环依赖
+   * 检测插件接口类型
+   * @param plugin 插件实例
+   */
+  private detectPluginInterface(plugin: IPlugin): void {
+    // 从构造函数名称推断
+    const constructorName = plugin.constructor.name;
+    const interfaceType = this.interfaceMap.get(constructorName);
+
+    if (interfaceType) {
+      // 注册到依赖容器
+      this.container.registerInstance(`plugin:${interfaceType}`, plugin);
+
+      // 发出插件接口类型检测事件
+      this.eventBus.emit('plugin:interfaceDetected', {
+        name: plugin.name,
+        interface: interfaceType,
+      });
+    }
+  }
+
+  /**
+   * 安装插件
+   * @param name 插件名称
+   * @returns 是否成功安装
+   */
+  public install(name: string): boolean {
+    try {
+      const registration = this.plugins.get(name);
+
+      if (!registration) {
+        throw new UploadError(
+          UploadErrorType.PLUGIN_ERROR,
+          `插件 "${name}" 未注册`
+        );
+      }
+
+      if (registration.installed) {
+        // 已安装，直接返回成功
+        return true;
+      }
+
+      const { plugin, config } = registration;
+
+      // 检查依赖
+      if (plugin.dependencies && plugin.dependencies.length > 0) {
+        this.checkDependencies(name, plugin.dependencies);
+      }
+
+      // 执行安装
+      plugin.install(this.uploader);
+
+      // 更新安装状态
+      registration.installed = true;
+      registration.installedAt = Date.now();
+
+      // 发出插件安装事件
+      this.eventBus.emit('plugin:installed', {
+        name: plugin.name,
+        version: plugin.version,
+        config,
+      });
+
+      return true;
+    } catch (error) {
+      this.errorCenter.handleError(
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.PLUGIN_ERROR,
+              `安装插件 "${name}" 失败: ${error instanceof Error ? error.message : String(error)}`
+            )
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * 检查插件依赖
    * @param pluginName 插件名称
    * @param dependencies 依赖列表
-   * @param visited 已访问的插件
    */
-  private hasCircularDependency(
-    pluginName: string,
-    dependencies: string[],
-    visited: Set<string> = new Set()
-  ): boolean {
-    // 如果插件名在依赖中，则存在循环依赖
-    if (dependencies.includes(pluginName)) {
+  private checkDependencies(pluginName: string, dependencies: string[]): void {
+    for (const dependency of dependencies) {
+      const depRegistration = this.plugins.get(dependency);
+
+      if (!depRegistration) {
+        throw new UploadError(
+          UploadErrorType.PLUGIN_ERROR,
+          `插件 "${pluginName}" 依赖 "${dependency}" 未注册`
+        );
+      }
+
+      if (!depRegistration.installed) {
+        // 尝试安装依赖
+        const success = this.install(dependency);
+
+        if (!success) {
+          throw new UploadError(
+            UploadErrorType.PLUGIN_ERROR,
+            `插件 "${pluginName}" 的依赖 "${dependency}" 安装失败`
+          );
+        }
+      }
+    }
+  }
+
+  /**
+   * 卸载插件
+   * @param name 插件名称
+   * @returns 是否成功卸载
+   */
+  public uninstall(name: string): boolean {
+    try {
+      const registration = this.plugins.get(name);
+
+      if (!registration) {
+        throw new UploadError(
+          UploadErrorType.PLUGIN_ERROR,
+          `插件 "${name}" 未注册`
+        );
+      }
+
+      if (!registration.installed) {
+        // 未安装，直接返回成功
+        return true;
+      }
+
+      const { plugin } = registration;
+
+      // 检查是否有依赖此插件的其他插件
+      const dependents = this.findDependents(name);
+      if (dependents.length > 0) {
+        throw new UploadError(
+          UploadErrorType.PLUGIN_ERROR,
+          `无法卸载插件 "${name}"，以下插件依赖它: ${dependents.join(', ')}`
+        );
+      }
+
+      // 执行卸载
+      if (plugin.uninstall) {
+        plugin.uninstall();
+      }
+
+      // 移除所有钩子
+      this.removePluginHooks(name);
+
+      // 更新安装状态
+      registration.installed = false;
+
+      // 发出插件卸载事件
+      this.eventBus.emit('plugin:uninstalled', {
+        name: plugin.name,
+      });
+
       return true;
+    } catch (error) {
+      this.errorCenter.handleError(
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.PLUGIN_ERROR,
+              `卸载插件 "${name}" 失败: ${error instanceof Error ? error.message : String(error)}`
+            )
+      );
+
+      return false;
+    }
+  }
+
+  /**
+   * 查找依赖指定插件的其他插件
+   * @param name 插件名称
+   * @returns 依赖此插件的插件名称列表
+   */
+  private findDependents(name: string): string[] {
+    const dependents: string[] = [];
+
+    this.plugins.forEach((registration, pluginName) => {
+      if (
+        registration.installed &&
+        registration.plugin.dependencies &&
+        registration.plugin.dependencies.includes(name)
+      ) {
+        dependents.push(pluginName);
+      }
+    });
+
+    return dependents;
+  }
+
+  /**
+   * 移除插件的所有钩子
+   * @param pluginName 插件名称
+   */
+  private removePluginHooks(pluginName: string): void {
+    this.hooks.forEach((handlers, hookType) => {
+      const filteredHandlers = handlers.filter(
+        item => item.plugin !== pluginName
+      );
+
+      if (filteredHandlers.length !== handlers.length) {
+        this.hooks.set(hookType, filteredHandlers);
+      }
+    });
+  }
+
+  /**
+   * 注册钩子处理函数
+   * @param hookType 钩子类型
+   * @param handler 处理函数
+   * @param pluginName 插件名称
+   * @param priority 优先级
+   */
+  public registerHook(
+    hookType: HookType,
+    handler: HookHandler,
+    pluginName: string,
+    priority: PluginPriority = PluginPriority.NORMAL
+  ): void {
+    // 检查插件是否存在
+    if (!this.plugins.has(pluginName)) {
+      throw new UploadError(
+        UploadErrorType.PLUGIN_ERROR,
+        `注册钩子失败: 插件 "${pluginName}" 未注册`
+      );
     }
 
-    // 标记当前插件已访问
-    visited.add(pluginName);
+    // 获取钩子处理函数列表
+    let handlers = this.hooks.get(hookType);
 
-    // 递归检查每个依赖
-    for (const dep of dependencies) {
-      if (visited.has(dep)) {
-        return true;
-      }
+    if (!handlers) {
+      handlers = [];
+      this.hooks.set(hookType, handlers);
+    }
 
-      const subDeps = Array.from(this.pluginDependencies.get(dep) || []);
-      if (this.hasCircularDependency(pluginName, subDeps, new Set(visited))) {
-        return true;
-      }
+    // 添加处理函数
+    handlers.push({
+      handler,
+      plugin: pluginName,
+      priority,
+    });
+
+    // 按优先级排序
+    this.sortHookHandlers(hookType);
+
+    // 发出钩子注册事件
+    this.eventBus.emit('hook:registered', {
+      hookType,
+      plugin: pluginName,
+      priority,
+    });
+  }
+
+  /**
+   * 按优先级排序钩子处理函数
+   * @param hookType 钩子类型
+   */
+  private sortHookHandlers(hookType: HookType): void {
+    const handlers = this.hooks.get(hookType);
+
+    if (handlers) {
+      handlers.sort((a, b) => b.priority - a.priority);
+    }
+  }
+
+  /**
+   * 移除钩子处理函数
+   * @param hookType 钩子类型
+   * @param pluginName 插件名称
+   * @returns 是否成功移除
+   */
+  public removeHook(hookType: HookType, pluginName: string): boolean {
+    const handlers = this.hooks.get(hookType);
+
+    if (!handlers) {
+      return false;
+    }
+
+    const originalLength = handlers.length;
+    const filteredHandlers = handlers.filter(
+      item => item.plugin !== pluginName
+    );
+
+    if (filteredHandlers.length !== originalLength) {
+      this.hooks.set(hookType, filteredHandlers);
+
+      // 发出钩子移除事件
+      this.eventBus.emit('hook:removed', {
+        hookType,
+        plugin: pluginName,
+      });
+
+      return true;
     }
 
     return false;
   }
 
   /**
-   * 重新计算插件加载顺序
+   * 执行钩子
+   * @param hookType 钩子类型
+   * @param params 参数
+   * @returns 执行结果
    */
-  private recalculatePluginOrder(): void {
-    // 拓扑排序，确保依赖在前
-    const result: string[] = [];
-    const visited = new Set<string>();
-    const temp = new Set<string>();
+  public async applyHook(
+    hookType: HookType,
+    params: any = {}
+  ): Promise<HookResult> {
+    const handlers = this.hooks.get(hookType);
 
-    // 深度优先搜索
-    const visit = (node: string) => {
-      if (temp.has(node)) {
-        throw new Error(`插件依赖存在循环: ${node}`);
-      }
+    if (!handlers || handlers.length === 0) {
+      // 无处理函数
+      return {
+        handled: false,
+        result: params,
+        modified: false,
+      };
+    }
 
-      if (visited.has(node)) {
-        return;
-      }
+    let currentParams = { ...params };
+    let finalResult = currentParams;
+    let modified = false;
+    const errors: Error[] = [];
 
-      temp.add(node);
+    // 创建执行链
+    for (let i = 0; i < handlers.length; i++) {
+      const { handler, plugin } = handlers[i];
 
-      // 访问所有依赖
-      const deps = this.pluginDependencies.get(node) || new Set();
-      deps.forEach(dep => {
-        visit(dep);
-      });
+      try {
+        // 构建next函数，传递给处理函数
+        const next = async (newParams?: any): Promise<any> => {
+          // 如果提供了新参数，更新当前参数
+          if (newParams !== undefined) {
+            currentParams = newParams;
+            modified = true;
+          }
 
-      temp.delete(node);
-      visited.add(node);
-      result.push(node);
-    };
+          // 如果还有下一个处理函数，继续执行
+          if (i < handlers.length - 1) {
+            i++; // 移动到下一个处理函数
+            const nextHandler = handlers[i];
+            try {
+              return await nextHandler.handler(currentParams, next);
+            } catch (error) {
+              errors.push(
+                error instanceof Error ? error : new Error(String(error))
+              );
+              return currentParams;
+            }
+          } else {
+            // 已到达最后一个处理函数，返回当前参数
+            return currentParams;
+          }
+        };
 
-    // 遍历所有插件
-    for (const name of this.plugins.keys()) {
-      if (!visited.has(name)) {
-        visit(name);
+        // 执行处理函数
+        finalResult = await handler(currentParams, next);
+
+        // 如果处理函数返回了结果，更新结果
+        if (finalResult !== undefined) {
+          currentParams = finalResult;
+          modified = true;
+        }
+      } catch (error) {
+        // 记录错误并继续执行其他处理函数
+        errors.push(error instanceof Error ? error : new Error(String(error)));
+
+        // 记录错误日志
+        this.eventBus.emit('hook:error', {
+          hookType,
+          plugin,
+          error,
+        });
       }
     }
 
-    // this.pluginOrder = result; // 未使用的变量，移除
+    // 返回执行结果
+    return {
+      handled: true,
+      result: finalResult,
+      modified,
+      errors: errors.length > 0 ? errors : undefined,
+    };
   }
 
   /**
@@ -172,359 +554,30 @@ export class PluginManager {
    * @param name 插件名称
    * @returns 插件实例或undefined
    */
-  public getPlugin(name: string): IPlugin | undefined {
-    return this.plugins.get(name)?.instance;
+  public getPlugin<T extends IPlugin>(name: string): T | undefined {
+    const registration = this.plugins.get(name);
+    return registration ? (registration.plugin as T) : undefined;
   }
 
   /**
-   * 获取插件详细信息
-   * @param name 插件名称
+   * 获取指定接口的插件
+   * @param interfaceType 接口类型
+   * @returns 插件实例或undefined
    */
-  public getPluginInfo(name: string): PluginRegistration | undefined {
-    return this.plugins.get(name);
+  public getPluginByInterface<K extends keyof PluginInterfaceMap>(
+    interfaceType: K
+  ): PluginInterfaceMap[K] | undefined {
+    return this.container.tryResolve<PluginInterfaceMap[K]>(
+      `plugin:${interfaceType}`
+    );
   }
 
   /**
-   * 注册钩子处理函数
-   * @param hookName 钩子名称
-   * @param handler 处理函数
-   * @param options 选项
+   * 获取所有已注册的插件
+   * @returns 插件注册信息Map
    */
-  public registerHook(
-    hookName: string,
-    handler: HookHandler,
-    options: {
-      priority?: PluginPriority;
-      plugin?: string;
-    } = {}
-  ): void {
-    const { priority = PluginPriority.NORMAL, plugin = 'anonymous' } = options;
-
-    if (!this.hooks.has(hookName)) {
-      this.hooks.set(hookName, []);
-    }
-
-    const registrations = this.hooks.get(hookName)!;
-
-    // 按优先级插入
-    const registration: HookRegistration = { handler, priority, plugin };
-
-    // 找到合适的位置插入（保持优先级降序）
-    const index = registrations.findIndex(r => r.priority < priority);
-    if (index === -1) {
-      // 如果没有找到更低优先级的处理函数，则追加到末尾
-      registrations.push(registration);
-    } else {
-      // 在找到的位置插入
-      registrations.splice(index, 0, registration);
-    }
-
-    // 触发事件
-    this.eventBus?.emit('hook:registered', {
-      hookName,
-      priority,
-      plugin,
-    });
-  }
-
-  /**
-   * 运行钩子
-   * @param hookName 钩子名称
-   * @param args 传递给钩子的参数
-   * @returns 处理结果
-   */
-  public async runHook(hookName: string, args: any = {}): Promise<HookResult> {
-    const registrations = this.hooks.get(hookName) || [];
-
-    if (registrations.length === 0) {
-      return {
-        handled: false,
-        result: undefined,
-        modified: false,
-      };
-    }
-
-    // 初始结果
-    let result = args;
-    let handled = false;
-    let modified = false;
-    const errors: Error[] = [];
-
-    // 按注册顺序（已按优先级排序）执行钩子处理函数
-    for (const registration of registrations) {
-      try {
-        // 检查插件是否启用
-        if (registration.plugin !== 'anonymous') {
-          const pluginInfo = this.plugins.get(registration.plugin);
-          if (!pluginInfo || !pluginInfo.enabled) {
-            continue; // 跳过禁用的插件
-          }
-        }
-
-        // 执行钩子处理函数
-        const startTime = Date.now();
-        const handlerResult = await registration.handler(result);
-        const duration = Date.now() - startTime;
-
-        // 记录执行时间过长的钩子
-        if (duration > 100) {
-          this.logger.warn(
-            `钩子 "${hookName}" 由插件 "${registration.plugin}" 执行耗时 ${duration}ms`
-          );
-        }
-
-        // 处理结果
-        if (handlerResult !== undefined) {
-          result = handlerResult;
-          handled = true;
-          modified = true;
-        }
-      } catch (error) {
-        // 记录错误但不中断执行
-        const err = error instanceof Error ? error : new Error(String(error));
-        errors.push(err);
-        this.logger.error(
-          `执行钩子 "${hookName}" 插件 "${registration.plugin}" 发生错误:`,
-          err
-        );
-
-        // 触发错误事件
-        this.eventBus?.emit('hook:error', {
-          hookName,
-          plugin: registration.plugin,
-          error: err,
-        });
-      }
-    }
-
-    // 触发钩子执行完成事件
-    this.eventBus?.emit('hook:executed', {
-      hookName,
-      handled,
-      modified,
-      hasErrors: errors.length > 0,
-    });
-
-    return {
-      handled,
-      result,
-      modified,
-      errors: errors.length > 0 ? errors : undefined,
-    };
-  }
-
-  /**
-   * 串行运行钩子（一个接一个，前一个的结果传给下一个）
-   * @param hookName 钩子名称
-   * @param args 初始参数
-   */
-  public async runHookSerial(
-    hookName: string,
-    args: any = {}
-  ): Promise<HookResult> {
-    const registrations = this.hooks.get(hookName) || [];
-
-    if (registrations.length === 0) {
-      return {
-        handled: false,
-        result: args,
-        modified: false,
-      };
-    }
-
-    let result = args;
-    let handled = false;
-    let modified = false;
-    const errors: Error[] = [];
-
-    // 串行执行
-    for (const registration of registrations) {
-      try {
-        // 检查插件是否启用
-        if (registration.plugin !== 'anonymous') {
-          const pluginInfo = this.plugins.get(registration.plugin);
-          if (!pluginInfo || !pluginInfo.enabled) {
-            continue;
-          }
-        }
-
-        // 执行处理函数，传入上一步的结果
-        const handlerResult = await registration.handler(result);
-
-        // 如果有返回值，更新结果
-        if (handlerResult !== undefined) {
-          result = handlerResult;
-          handled = true;
-          modified = true;
-        }
-      } catch (error) {
-        const err = error instanceof Error ? error : new Error(String(error));
-        errors.push(err);
-        this.logger.error(
-          `串行执行钩子 "${hookName}" 插件 "${registration.plugin}" 发生错误:`,
-          err
-        );
-      }
-    }
-
-    return {
-      handled,
-      result,
-      modified,
-      errors: errors.length > 0 ? errors : undefined,
-    };
-  }
-
-  /**
-   * 并行运行钩子（同时执行所有处理函数）
-   * @param hookName 钩子名称
-   * @param args 参数
-   */
-  public async runHookParallel(
-    hookName: string,
-    args: any = {}
-  ): Promise<HookResult> {
-    const registrations = this.hooks.get(hookName) || [];
-
-    if (registrations.length === 0) {
-      return {
-        handled: false,
-        result: undefined,
-        modified: false,
-      };
-    }
-
-    // 并行执行所有处理函数
-    const promises = registrations
-      .filter(registration => {
-        // 过滤掉禁用插件的处理函数
-        if (registration.plugin === 'anonymous') return true;
-        const pluginInfo = this.plugins.get(registration.plugin);
-        return pluginInfo && pluginInfo.enabled;
-      })
-      .map(registration => {
-        return new Promise<{ result: any; plugin: string }>(
-          (resolve, reject) => {
-            try {
-              const result = registration.handler(args);
-              // 处理异步和同步结果
-              if (result instanceof Promise) {
-                result
-                  .then(value =>
-                    resolve({ result: value, plugin: registration.plugin })
-                  )
-                  .catch(error =>
-                    reject({ error, plugin: registration.plugin })
-                  );
-              } else {
-                resolve({ result, plugin: registration.plugin });
-              }
-            } catch (error) {
-              reject({ error, plugin: registration.plugin });
-            }
-          }
-        );
-      });
-
-    // 收集结果
-    const results = await Promise.allSettled(promises);
-    const errors: Error[] = [];
-    const validResults: any[] = [];
-
-    // 处理执行结果
-    results.forEach(result => {
-      if (result.status === 'fulfilled') {
-        if (result.value.result !== undefined) {
-          validResults.push(result.value.result);
-        }
-      } else {
-        const error =
-          result.reason.error instanceof Error
-            ? result.reason.error
-            : new Error(String(result.reason.error));
-
-        errors.push(error);
-        this.logger.error(
-          `并行执行钩子 "${hookName}" 插件 "${result.reason.plugin}" 发生错误:`,
-          error
-        );
-      }
-    });
-
-    return {
-      handled: validResults.length > 0,
-      result: validResults,
-      modified: validResults.length > 0,
-      errors: errors.length > 0 ? errors : undefined,
-    };
-  }
-
-  /**
-   * 移除钩子处理函数
-   * @param hookName 钩子名称
-   * @param handler 可选，指定要移除的处理函数，不提供则移除所有
-   * @param plugin 可选，指定插件名称，仅移除该插件注册的处理函数
-   */
-  public removeHook(
-    hookName: string,
-    handler?: HookHandler,
-    plugin?: string
-  ): void {
-    if (!this.hooks.has(hookName)) return;
-
-    // 获取处理函数列表
-    const registrations = this.hooks.get(hookName) || [];
-
-    if (!handler && !plugin) {
-      // 移除所有处理函数
-      this.hooks.delete(hookName);
-      return;
-    }
-
-    // 根据条件过滤保留的处理函数
-    const filtered = registrations.filter(registration => {
-      // 如果指定了处理函数，检查是否匹配
-      if (handler && registration.handler === handler) {
-        return false;
-      }
-
-      // 如果指定了插件，检查是否匹配
-      if (plugin && registration.plugin === plugin) {
-        return false;
-      }
-
-      return true;
-    });
-
-    if (filtered.length === 0) {
-      // 如果没有处理函数，删除钩子
-      this.hooks.delete(hookName);
-    } else {
-      // 更新处理函数列表
-      this.hooks.set(hookName, filtered);
-    }
-  }
-
-  /**
-   * 移除插件的所有钩子
-   * @param pluginName 插件名称
-   */
-  public removePluginHooks(pluginName: string): void {
-    // 遍历所有钩子
-    for (const [hookName, registrations] of this.hooks.entries()) {
-      // 过滤掉指定插件的处理函数
-      const filtered = registrations.filter(
-        registration => registration.plugin !== pluginName
-      );
-
-      if (filtered.length === 0) {
-        // 如果没有处理函数，删除钩子
-        this.hooks.delete(hookName);
-      } else {
-        // 更新处理函数列表
-        this.hooks.set(hookName, filtered);
-      }
-    }
+  public getAllPlugins(): Map<string, PluginRegistration> {
+    return new Map(this.plugins);
   }
 
   /**
@@ -532,26 +585,24 @@ export class PluginManager {
    * @param name 插件名称
    * @returns 是否成功启用
    */
-  public enablePlugin(name: string): boolean {
-    const pluginInfo = this.plugins.get(name);
-    if (!pluginInfo) {
+  public enable(name: string): boolean {
+    const registration = this.plugins.get(name);
+
+    if (!registration) {
       return false;
     }
 
-    // 检查依赖是否都已启用
-    for (const dep of pluginInfo.dependencies) {
-      const depInfo = this.plugins.get(dep);
-      if (!depInfo || !depInfo.enabled) {
-        this.logger.error(`无法启用插件"${name}"，其依赖"${dep}"未启用`);
-        return false;
-      }
+    registration.config.enabled = true;
+
+    // 如果未安装，则安装
+    if (!registration.installed) {
+      return this.install(name);
     }
 
-    // 更新状态
-    pluginInfo.enabled = true;
-
-    // 触发事件
-    this.eventBus?.emit('plugin:enabled', { name });
+    // 发出插件启用事件
+    this.eventBus.emit('plugin:enabled', {
+      name,
+    });
 
     return true;
   }
@@ -561,98 +612,70 @@ export class PluginManager {
    * @param name 插件名称
    * @returns 是否成功禁用
    */
-  public disablePlugin(name: string): boolean {
-    const pluginInfo = this.plugins.get(name);
-    if (!pluginInfo) {
+  public disable(name: string): boolean {
+    const registration = this.plugins.get(name);
+
+    if (!registration) {
       return false;
     }
 
-    // 检查是否有其他插件依赖此插件
-    for (const [otherName, info] of this.plugins.entries()) {
-      if (info.enabled && info.dependencies.includes(name)) {
-        this.logger.error(`无法禁用插件"${name}"，插件"${otherName}"依赖它`);
-        return false;
-      }
+    registration.config.enabled = false;
+
+    // 如果已安装，则卸载
+    if (registration.installed) {
+      return this.uninstall(name);
     }
 
-    // 更新状态
-    pluginInfo.enabled = false;
-
-    // 触发事件
-    this.eventBus?.emit('plugin:disabled', { name });
+    // 发出插件禁用事件
+    this.eventBus.emit('plugin:disabled', {
+      name,
+    });
 
     return true;
   }
 
   /**
-   * 判断插件是否已注册
-   * @param name 插件名称
-   * @returns 是否已注册
+   * 获取钩子处理函数列表
+   * @param hookType 钩子类型
+   * @returns 处理函数列表
    */
-  public hasPlugin(name: string): boolean {
-    return this.plugins.has(name);
+  public getHookHandlers(hookType: HookType): Array<{
+    handler: HookHandler;
+    plugin: string;
+    priority: PluginPriority;
+  }> {
+    return [...(this.hooks.get(hookType) || [])];
   }
 
   /**
-   * 判断插件是否已启用
-   * @param name 插件名称
-   * @returns 是否已启用
+   * 检查钩子是否有处理函数
+   * @param hookType 钩子类型
+   * @returns 是否有处理函数
    */
-  public isPluginEnabled(name: string): boolean {
-    const pluginInfo = this.plugins.get(name);
-    return !!pluginInfo && pluginInfo.enabled;
+  public hasHookHandlers(hookType: HookType): boolean {
+    const handlers = this.hooks.get(hookType);
+    return handlers !== undefined && handlers.length > 0;
   }
 
   /**
-   * 获取所有注册的插件名称
-   * @param enabledOnly 是否只返回已启用的插件
-   * @returns 插件名称数组
+   * 清除所有插件
    */
-  public getPluginNames(enabledOnly = false): string[] {
-    if (!enabledOnly) {
-      return Array.from(this.plugins.keys());
-    }
+  public clear(): void {
+    // 卸载所有已安装的插件
+    this.plugins.forEach((registration, name) => {
+      if (registration.installed) {
+        this.uninstall(name);
+      }
+    });
 
-    return Array.from(this.plugins.entries())
-      .filter(([_, info]) => info.enabled)
-      .map(([name]) => name);
-  }
-
-  /**
-   * 获取所有注册的钩子名称
-   * @returns 钩子名称数组
-   */
-  public getHookNames(): string[] {
-    return Array.from(this.hooks.keys());
-  }
-
-  /**
-   * 获取指定钩子的处理函数数量
-   * @param hookName 钩子名称
-   * @returns 处理函数数量
-   */
-  public getHookHandlerCount(hookName: string): number {
-    return this.hooks.get(hookName)?.length || 0;
-  }
-
-  /**
-   * 清空所有插件
-   */
-  public clearPlugins(): void {
-    // 清空插件
+    // 清空插件列表
     this.plugins.clear();
 
     // 清空钩子
     this.hooks.clear();
 
-    // 清空依赖关系
-    this.pluginDependencies.clear();
-
-    // 重置插件顺序
-    // this.pluginOrder = []; // 未使用的变量，移除
-
-    // 触发事件
-    this.eventBus?.emit('plugins:cleared');
+    // 发出清除事件
+    this.eventBus.emit('plugin:allCleared', {});
   }
 }
 
