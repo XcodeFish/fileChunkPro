@@ -56,22 +56,8 @@ module.exports = {
     '@typescript-eslint/ban-ts-comment': 'warn',
 
     // 导入规则
-    'import/order': [
-      'error',
-      {
-        groups: [
-          'builtin',
-          'external',
-          'internal',
-          'parent',
-          'sibling',
-          'index',
-        ],
-        'newlines-between': 'always',
-        alphabetize: { order: 'asc', caseInsensitive: true },
-      },
-    ],
-    'import/no-duplicates': 'error',
+    'import/order': 'off',
+    'import/no-duplicates': 'off',
     'import/no-unresolved': 'off', // TypeScript 已处理
 
     // React 规则

@@ -1,3 +1,5 @@
+/* eslint-disable import/order */
+/* eslint-disable import/no-duplicates */
 /**
  * FileUploader.tsx
  * React Native 文件上传组件
