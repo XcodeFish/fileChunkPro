@@ -730,4 +730,6 @@ export * from './environment';
 // 导出存储相关类型
 export * from './storage';
 // 导出监控系统类型
-export * from './monitoring'; 
+export * from './monitoring';
+// 导出debug模块类型
+export * from './debug'; 

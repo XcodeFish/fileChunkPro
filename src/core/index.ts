@@ -9,6 +9,7 @@ import TaskScheduler from './TaskScheduler';
 import UploaderCore from './UploaderCore';
 import WorkerManager from './WorkerManager';
 import { WorkerPoolManager } from './WorkerPoolManager';
+import { DebugCenter } from './DebugCenter';
 
 export {
   UploaderCore,
@@ -19,6 +20,7 @@ export {
   UploadError,
   WorkerManager,
   WorkerPoolManager,
+  DebugCenter,
 };
 
 export default UploaderCore;

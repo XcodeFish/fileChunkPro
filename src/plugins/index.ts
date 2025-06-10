@@ -28,6 +28,7 @@ import { WasmPlugin, WasmPluginOptions } from './WasmPlugin';
 import SmartRetryPlugin from './smartRetry';
 import { AdaptiveUploadPlugin } from './AdaptiveUploadPlugin';
 import { MonitoringPlugin, MonitoringPluginOptions } from './MonitoringPlugin';
+import { DeveloperToolsPlugin } from './DeveloperToolsPlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -61,6 +62,7 @@ export {
   AdaptiveUploadPlugin,
   MonitoringPlugin,
   MonitoringPluginOptions,
+  DeveloperToolsPlugin,
 };
 
 // 默认导出插件对象
@@ -85,4 +87,5 @@ export default {
   AdaptiveUploadPlugin,
   MonitoringPlugin,
   MonitoringPluginOptions,
+  DeveloperToolsPlugin,
 };

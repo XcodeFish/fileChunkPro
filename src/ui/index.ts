@@ -8,3 +8,5 @@ export * as React from './react';
 
 // 导出Vue组件与hooks
 export * as Vue from './vue';
+
+export { DevConsole } from './DevConsole';
