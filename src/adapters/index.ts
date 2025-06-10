@@ -18,6 +18,7 @@ import {
   IResponse,
   RequestOptions,
 } from './interfaces';
+import { IndexedDBAdapter } from './IndexedDBAdapter';
 import { NodeAdapter } from './NodeAdapter';
 import { ReactNativeAdapter } from './ReactNativeAdapter';
 import { BrowserStorage } from './storage/BrowserStorage';
@@ -41,6 +42,7 @@ export {
   UniAppAdapter,
   ReactNativeAdapter,
   NodeAdapter,
+  IndexedDBAdapter,
 
   // 接口和基础类
   IAdapter,
@@ -72,6 +74,7 @@ export default {
   UniAppAdapter,
   ReactNativeAdapter,
   NodeAdapter,
+  IndexedDBAdapter,
 
   // 基础适配器
   BaseMiniProgramAdapter,
