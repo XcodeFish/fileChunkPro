@@ -36,6 +36,10 @@ export interface WorkerManagerOptions {
   logPerformance?: boolean;
   // 事件总线实例
   eventBus?: EventBus;
+  // 自动扩展池大小的任务阈值
+  poolExpansionThreshold?: number;
+  // 最大数据传输大小(bytes)，超过此大小将分块传输
+  maxDataTransferSize?: number;
 }
 
 // Worker 任务类型
@@ -875,6 +879,25 @@ export default class WorkerManager {
         return;
       }
 
+      // 检查数据大小，决定是否需要分块传输
+      const needsChunkedTransfer = this.needsChunkedDataTransfer(data);
+
+      if (needsChunkedTransfer) {
+        this.logger.info(`任务 ${taskId} 数据较大，使用分块传输处理`);
+        // 对于大数据任务，使用分块处理
+        this.processLargeDataTask(
+          type,
+          data,
+          taskId,
+          workerType,
+          resolve,
+          reject,
+          taskTimeout
+        );
+        return;
+      }
+
+      // 常规任务处理逻辑
       // 尝试获取可用的Worker
       const worker = this.getWorker(workerType);
 
@@ -915,7 +938,7 @@ export default class WorkerManager {
 
         // 找到合适的位置插入（保持优先级顺序）
         const insertIndex = pendingTasks.findIndex(
-          task => (task as any).priority > priority
+          task => task.priority > priority
         );
 
         if (insertIndex === -1) {
@@ -1452,24 +1475,57 @@ export default class WorkerManager {
    * 自适应调整工作线程池大小
    */
   private adaptWorkerPoolSize(): void {
-    // 获取系统信息
+    if (!this.options.autoAdjustPool) return;
+
+    // 获取系统状态
+    const memoryInfo = MemoryManager.getMemoryInfo();
+    const pendingTasksCount: Record<string, number> = {};
+    const workersCount: Record<string, number> = {};
     const cpuCount = navigator.hardwareConcurrency || 4;
 
-    // 遍历所有Worker类型
+    // 统计每种类型的待处理任务和Worker数量
+    for (const [type, tasks] of this.pendingTasks.entries()) {
+      pendingTasksCount[type] = tasks.length;
+    }
+
+    for (const [id, _] of this.workers.entries()) {
+      const type = id.split(':')[0];
+      workersCount[type] = (workersCount[type] || 0) + 1;
+    }
+
+    // 对每种类型的Worker进行池大小调整
     for (const [type, config] of Object.entries(this.workerConfigs)) {
-      const currentCount = config.poolSize || 1;
-      let optimalPoolSize = currentCount;
+      const pendingCount = pendingTasksCount[type] || 0;
+      const currentCount = workersCount[type] || 0;
+      let optimalPoolSize = config.poolSize || 1;
 
-      // 获取此类型Worker的等待任务数
-      const pendingCount = (this.pendingTasks.get(type) || []).length;
-
-      // 根据任务队列和系统资源决定是否需要扩展或收缩线程池
-      if (pendingCount > currentCount * 2 && currentCount < cpuCount) {
-        // 队列长，考虑增加线程
-        optimalPoolSize = Math.min(currentCount + 1, cpuCount);
-      } else if (pendingCount === 0 && currentCount > 1) {
-        // 队列空，考虑减少线程
-        optimalPoolSize = Math.max(currentCount - 1, 1);
+      // 内存使用率高时减少Worker
+      if (memoryInfo.usageRatio > 0.8) {
+        optimalPoolSize = Math.max(1, Math.floor(config.poolSize * 0.7));
+        this.logger.info(
+          `内存使用率高(${(memoryInfo.usageRatio * 100).toFixed(1)}%)，调整${type} Worker数量到${optimalPoolSize}`
+        );
+      }
+      // 任务队列饱和时增加Worker
+      else if (
+        pendingCount >
+        currentCount * (this.options.poolExpansionThreshold || 3)
+      ) {
+        optimalPoolSize = Math.min(
+          this.options.maxWorkers!,
+          currentCount +
+            Math.ceil(pendingCount / (this.options.poolExpansionThreshold || 3))
+        );
+        this.logger.info(
+          `任务队列饱和(${pendingCount}个待处理任务)，增加${type} Worker数量到${optimalPoolSize}`
+        );
+      }
+      // 任务队列为空且Worker太多时减少Worker
+      else if (pendingCount === 0 && currentCount > config.poolSize) {
+        optimalPoolSize = config.poolSize;
+        this.logger.info(
+          `任务队列空闲，恢复${type} Worker数量到默认值${optimalPoolSize}`
+        );
       }
 
       // 如果需要调整池大小
@@ -1638,5 +1694,148 @@ export default class WorkerManager {
     }
 
     return status;
+  }
+
+  /**
+   * 判断是否需要对数据进行分块传输
+   * @param data 要传输的数据
+   * @returns 是否需要分块传输
+   */
+  private needsChunkedDataTransfer(data: any): boolean {
+    if (!data) return false;
+
+    // 如果是文件对象且大于阈值
+    if (
+      (data instanceof File || data instanceof Blob) &&
+      data.size > (this.options.maxDataTransferSize || 50 * 1024 * 1024)
+    ) {
+      return true;
+    }
+
+    // 如果是ArrayBuffer且大于阈值
+    if (
+      data instanceof ArrayBuffer &&
+      data.byteLength > (this.options.maxDataTransferSize || 50 * 1024 * 1024)
+    ) {
+      return true;
+    }
+
+    return false;
+  }
+
+  /**
+   * 处理大数据任务，使用分块传输
+   */
+  private async processLargeDataTask(
+    type: WorkerTaskType,
+    data: File | Blob | ArrayBuffer,
+    taskId: string,
+    workerType: string,
+    resolve: (value: any) => void,
+    reject: (reason: any) => void,
+    timeout?: number
+  ): Promise<void> {
+    try {
+      const worker =
+        this.getWorker(workerType) || (await this.createWorker(workerType));
+
+      if (!worker) {
+        throw new Error(`无法创建Worker处理大数据任务`);
+      }
+
+      // 为此任务注册回调
+      this.taskCallbacks.set(taskId, {
+        resolve,
+        reject,
+        timer: null,
+      });
+
+      // 设置任务超时
+      const timer = setTimeout(() => {
+        if (this.taskCallbacks.has(taskId)) {
+          this.logger.warn(`大数据任务 ${taskId} 执行超时`);
+          this.taskCallbacks.delete(taskId);
+          reject(new Error(`任务执行超时(${timeout}ms)`));
+        }
+      }, timeout || this.options.workerTaskTimeout);
+
+      this.taskCallbacks.get(taskId)!.timer = timer;
+
+      // 发送任务初始化消息
+      worker.postMessage({
+        action: 'initLargeTask',
+        taskId,
+        type,
+        metadata:
+          data instanceof ArrayBuffer
+            ? { byteLength: data.byteLength }
+            : {
+                size: data.size,
+                type: data.type,
+                name: 'name' in data ? data.name : undefined,
+              },
+      });
+
+      // 分块发送数据
+      const chunkSize = 10 * 1024 * 1024; // 10MB块
+      const totalSize =
+        data instanceof ArrayBuffer ? data.byteLength : data.size;
+
+      for (let offset = 0; offset < totalSize; offset += chunkSize) {
+        const end = Math.min(offset + chunkSize, totalSize);
+
+        // 获取此块数据
+        let chunk: ArrayBuffer;
+        if (data instanceof ArrayBuffer) {
+          chunk = data.slice(offset, end);
+        } else {
+          chunk = await data.slice(offset, end).arrayBuffer();
+        }
+
+        // 发送块数据
+        worker.postMessage(
+          {
+            action: 'largeTaskChunk',
+            taskId,
+            chunkIndex: offset / chunkSize,
+            totalChunks: Math.ceil(totalSize / chunkSize),
+            chunk: chunk,
+            isLastChunk: end === totalSize,
+          },
+          [chunk]
+        ); // 使用Transferable Objects避免复制
+
+        // 避免UI阻塞，让出控制权
+        await new Promise(resolve => setTimeout(resolve, 0));
+      }
+
+      // 发送完成消息
+      worker.postMessage({
+        action: 'finalizeLargeTask',
+        taskId,
+        type,
+      });
+    } catch (error) {
+      this.logger.error(`处理大数据任务错误:`, error);
+
+      // 清理任务回调
+      if (this.taskCallbacks.has(taskId)) {
+        const callback = this.taskCallbacks.get(taskId)!;
+        if (callback.timer) clearTimeout(callback.timer);
+        this.taskCallbacks.delete(taskId);
+      }
+
+      // 回退到主线程处理
+      if (this.options.fallbackToMainThread) {
+        this.logger.info(`大数据任务传输失败，尝试在主线程处理`);
+        this.fallbackToMainThread(type, data).then(resolve).catch(reject);
+      } else {
+        reject(
+          new Error(
+            `大数据任务处理失败: ${error instanceof Error ? error.message : String(error)}`
+          )
+        );
+      }
+    }
   }
 }
