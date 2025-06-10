@@ -23,6 +23,7 @@ import {
   QueueSortMode,
   QueueStats,
 } from './QueuePlugin';
+import PipelinePlugin from './pipeline';
 // 导入安全插件
 
 // 导出所有插件
@@ -47,6 +48,7 @@ export {
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
+  PipelinePlugin,
 };
 
 // 默认导出插件对象
@@ -63,4 +65,5 @@ export default {
   // 导出安全插件
   BasicSecurityPlugin,
   getSecurityPluginByLevel,
+  PipelinePlugin,
 };

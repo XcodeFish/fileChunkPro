@@ -8,6 +8,7 @@ import PluginManager from './PluginManager';
 import TaskScheduler from './TaskScheduler';
 import UploaderCore from './UploaderCore';
 import WorkerManager from './WorkerManager';
+import { WorkerPoolManager } from './WorkerPoolManager';
 
 export {
   UploaderCore,
@@ -17,6 +18,7 @@ export {
   ErrorCenter,
   UploadError,
   WorkerManager,
+  WorkerPoolManager,
 };
 
 export default UploaderCore;
