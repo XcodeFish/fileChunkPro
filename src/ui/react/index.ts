@@ -9,6 +9,7 @@ export { useFileUpload, UploadStatus } from './hooks';
 // 导出组件
 export { default as UploadButton } from './components/UploadButton';
 export { default as UploadProgress } from './components/UploadProgress';
+export { default as MonitoringDashboard } from './MonitoringDashboard';
 
 // 导出组件Props类型
 export type { UseFileUploadReturn } from './hooks';
