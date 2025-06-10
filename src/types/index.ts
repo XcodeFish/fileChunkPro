@@ -24,6 +24,48 @@ export interface UploaderOptions {
   adaptiveStrategies?: AdaptiveStrategyOptions; // 自适应策略选项
   enablePerformanceMonitoring?: boolean; // 是否启用性能监控
   performanceCheckInterval?: number; // 性能检查间隔
+  
+  /**
+   * ServiceWorker配置
+   */
+  serviceWorker?: {
+    /**
+     * 是否启用ServiceWorker功能
+     * @default false
+     */
+    enabled?: boolean;
+    
+    /**
+     * ServiceWorker脚本路径
+     * @default '/serviceWorker.js'
+     */
+    swPath?: string;
+    
+    /**
+     * ServiceWorker控制范围
+     * @default '/'
+     */
+    scope?: string;
+    
+    /**
+     * 是否启用离线上传
+     * @default true
+     */
+    enableOfflineUpload?: boolean;
+    
+    /**
+     * 是否启用后台上传
+     * @default true
+     */
+    enableBackgroundUploads?: boolean;
+    
+    /**
+     * 是否启用请求缓存
+     * @default true
+     */
+    enableRequestCache?: boolean;
+  };
+  
   [key: string]: any;          // 其他自定义选项
 }
 

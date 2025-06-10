@@ -17,6 +17,9 @@ import {
   AdaptiveStrategyOptions,
   UploadPerformanceStats,
 } from '../types';
+import { ServiceWorkerPlugin } from '../plugins/ServiceWorkerPlugin';
+import { ServiceWorkerManager } from './ServiceWorkerManager';
+import { IServiceWorkerManager } from '../types/services';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
 import NetworkDetector from '../utils/NetworkDetector';
@@ -48,6 +51,10 @@ export class UploaderCore {
   private environment: Environment;
   private deviceCapabilities: DeviceCapability;
   private performanceMonitor: PerformanceMonitor;
+
+  // ServiceWorker支持
+  private _serviceWorkerManager: IServiceWorkerManager | null = null;
+  private _internalPlugins: Record<string, any> = {};
 
   // 日志记录器
   public logger = {
@@ -187,6 +194,11 @@ export class UploaderCore {
 
     // 环境适配
     this.applyEnvironmentSpecificSettings();
+
+    // 初始化ServiceWorker
+    if (options.serviceWorker?.enabled) {
+      this.initServiceWorker();
+    }
   }
 
   /**
@@ -274,6 +286,46 @@ export class UploaderCore {
   /**
    * 应用环境特定设置
    */
+  /**
+   * 初始化ServiceWorker
+   */
+  private initServiceWorker(): void {
+    try {
+      if (typeof window === 'undefined' || !('serviceWorker' in navigator)) {
+        this.logger.warn('当前环境不支持ServiceWorker，已跳过初始化');
+        return;
+      }
+
+      // 创建ServiceWorker管理器
+      this._serviceWorkerManager = new ServiceWorkerManager(this.events, {
+        swPath: this.options.serviceWorker?.swPath || '/serviceWorker.js',
+        scope: this.options.serviceWorker?.scope || '/',
+        autoRegister: true,
+      });
+
+      // 创建并注册ServiceWorker插件
+      const serviceWorkerPlugin = new ServiceWorkerPlugin({
+        swPath: this.options.serviceWorker?.swPath,
+        useOfflineCache:
+          this.options.serviceWorker?.enableOfflineUpload !== false,
+        enableBackgroundUploads:
+          this.options.serviceWorker?.enableBackgroundUploads !== false,
+        enableRequestCache:
+          this.options.serviceWorker?.enableRequestCache !== false,
+      });
+
+      // 注册插件
+      this.use(serviceWorkerPlugin);
+
+      // 保存到内部插件引用
+      this._internalPlugins.serviceWorker = serviceWorkerPlugin;
+
+      this.logger.info('ServiceWorker功能已初始化');
+    } catch (error) {
+      this.logger.error(`ServiceWorker初始化失败: ${error}`);
+    }
+  }
+
   private applyEnvironmentSpecificSettings(): void {
     switch (this.environment) {
       case Environment.WechatMP: {
@@ -2151,6 +2203,22 @@ export class UploaderCore {
     }
 
     return result;
+  }
+
+  /**
+   * 获取ServiceWorker管理器
+   * @returns ServiceWorker管理器实例
+   */
+  public getServiceWorkerManager(): IServiceWorkerManager | null {
+    return this._serviceWorkerManager;
+  }
+
+  /**
+   * 获取ServiceWorker插件
+   * @returns ServiceWorker插件实例
+   */
+  public getServiceWorkerPlugin(): ServiceWorkerPlugin | undefined {
+    return this._internalPlugins.serviceWorker as ServiceWorkerPlugin;
   }
 }
 
