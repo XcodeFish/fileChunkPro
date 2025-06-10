@@ -4,9 +4,14 @@
  */
 
 // 导出React组件与hooks
-export * as React from './react';
+export * from './react';
 
 // 导出Vue组件与hooks
-export * as Vue from './vue';
+export * from './vue';
 
 export { DevConsole } from './DevConsole';
+
+// 未来可添加其他框架支持
+// export * from './angular';
+// export * from './svelte';
+// export * from './solid';

@@ -3,181 +3,420 @@
  * 可定制化的文件上传按钮
  */
 
-import React, { useRef, useCallback, CSSProperties } from 'react';
+import React, { useRef, useState, useCallback, useEffect } from 'react';
+import { UploaderCore } from '../../../core/UploaderCore';
+import { UploaderOptions, UploadResult } from '../../../types';
 
-import { UploaderOptions } from '../../../types';
-import { useFileUpload, UploadStatus } from '../hooks';
-
-// 按钮状态对应的文本
-const DEFAULT_TEXTS = {
-  [UploadStatus.IDLE]: '选择文件',
-  [UploadStatus.UPLOADING]: '上传中...',
-  [UploadStatus.SUCCESS]: '上传成功',
-  [UploadStatus.ERROR]: '上传失败',
-  [UploadStatus.CANCELLED]: '已取消',
-};
-
-// 组件属性定义
+// 上传按钮属性
 export interface UploadButtonProps {
-  // 上传器配置
+  // 上传选项
   options: UploaderOptions;
-
-  // 允许的文件类型
-  accept?: string;
-
-  // 是否允许多文件选择
-  multiple?: boolean;
-
-  // 按钮文字
-  buttonTexts?: Partial<Record<UploadStatus, string>>;
-
-  // 按钮样式
-  buttonStyle?: CSSProperties;
-
-  // 按钮CSS类名
+  // 自定义类名
   className?: string;
-
+  // 自定义样式
+  style?: React.CSSProperties;
+  // 按钮标签文本
+  label?: string;
+  // 上传中文本
+  loadingLabel?: string;
+  // 拖拽提示文本
+  dragLabel?: string;
+  // 是否支持拖拽上传
+  enableDrop?: boolean;
   // 是否禁用
   disabled?: boolean;
-
-  // 自定义事件处理器
-  onUploadStart?: (file: File) => void;
-  onUploadProgress?: (progress: number) => void;
-  onUploadSuccess?: (result: any) => void;
-  onUploadError?: (error: Error) => void;
-  onUploadCancel?: () => void;
+  // 是否支持多文件上传
+  multiple?: boolean;
+  // 允许的文件类型
+  accept?: string;
+  // 最大文件大小(字节)
+  maxFileSize?: number;
+  // 自定义渲染上传按钮
+  renderButton?: (props: {
+    onClick: () => void;
+    loading: boolean;
+    disabled: boolean;
+  }) => React.ReactNode;
+  // 成功回调
+  onSuccess?: (result: UploadResult, file: File) => void;
+  // 错误回调
+  onError?: (error: Error, file: File) => void;
+  // 进度回调
+  onProgress?: (percent: number, file: File) => void;
+  // 开始上传回调
+  onStart?: (file: File) => void;
+  // 文件选择回调
+  onSelect?: (files: File[]) => void;
+  // 取消上传回调
+  onCancel?: () => void;
+  // 超出大小限制回调
+  onSizeExceed?: (file: File, maxSize: number) => void;
+  // 类型不匹配回调
+  onTypeInvalid?: (file: File, accept: string) => void;
+  // 子组件
+  children?: React.ReactNode;
 }
 
 /**
  * 文件上传按钮组件
  */
-export const UploadButton: React.FC<UploadButtonProps> = ({
+const UploadButton: React.FC<UploadButtonProps> = ({
   options,
-  accept,
-  multiple = false,
-  buttonTexts = {},
-  buttonStyle,
   className = '',
+  style,
+  label = '选择文件',
+  loadingLabel = '上传中...',
+  dragLabel = '拖拽文件到此处，或点击选择文件',
+  enableDrop = true,
   disabled = false,
-  onUploadStart,
-  onUploadProgress,
-  onUploadSuccess,
-  onUploadError,
-  onUploadCancel,
+  multiple = false,
+  accept,
+  maxFileSize,
+  renderButton,
+  onSuccess,
+  onError,
+  onProgress,
+  onStart,
+  onSelect,
+  onCancel,
+  onSizeExceed,
+  onTypeInvalid,
+  children,
 }) => {
-  // 使用文件上传hook
-  const { status, progress, upload, cancel } = useFileUpload(options);
-
-  // 文件输入引用
+  // 引用
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const uploaderRef = useRef<UploaderCore | null>(null);
+  const dropAreaRef = useRef<HTMLDivElement>(null);
 
-  // 合并默认文本与自定义文本
-  const texts = { ...DEFAULT_TEXTS, ...buttonTexts };
+  // 状态
+  const [loading, setLoading] = useState(false);
+  const [dragActive, setDragActive] = useState(false);
+  const [progress, setProgress] = useState(0);
+  const [currentFile, setCurrentFile] = useState<File | null>(null);
 
-  // 当前按钮文本
-  const buttonText = texts[status];
+  // 初始化上传器
+  useEffect(() => {
+    const uploader = new UploaderCore(options);
+    uploaderRef.current = uploader;
 
-  // 处理文件选择
-  const handleFileChange = useCallback(
-    async (event: React.ChangeEvent<HTMLInputElement>) => {
-      const files = event.target.files;
-      if (!files || files.length === 0) return;
+    // 注册事件监听
+    uploader.on('progress', (progressData: { progress: number }) => {
+      setProgress(progressData.progress);
+      if (currentFile && onProgress) {
+        onProgress(progressData.progress, currentFile);
+      }
+    });
 
-      const file = files[0]; // 暂时只处理单个文件，即使允许多选
+    return () => {
+      if (uploaderRef.current) {
+        uploaderRef.current.dispose();
+        uploaderRef.current = null;
+      }
+    };
+  }, [options.endpoint, onProgress, currentFile]); // 仅当endpoint变更时重新创建
 
-      // 调用开始上传回调
-      onUploadStart?.(file);
+  // 处理文件上传
+  const handleUpload = useCallback(
+    async (file: File) => {
+      if (!uploaderRef.current || loading || disabled) {
+        return;
+      }
+
+      // 验证文件大小
+      if (maxFileSize && file.size > maxFileSize) {
+        if (onSizeExceed) {
+          onSizeExceed(file, maxFileSize);
+        }
+        return;
+      }
+
+      // 验证文件类型
+      if (accept && !isFileTypeValid(file, accept)) {
+        if (onTypeInvalid) {
+          onTypeInvalid(file, accept);
+        }
+        return;
+      }
+
+      // 开始上传
+      setLoading(true);
+      setProgress(0);
+      setCurrentFile(file);
+
+      if (onStart) {
+        onStart(file);
+      }
 
       try {
-        // 开始上传
-        const result = await upload(file);
+        // 执行上传
+        const result = await uploaderRef.current.upload(file);
 
-        // 调用成功回调
-        onUploadSuccess?.(result);
-      } catch (err) {
-        // 调用错误回调
-        onUploadError?.(err as Error);
+        // 上传成功
+        if (onSuccess) {
+          onSuccess(result, file);
+        }
+      } catch (error) {
+        // 上传失败
+        if (onError) {
+          onError(error as Error, file);
+        }
       } finally {
-        // 重置文件输入框，允许重新选择相同文件
+        // 清理状态
+        setLoading(false);
+        setProgress(0);
+        setCurrentFile(null);
+
+        // 重置文件输入，以便能够再次选择相同文件
         if (fileInputRef.current) {
           fileInputRef.current.value = '';
         }
       }
     },
-    [upload, onUploadStart, onUploadSuccess, onUploadError]
+    [
+      loading,
+      disabled,
+      maxFileSize,
+      accept,
+      onStart,
+      onSuccess,
+      onError,
+      onSizeExceed,
+      onTypeInvalid,
+    ]
   );
 
-  // 处理按钮点击
-  const handleButtonClick = useCallback(() => {
-    if (status === UploadStatus.UPLOADING) {
-      // 如果正在上传，则取消上传
-      cancel();
-      onUploadCancel?.();
-    } else {
-      // 触发文件选择对话框
-      fileInputRef.current?.click();
-    }
-  }, [status, cancel, onUploadCancel]);
+  // 处理文件选择
+  const handleFileChange = useCallback(
+    (event: React.ChangeEvent<HTMLInputElement>) => {
+      const files = event.target.files;
+      if (!files || files.length === 0) return;
 
-  // 监听进度变化
-  React.useEffect(() => {
-    if (onUploadProgress) {
-      onUploadProgress(progress);
-    }
-  }, [progress, onUploadProgress]);
+      // 获取所有选择的文件
+      const fileList = Array.from(files);
 
-  // 默认按钮样式
-  const defaultButtonStyle: CSSProperties = {
-    padding: '10px 20px',
-    fontSize: '14px',
-    fontWeight: 500,
-    color: '#ffffff',
-    backgroundColor:
-      status === UploadStatus.UPLOADING
-        ? '#1890ff'
-        : status === UploadStatus.SUCCESS
-          ? '#52c41a'
-          : status === UploadStatus.ERROR
-            ? '#ff4d4f'
-            : '#1890ff',
-    border: 'none',
-    borderRadius: '4px',
-    cursor:
-      disabled || status === UploadStatus.UPLOADING ? 'not-allowed' : 'pointer',
-    transition: 'all 0.3s',
-    display: 'inline-flex',
-    alignItems: 'center',
-    justifyContent: 'center',
-    height: '40px',
-    opacity: disabled ? 0.7 : 1,
-    ...buttonStyle,
+      // 文件选择回调
+      if (onSelect) {
+        onSelect(fileList);
+      }
+
+      // 如果是多文件上传，则只处理第一个文件
+      // 实际多文件上传逻辑应该由外部控制
+      handleUpload(fileList[0]);
+    },
+    [handleUpload, onSelect]
+  );
+
+  // 触发文件选择对话框
+  const triggerFileInput = useCallback(() => {
+    if (!disabled && !loading && fileInputRef.current) {
+      fileInputRef.current.click();
+    }
+  }, [disabled, loading]);
+
+  // 取消上传
+  const cancelUpload = useCallback(() => {
+    if (uploaderRef.current && loading) {
+      uploaderRef.current.cancel();
+      setLoading(false);
+      setProgress(0);
+
+      if (onCancel) {
+        onCancel();
+      }
+    }
+  }, [loading, onCancel]);
+
+  // 处理拖拽事件
+  const handleDragEnter = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      if (!disabled && !loading) {
+        setDragActive(true);
+      }
+    },
+    [disabled, loading]
+  );
+
+  const handleDragOver = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+  }, []);
+
+  const handleDragLeave = useCallback((e: React.DragEvent) => {
+    e.preventDefault();
+    e.stopPropagation();
+    setDragActive(false);
+  }, []);
+
+  const handleDrop = useCallback(
+    (e: React.DragEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      setDragActive(false);
+
+      if (disabled || loading) return;
+
+      // 处理拖放的文件
+      const files = e.dataTransfer.files;
+      if (files && files.length > 0) {
+        // 获取所有拖放的文件
+        const fileList = Array.from(files);
+
+        // 文件选择回调
+        if (onSelect) {
+          onSelect(fileList);
+        }
+
+        // 上传第一个文件（或根据需求处理多文件）
+        handleUpload(fileList[0]);
+      }
+    },
+    [disabled, loading, handleUpload, onSelect]
+  );
+
+  // 设置拖拽事件监听
+  useEffect(() => {
+    const dropArea = dropAreaRef.current;
+    if (enableDrop && dropArea) {
+      // 添加全局拖拽监听，以提高用户体验
+      window.addEventListener('dragenter', handleDragEnter);
+      window.addEventListener('dragover', handleDragOver);
+      window.addEventListener('dragleave', handleDragLeave);
+      window.addEventListener('drop', handleDrop);
+
+      return () => {
+        window.removeEventListener('dragenter', handleDragEnter);
+        window.removeEventListener('dragover', handleDragOver);
+        window.removeEventListener('dragleave', handleDragLeave);
+        window.removeEventListener('drop', handleDrop);
+      };
+    }
+  }, [
+    enableDrop,
+    handleDragEnter,
+    handleDragOver,
+    handleDragLeave,
+    handleDrop,
+  ]);
+
+  // 检查文件类型是否有效
+  const isFileTypeValid = (file: File, acceptTypes: string): boolean => {
+    const types = acceptTypes.split(',').map(type => type.trim());
+    const fileType = file.type;
+    const fileName = file.name;
+    const extension = fileName
+      .substring(fileName.lastIndexOf('.'))
+      .toLowerCase();
+
+    return types.some(type => {
+      // 检查MIME类型
+      if (
+        fileType &&
+        type.includes('/') &&
+        fileType.match(new RegExp(type.replace('*', '.*')))
+      ) {
+        return true;
+      }
+      // 检查文件扩展名
+      if (type.startsWith('.') && extension === type) {
+        return true;
+      }
+      return false;
+    });
   };
 
+  // 渲染按钮
+  const buttonContent = loading ? (
+    <>
+      {loadingLabel} {progress > 0 && `${Math.round(progress)}%`}
+    </>
+  ) : (
+    children || label
+  );
+
+  // 自定义按钮渲染
+  const customButton = renderButton
+    ? renderButton({
+        onClick: triggerFileInput,
+        loading,
+        disabled,
+      })
+    : null;
+
+  // 拖拽区域类名
+  const dropAreaClass = `upload-drop-area ${className} ${
+    dragActive ? 'active' : ''
+  } ${loading ? 'loading' : ''} ${disabled ? 'disabled' : ''}`;
+
   return (
-    <React.Fragment>
+    <div
+      ref={dropAreaRef}
+      className={dropAreaClass}
+      style={style}
+      onClick={enableDrop ? undefined : triggerFileInput}
+    >
       <input
         ref={fileInputRef}
         type="file"
-        accept={accept}
-        multiple={multiple}
-        onChange={handleFileChange}
         style={{ display: 'none' }}
-        disabled={disabled || status === UploadStatus.UPLOADING}
+        onChange={handleFileChange}
+        multiple={multiple}
+        accept={accept}
+        disabled={disabled || loading}
       />
-      <button
-        className={`file-chunk-pro-upload-button ${className}`}
-        style={defaultButtonStyle}
-        onClick={handleButtonClick}
-        disabled={disabled}
-      >
-        {status === UploadStatus.UPLOADING && (
-          <span className="file-chunk-pro-upload-progress">
-            {Math.round(progress * 100)}%
-          </span>
-        )}
-        <span>{buttonText}</span>
-      </button>
-    </React.Fragment>
+
+      {enableDrop ? (
+        <div className="upload-content">
+          <div className="upload-drag-area">
+            {dragActive ? (
+              <div className="upload-drag-hint">释放文件开始上传</div>
+            ) : (
+              <div className="upload-drag-label">{dragLabel}</div>
+            )}
+          </div>
+
+          {!customButton && (
+            <button
+              type="button"
+              className="upload-button"
+              onClick={triggerFileInput}
+              disabled={disabled || loading}
+            >
+              {buttonContent}
+            </button>
+          )}
+
+          {customButton}
+
+          {loading && (
+            <div className="upload-progress">
+              <div
+                className="upload-progress-bar"
+                style={{ width: `${progress}%` }}
+              ></div>
+              <button
+                type="button"
+                className="upload-cancel-button"
+                onClick={cancelUpload}
+              >
+                取消
+              </button>
+            </div>
+          )}
+        </div>
+      ) : (
+        customButton || (
+          <button
+            type="button"
+            className="upload-button"
+            disabled={disabled || loading}
+          >
+            {buttonContent}
+          </button>
+        )
+      )}
+    </div>
   );
 };
 

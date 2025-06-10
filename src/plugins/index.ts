@@ -34,6 +34,7 @@ import { StandardSecurityPlugin } from './security/StandardSecurityPlugin';
 import { AdvancedSecurityPlugin } from './security/AdvancedSecurityPlugin';
 import { AccessibilityPlugin } from './AccessibilityPlugin';
 import { I18nPlugin } from './I18nPlugin';
+import { ServiceWorkerPlugin } from './ServiceWorkerPlugin';
 // 导入安全插件
 
 // 导出所有插件
@@ -91,6 +92,7 @@ export {
   MonitoringPlugin,
   MonitoringPluginOptions,
   DeveloperToolsPlugin,
+  ServiceWorkerPlugin,
 };
 
 // 默认导出插件对象
@@ -121,4 +123,5 @@ export default {
   AdvancedSecurityPlugin,
   AccessibilityPlugin,
   I18nPlugin,
+  ServiceWorkerPlugin,
 };

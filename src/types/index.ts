@@ -746,4 +746,8 @@ export * from './utils';
 // 无障碍相关类型
 export * from './accessibility';
 // 国际化相关类型
-export * from './i18n'; 
+export * from './i18n';
+
+// 新增的类型定义
+export * from './ui';
+export * from './services'; 

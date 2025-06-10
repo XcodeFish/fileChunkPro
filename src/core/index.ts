@@ -10,6 +10,7 @@ import UploaderCore from './UploaderCore';
 import WorkerManager from './WorkerManager';
 import { WorkerPoolManager } from './WorkerPoolManager';
 import { DebugCenter } from './DebugCenter';
+import { ServiceWorkerManager } from './ServiceWorkerManager';
 
 export {
   UploaderCore,
@@ -21,6 +22,7 @@ export {
   WorkerManager,
   WorkerPoolManager,
   DebugCenter,
+  ServiceWorkerManager,
 };
 
 export default UploaderCore;
