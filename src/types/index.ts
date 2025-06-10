@@ -12,6 +12,9 @@ export * from './retry';
 // 监控系统类型导出
 export * from './monitoring';
 
+// 插件SDK类型导出
+export * from './sdk';
+
 // 上传选项
 export interface UploaderOptions {
   endpoint: string;           // 上传端点
