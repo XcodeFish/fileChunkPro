@@ -1,86 +1,33 @@
 /**
- * 适配器模块导出
- * 提供各种环境的适配器实现
+ * adapters/index.ts
+ * 适配器导出和注册
  */
 
-// 导入具体适配器实现
-import AlipayAdapter from './AlipayAdapter';
-import BaiduAdapter from './BaiduAdapter';
-import { BaseMiniProgramAdapter, BaseMiniProgramAdapterOptions } from './base';
-import BrowserAdapter from './BrowserAdapter';
-import BytedanceAdapter from './BytedanceAdapter';
-import {
-  IAdapter,
-  AbstractAdapter,
-  IAdapterOptions,
-  FileInfo,
-  IStorage,
-  IResponse,
-  RequestOptions,
-} from './interfaces';
-import { IndexedDBAdapter } from './IndexedDBAdapter';
-import { NodeAdapter } from './NodeAdapter';
-import { ReactNativeAdapter } from './ReactNativeAdapter';
-import { BrowserStorage } from './storage/BrowserStorage';
-import { MiniProgramStorage } from './storage/MiniProgramStorage';
-import { NodeStorage } from './storage/NodeStorage';
-import TaroAdapter from './TaroAdapter';
-import UniAppAdapter from './UniAppAdapter';
-import WechatAdapter from './WechatAdapter';
+import { EnvironmentType } from './interfaces';
+import AdapterFactory from './AdapterFactory';
+import BrowserUnifiedAdapter from './BrowserUnifiedAdapter';
 
-// 导入接口和基础类
+/**
+ * 注册适配器类型
+ */
+export function registerAdapters() {
+  const factory = AdapterFactory.getInstance();
 
-// 导出具体适配器
-export {
-  // 具体适配器实现
-  BrowserAdapter,
-  WechatAdapter,
-  AlipayAdapter,
-  BytedanceAdapter,
-  BaiduAdapter,
-  TaroAdapter,
-  UniAppAdapter,
-  ReactNativeAdapter,
-  NodeAdapter,
-  IndexedDBAdapter,
+  // 注册浏览器适配器
+  factory.registerAdapter(EnvironmentType.BROWSER, BrowserUnifiedAdapter);
 
-  // 接口和基础类
-  IAdapter,
-  AbstractAdapter,
-  IAdapterOptions,
-  BaseMiniProgramAdapter,
-  BaseMiniProgramAdapterOptions,
+  // 可以注册其他类型的适配器
+  // factory.registerAdapter(EnvironmentType.WECHAT_MINIPROGRAM, WechatMiniProgramAdapter);
+  // factory.registerAdapter(EnvironmentType.ALIPAY_MINIPROGRAM, AlipayMiniProgramAdapter);
 
-  // 类型定义
-  FileInfo,
-  IStorage,
-  IResponse,
-  RequestOptions,
+  return factory;
+}
 
-  // 存储适配器
-  BrowserStorage,
-  MiniProgramStorage,
-  NodeStorage,
-};
+// 导出适配器相关类
+export { default as AdapterFactory } from './AdapterFactory';
+export { default as AbstractUnifiedAdapter } from './AbstractUnifiedAdapter';
+export { default as BrowserUnifiedAdapter } from './BrowserUnifiedAdapter';
 
-// 默认导出
-export default {
-  BrowserAdapter,
-  WechatAdapter,
-  AlipayAdapter,
-  BytedanceAdapter,
-  BaiduAdapter,
-  TaroAdapter,
-  UniAppAdapter,
-  ReactNativeAdapter,
-  NodeAdapter,
-  IndexedDBAdapter,
-
-  // 基础适配器
-  BaseMiniProgramAdapter,
-
-  // 存储适配器
-  BrowserStorage,
-  MiniProgramStorage,
-  NodeStorage,
-};
+// 导出接口
+export * from './OptimizedAdapterInterfaces';
+export * from './interfaces';
