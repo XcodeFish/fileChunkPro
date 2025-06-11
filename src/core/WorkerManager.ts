@@ -7,6 +7,7 @@
 import { EnvUtils } from '../utils/EnvUtils';
 import { Logger } from '../utils/Logger';
 import { ErrorUtils } from '../utils/ErrorUtils';
+import { AsyncControl } from '../utils/AsyncControl';
 import { EventBus } from './EventBus';
 import { UploadErrorType } from '../types';
 
@@ -1380,23 +1381,45 @@ export default class WorkerManager {
    * 优雅终止Worker
    */
   private gracefulTerminate(): void {
+    // 取消所有正在进行的任务
+    this.cancelAllTasks();
+
     // 如果有活跃任务，等待它们完成
     if (this.activeTaskCount > 0) {
       // 设置终止标志，阻止新任务添加
       this.isTerminating = true;
 
-      // 设置超时
-      const terminateTimeout = setTimeout(() => {
+      // 使用AsyncControl创建可自动清理的超时处理
+      const { controller, signal } =
+        AsyncControl.createTimedAbortController(5000);
+
+      // 跟踪检查间隔
+      let checkInterval: NodeJS.Timeout | null = null;
+
+      // 监听中止信号
+      signal.addEventListener('abort', () => {
         // 强制终止剩余worker
+        this.logger.warn('等待任务完成超时，强制终止所有Worker');
         this.forceTerminateAllWorkers();
+
+        if (checkInterval) {
+          clearInterval(checkInterval);
+          checkInterval = null;
+        }
+
         this.onTerminateComplete();
-      }, 5000); // 5秒超时
+      });
 
       // 设置检查间隔
-      const checkInterval = setInterval(() => {
+      checkInterval = setInterval(() => {
         if (this.activeTaskCount === 0) {
-          clearInterval(checkInterval);
-          clearTimeout(terminateTimeout);
+          if (checkInterval) {
+            clearInterval(checkInterval);
+            checkInterval = null;
+          }
+
+          // 取消超时控制器
+          controller.abort();
 
           // 现在可以安全终止所有worker
           this.safeTerminateAllWorkers();
@@ -1411,34 +1434,113 @@ export default class WorkerManager {
   }
 
   /**
+   * 取消所有正在进行的任务
+   * 优化任务取消，确保清理所有回调和定时器
+   */
+  private cancelAllTasks(): void {
+    // 拒绝所有任务回调，防止资源泄漏
+    this.taskCallbacks.forEach((callback, taskId) => {
+      if (callback.timer) {
+        clearTimeout(callback.timer);
+      }
+
+      callback.reject(new Error(`任务被取消: ${taskId}`));
+    });
+
+    // 清空任务回调映射
+    this.taskCallbacks.clear();
+
+    // 清空等待队列中的所有任务
+    this.pendingTasks.forEach((tasks, type) => {
+      tasks.forEach(task => {
+        task.reject(new Error(`任务被取消: ${task.taskId}`));
+      });
+    });
+
+    this.pendingTasks.clear();
+
+    this.logger.debug('已取消所有正在进行和等待中的任务');
+  }
+
+  /**
    * 安全终止所有Worker
+   * 改进的Worker终止机制，防止资源泄漏
    */
   private safeTerminateAllWorkers(): void {
-    for (const [type, instance] of this.workers.entries()) {
-      if (instance.worker) {
-        try {
-          // 先发送终止消息，让worker自己清理
-          instance.worker.postMessage({ action: 'terminate' });
+    // 记录要终止的worker数量，用于调试
+    const totalWorkers = this.workers.size;
+    let terminatedCount = 0;
 
-          // 设置短延时后终止worker
-          setTimeout(() => {
-            try {
-              instance.worker?.terminate();
-            } catch (err) {
-              this.logger.error(`无法终止 ${type} worker:`, err);
+    this.logger.debug(`开始安全终止 ${totalWorkers} 个Worker实例`);
+
+    // 创建一个Promise用于跟踪所有Worker的终止情况
+    const terminatePromises: Promise<void>[] = [];
+
+    for (const [id, instance] of this.workers.entries()) {
+      if (!instance.worker) continue;
+
+      // 为每个Worker创建一个终止Promise
+      const terminatePromise = new Promise<void>(resolve => {
+        try {
+          const worker = instance.worker!;
+
+          // 创建一个一次性事件处理器来监听终止确认消息
+          const messageHandler = (event: MessageEvent) => {
+            if (event.data && event.data.action === 'terminateAck') {
+              // 收到终止确认，可以安全终止worker
+              worker.removeEventListener('message', messageHandler);
+
+              try {
+                worker.terminate();
+                terminatedCount++;
+                this.logger.debug(`Worker ${id} 已收到终止确认并安全终止`);
+              } catch (e) {
+                this.logger.warn(`终止 Worker ${id} 时出错:`, e);
+              }
+
+              resolve();
             }
-          }, 100);
+          };
+
+          // 添加消息监听器
+          worker.addEventListener('message', messageHandler);
+
+          // 先发送终止消息，让worker自己清理
+          worker.postMessage({ action: 'terminate' });
+
+          // 设置超时，如果没有收到确认则强制终止
+          setTimeout(() => {
+            // 移除监听器，避免内存泄漏
+            worker.removeEventListener('message', messageHandler);
+
+            try {
+              worker.terminate();
+              terminatedCount++;
+              this.logger.debug(`Worker ${id} 超时未确认，已强制终止`);
+            } catch (err) {
+              this.logger.error(`无法终止 ${id} worker:`, err);
+            }
+
+            resolve();
+          }, 300); // 给Worker 300ms响应时间
         } catch (err) {
-          this.logger.error(`发送终止消息到 ${type} worker 失败:`, err);
-          // 直接尝试终止
-          try {
-            instance.worker.terminate();
-          } catch (e) {
-            // 忽略终止错误
-          }
+          this.logger.error(`处理Worker ${id} 终止过程中出错:`, err);
+
+          // 确保在出错时也resolve promise
+          resolve();
         }
-      }
+      });
+
+      terminatePromises.push(terminatePromise);
     }
+
+    // 等待所有Worker终止或超时
+    Promise.all(terminatePromises).then(() => {
+      this.logger.info(`Worker终止完成: ${terminatedCount}/${totalWorkers}`);
+
+      // 最后清空workers集合
+      this.workers.clear();
+    });
   }
 
   /**
