@@ -527,8 +527,9 @@ export class MemoryManager {
       if (this.memoryUsageHistory.length > this.MAX_MEMORY_SAMPLES * 0.8) {
         const keepCount = Math.ceil(this.MAX_MEMORY_SAMPLES * 0.6); // 保留60%最新数据
         this.memoryUsageHistory = this.memoryUsageHistory.slice(-keepCount);
-        this.memoryTimestampHistory =
-          this.memoryTimestampHistory.slice(-keepCount);
+        this.memoryTimestampHistory = this.memoryTimestampHistory.slice(
+          -keepCount
+        );
       }
     }, cleanupInterval);
   }
@@ -1495,8 +1496,9 @@ export class MemoryManager {
         // 保留一半的历史数据，减少内存占用
         const keepCount = Math.ceil(this.MAX_MEMORY_SAMPLES / 2);
         this.memoryUsageHistory = this.memoryUsageHistory.slice(-keepCount);
-        this.memoryTimestampHistory =
-          this.memoryTimestampHistory.slice(-keepCount);
+        this.memoryTimestampHistory = this.memoryTimestampHistory.slice(
+          -keepCount
+        );
       }
 
       // 更新内存状态 (延迟执行，给应用一些时间进行清理)
@@ -1509,107 +1511,59 @@ export class MemoryManager {
   }
 
   /**
-   * 检查是否需要进行内存清理
+   * 检查是否需要清理内存
+   * 根据内存增长率和当前使用率判断
+   * @returns 是否需要清理
    */
   static needsMemoryCleanup(): boolean {
-    // 如果最近已经建议过垃圾回收，避免频繁调用
-    if (Date.now() - this.lastGarbageCollectionTime < this.MIN_GC_INTERVAL) {
-      return false;
-    }
-
-    // 检查内存使用情况
+    // 获取当前内存状态
     const memStats = this.getMemoryStats();
 
-    // 内存使用率高且内存增长趋势
-    if (
-      memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD &&
-      memStats.trend === MemoryTrend.GROWING
-    ) {
+    // 内存使用率高于70%，建议清理
+    if (memStats.usageRatio > 0.7) {
       return true;
     }
 
-    // 内存严重不足
-    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
+    // 内存增长率很快(每秒超过50MB)，建议清理
+    if (memStats.growthRate && memStats.growthRate > 50 * 1024 * 1024) {
       return true;
     }
 
-    // 内存增长速度异常快
-    if (memStats.growthRate && memStats.growthRate > 10 * 1024 * 1024) {
-      // 10MB/s
+    // 内存趋势持续增长且使用率超过50%，建议清理
+    if (memStats.trend === MemoryTrend.GROWING && memStats.usageRatio > 0.5) {
       return true;
     }
 
+    // 否则不需要特别清理
     return false;
   }
 
   /**
-   * 获取推荐的分片数量
-   * 根据文件大小和当前内存状态计算
+   * 获取推荐的并发上传数量
+   * 根据当前内存使用情况动态调整并发数
+   * @param defaultConcurrency 默认并发数
+   * @returns 推荐的并发数
    */
-  static getRecommendedChunkCount(fileSize: number, maxConcurrent = 3): number {
-    // 获取最优分片大小
-    const chunkSize = this.getOptimalChunkSize(fileSize);
-
-    // 计算分片总数 (向上取整)
-    const totalChunks = Math.ceil(fileSize / chunkSize);
-
-    // 考虑并发限制和最小分片数
-    const minChunks = 1;
-    const maxChunks = Math.max(100, maxConcurrent * 10); // 避免过多分片
-
-    // 确保分片数在合理范围内
-    return Math.min(maxChunks, Math.max(minChunks, totalChunks));
-  }
-
-  /**
-   * 获取推荐的并发数
-   * 根据设备能力和内存状态计算
-   */
-  static getRecommendedConcurrency(defaultConcurrent = 3): number {
-    // 如果未初始化，使用默认并发数
-    if (!this.isInitialized) {
-      return defaultConcurrent;
-    }
-
-    // 获取内存状态
+  static getRecommendedConcurrency(defaultConcurrency: number): number {
+    // 获取当前内存状态
     const memStats = this.getMemoryStats();
 
-    // 基于设备内存容量确定基础并发数
-    let baseConcurrency: number;
-
-    switch (memStats.capacity) {
-      case DeviceMemoryCapacity.VERY_LOW:
-        baseConcurrency = 1; // 极低内存设备
-        break;
-      case DeviceMemoryCapacity.LOW:
-        baseConcurrency = 2; // 低内存设备
-        break;
-      case DeviceMemoryCapacity.MEDIUM:
-        baseConcurrency = 3; // 中等设备
-        break;
-      case DeviceMemoryCapacity.HIGH:
-        baseConcurrency = 4; // 高内存设备
-        break;
-      case DeviceMemoryCapacity.VERY_HIGH:
-        baseConcurrency = 6; // 极高内存设备
-        break;
-      default:
-        baseConcurrency = defaultConcurrent; // 默认
+    // 内存使用率 > 70%，减少并发数
+    if (memStats.usageRatio > 0.7) {
+      // 内存使用率高时，减半并发数，但至少为1
+      return Math.max(1, Math.floor(defaultConcurrency / 2));
     }
 
-    // 根据内存使用率调整
-    if (memStats.usageRatio > this.CRITICAL_MEMORY_THRESHOLD) {
-      return 1; // 内存严重不足，只允许1个并发
-    } else if (memStats.usageRatio > this.HIGH_MEMORY_THRESHOLD) {
-      return Math.max(1, baseConcurrency - 1); // 减少1个并发
-    } else if (
-      memStats.usageRatio < this.NORMAL_MEMORY_THRESHOLD &&
-      memStats.trend !== MemoryTrend.GROWING
-    ) {
-      return Math.min(8, baseConcurrency + 1); // 内存充足且不在增长，可增加1个并发
+    // 内存使用率 < 30%，增加并发数
+    else if (memStats.usageRatio < 0.3) {
+      // 内存使用率低时，增加50%并发数，但不超过8
+      return Math.min(8, Math.floor(defaultConcurrency * 1.5));
     }
 
-    return baseConcurrency;
+    // 内存使用率在正常范围内，保持默认并发数
+    else {
+      return defaultConcurrency;
+    }
   }
 
   /**
@@ -1880,6 +1834,34 @@ export class MemoryManager {
       // 中间分片优先级从80递减到20
       return Math.max(20, 80 - Math.floor(60 * (index / totalChunks)));
     }
+  }
+
+  /**
+   * 获取当前内存使用率
+   * @returns 内存使用率（0-1之间的数值）
+   */
+  static getMemoryUsage(): number {
+    const stats = this.getMemoryStats();
+    return stats.usageRatio;
+  }
+
+  /**
+   * 获取推荐的分片数量
+   * 根据文件大小和当前内存状态计算
+   */
+  static getRecommendedChunkCount(fileSize: number, maxConcurrent = 3): number {
+    // 获取最优分片大小
+    const chunkSize = this.getOptimalChunkSize(fileSize);
+
+    // 计算分片总数 (向上取整)
+    const totalChunks = Math.ceil(fileSize / chunkSize);
+
+    // 考虑并发限制和最小分片数
+    const minChunks = 1;
+    const maxChunks = Math.max(100, maxConcurrent * 10); // 避免过多分片
+
+    // 确保分片数在合理范围内
+    return Math.min(maxChunks, Math.max(minChunks, totalChunks));
   }
 }
 

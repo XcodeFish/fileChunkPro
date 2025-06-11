@@ -266,98 +266,112 @@ export class NetworkManager implements INetworkManager {
     url: string,
     options: RequestOptions = {}
   ): Promise<NetworkResponse<T>> {
+    // 合并默认选项和请求选项
+    const mergedOptions = { ...this.defaultOptions, ...options };
+
     // 验证URL
     if (!this.isValidUrl(url)) {
-      throw new UploadError(NetworkErrorType.INVALID_URL, `无效的URL: ${url}`);
+      throw new UploadError(NetworkErrorType.INVALID_URL, `无效的URL: ${url}`, {
+        url,
+      });
     }
-
-    // 合并选项
-    const mergedOptions: RequestOptions = {
-      ...this.defaultOptions,
-      ...options,
-    };
-
-    // 创建中止控制器
-    const abortController = new AbortController();
 
     // 生成请求ID
     const requestId = this.generateRequestId();
 
-    // 创建请求对象
+    // 创建中止控制器
+    const abortController = new AbortController();
+    if (mergedOptions.signal) {
+      mergedOptions.signal.addEventListener('abort', () => {
+        abortController.abort();
+      });
+    }
+
+    // 更新选项
+    const requestOptions: RequestOptions = {
+      ...mergedOptions,
+      signal: abortController.signal,
+    };
+
+    // 构建请求对象
     const request: INetworkRequest = {
       id: requestId,
       url,
-      method: mergedOptions.method || 'GET',
+      method: requestOptions.method || 'GET',
       startTime: Date.now(),
       abortController,
-      options: mergedOptions,
+      options: requestOptions,
       progress: 0,
       status: 'pending',
       retryCount: 0,
     };
 
-    // 添加到活跃请求列表
+    // 存储活跃请求
     this.activeRequests.set(requestId, request);
 
+    // 发出请求开始事件
+    this.eventBus.emit('network:requestStart', {
+      requestId,
+      url,
+      method: request.method,
+      options: requestOptions,
+    });
+
+    // 设置请求超时
+    let timeoutId: NodeJS.Timeout | undefined = undefined;
+    if (requestOptions.timeout && requestOptions.timeout > 0) {
+      timeoutId = setTimeout(() => {
+        abortController.abort();
+        const timeoutError = new Error(`请求超时: ${url}`);
+        timeoutError.name = 'TimeoutError';
+        request.status = 'failed';
+        this.activeRequests.delete(requestId);
+      }, requestOptions.timeout);
+    }
+
     try {
-      // 发出请求开始事件
-      this.eventBus.emit('network:requestStart', {
-        requestId,
-        url,
-        method: request.method,
-        options: mergedOptions,
-      });
-
-      // 设置请求超时
-      let timeoutId: NodeJS.Timeout | null = null;
-      if (mergedOptions.timeout) {
-        timeoutId = setTimeout(() => {
-          this.abort(requestId);
-          if (timeoutId) clearTimeout(timeoutId);
-        }, mergedOptions.timeout);
-      }
-
-      // 获取适配器
-      const adapter = this.container.resolve('currentAdapter');
-      if (!adapter) {
-        throw new UploadError(
-          NetworkErrorType.ADAPTER_NOT_FOUND,
-          '未找到有效的网络适配器'
-        );
-      }
-
-      // 构建请求配置
-      const requestConfig = {
-        method: mergedOptions.method,
-        headers: mergedOptions.headers || {},
-        body: mergedOptions.body,
+      const response = await fetch(url, {
+        method: requestOptions.method || 'GET',
+        headers: requestOptions.headers || {},
+        body: requestOptions.body,
         signal: abortController.signal,
-        timeout: mergedOptions.timeout,
-        responseType: mergedOptions.responseType,
-        withCredentials: mergedOptions.withCredentials,
-        onProgress: (progress: number) => {
-          // 更新进度
-          request.progress = progress;
-
-          // 触发进度回调
-          if (mergedOptions.onProgress) {
-            mergedOptions.onProgress(progress);
-          }
-
-          // 发出进度事件
-          this.eventBus.emit('network:progress', {
-            requestId,
-            url,
-            progress,
-          });
-        },
-      };
-
-      // 使用适配器发送请求
-      const response = await adapter.request(url, requestConfig);
+        credentials: requestOptions.credentials,
+        cache: requestOptions.cache,
+        redirect: requestOptions.redirect,
+        referrer: requestOptions.referrer,
+        referrerPolicy: requestOptions.referrerPolicy,
+        integrity: requestOptions.integrity,
+        keepalive: requestOptions.keepalive,
+        mode: requestOptions.mode,
+      });
 
       // 清除超时计时器
       if (timeoutId) clearTimeout(timeoutId);
+
+      // 检查响应状态
+      if (!response.ok) {
+        throw new Error(`HTTP错误: ${response.status} ${response.statusText}`);
+      }
+
+      // 解析响应数据
+      let responseData: any;
+
+      if (requestOptions.responseType === ResponseType.JSON) {
+        responseData = await response.json();
+      } else if (requestOptions.responseType === ResponseType.BLOB) {
+        responseData = await response.blob();
+      } else if (requestOptions.responseType === ResponseType.ARRAY_BUFFER) {
+        responseData = await response.arrayBuffer();
+      } else if (requestOptions.responseType === ResponseType.TEXT) {
+        responseData = await response.text();
+      } else {
+        // 默认按JSON解析
+        try {
+          responseData = await response.json();
+        } catch {
+          responseData = await response.text();
+        }
+      }
 
       // 标记请求完成
       request.status = 'completed';
@@ -365,15 +379,12 @@ export class NetworkManager implements INetworkManager {
 
       // 构建响应对象
       const networkResponse: NetworkResponse<T> = {
-        ok: response.ok,
+        data: responseData,
         status: response.status,
-        statusText: response.statusText || '',
-        data: response.data as T,
-        headers: response.headers || {},
+        statusText: response.statusText,
+        headers: response.headers,
+        config: requestOptions,
         requestId,
-        url,
-        method: request.method,
-        duration: Date.now() - request.startTime,
       };
 
       // 发出请求完成事件
@@ -770,8 +781,9 @@ export class NetworkManager implements INetworkManager {
    */
   public isValidUrl(url: string): boolean {
     try {
-      new URL(url);
-      return true;
+      const parsedUrl = new URL(url);
+      // 只允许http和https协议
+      return parsedUrl.protocol === 'http:' || parsedUrl.protocol === 'https:';
     } catch {
       return false;
     }

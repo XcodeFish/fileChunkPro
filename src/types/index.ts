@@ -53,7 +53,7 @@ export * from './core';
 // 适配器类型
 export * from './adapters';
 
-// 插件类型
+// 导出插件类型
 export * from './plugins';
 
 // Worker类型
@@ -67,6 +67,9 @@ export * from './config';
 
 // 通用类型
 export * from './common';
+
+// 导出任务类型
+export * from './task';
 
 /**
  * 文件信息

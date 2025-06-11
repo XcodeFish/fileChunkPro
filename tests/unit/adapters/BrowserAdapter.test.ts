@@ -1,304 +1,252 @@
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-
+/**
+ * BrowserAdapter 单元测试
+ * 测试浏览器环境下的上传适配器
+ */
+import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import { BrowserAdapter } from '../../../src/adapters/BrowserAdapter';
+import { EventBus } from '../../../src/core/EventBus';
 
 describe('BrowserAdapter', () => {
   let adapter: BrowserAdapter;
+  let eventBus: EventBus;
+  let originalXHR: typeof XMLHttpRequest;
+  let mockXHR: {
+    open: ReturnType<typeof vi.fn>;
+    send: ReturnType<typeof vi.fn>;
+    setRequestHeader: ReturnType<typeof vi.fn>;
+    upload: {
+      addEventListener: ReturnType<typeof vi.fn>;
+    };
+  };
 
   beforeEach(() => {
-    adapter = new BrowserAdapter();
+    // 保存原始的 XMLHttpRequest 构造函数
+    originalXHR = window.XMLHttpRequest;
 
-    // 模拟 fetch API
-    global.fetch = vi.fn().mockImplementation((url, options) => {
-      return Promise.resolve({
-        ok: true,
-        status: 200,
-        statusText: 'OK',
-        headers: new Headers({
-          'Content-Type': 'application/json',
-        }),
-        json: () =>
-          Promise.resolve({ success: true, url, method: options?.method }),
-        text: () => Promise.resolve('响应文本'),
-        blob: () =>
-          Promise.resolve(new Blob(['测试数据'], { type: 'text/plain' })),
-        formData: () => Promise.resolve(new FormData()),
-        arrayBuffer: () => Promise.resolve(new ArrayBuffer(10)),
-      });
-    }) as any;
-
-    // 模拟 XMLHttpRequest
-    const xhrMockClass = vi.fn(() => ({
+    // 创建模拟 XMLHttpRequest
+    mockXHR = {
       open: vi.fn(),
       send: vi.fn(),
       setRequestHeader: vi.fn(),
       upload: {
         addEventListener: vi.fn(),
       },
-      addEventListener: vi.fn((event, handler) => {
-        if (event === 'load') {
-          setTimeout(() => {
-            handler({
-              target: {
-                status: 200,
-                response: { success: true },
-              },
-            });
-          }, 0);
-        }
-      }),
-    }));
+    };
 
-    // 替换全局 XMLHttpRequest
-    global.XMLHttpRequest = xhrMockClass as any;
+    // 替换全局 XMLHttpRequest 构造函数为模拟实现
+    window.XMLHttpRequest = vi.fn().mockImplementation(() => mockXHR) as any;
+
+    // 创建事件总线和适配器
+    eventBus = new EventBus();
+    adapter = new BrowserAdapter({ eventBus });
   });
 
   afterEach(() => {
-    vi.clearAllMocks();
+    // 恢复原始的 XMLHttpRequest 对象
+    window.XMLHttpRequest = originalXHR;
+    vi.resetAllMocks();
   });
 
-  it('should detect browser environment correctly', () => {
-    expect(adapter.isSupported()).toBe(true);
-    expect(adapter.getEnvironmentInfo()).toEqual(
-      expect.objectContaining({
-        type: 'browser',
-        features: expect.any(Object),
-      })
-    );
+  it('应该正确初始化', () => {
+    expect(adapter).toBeInstanceOf(BrowserAdapter);
+    expect(adapter.getEnvironment()).toBe('browser');
   });
 
-  it('should detect features available in browser', () => {
-    const features = adapter.detectFeatures();
-
-    expect(features).toEqual(
-      expect.objectContaining({
-        fileReader: expect.any(Boolean),
-        fetch: expect.any(Boolean),
-        xhr: expect.any(Boolean),
-        blob: expect.any(Boolean),
-        arrayBuffer: expect.any(Boolean),
-      })
-    );
-  });
-
-  it('should read file chunks correctly', async () => {
-    // 创建测试文件
-    const fileContent = 'Hello, World!';
-    const testFile = new File([fileContent], 'test.txt', {
-      type: 'text/plain',
-    });
-
-    // 读取整个文件
-    const data = await adapter.readFile(testFile, 0, testFile.size);
-
-    // 验证读取结果
-    expect(data).toBeInstanceOf(Uint8Array);
-    expect(data.length).toBe(fileContent.length);
-  });
-
-  it('should read partial file chunks', async () => {
-    // 创建测试文件
-    const fileContent = 'Hello, World!';
-    const testFile = new File([fileContent], 'test.txt', {
-      type: 'text/plain',
-    });
-
-    // 读取部分文件（只读取 "Hello"）
-    const partialData = await adapter.readFile(testFile, 0, 5);
-
-    // 验证读取结果
-    expect(partialData).toBeInstanceOf(Uint8Array);
-    expect(partialData.length).toBe(5);
-  });
-
-  it('should handle network requests using fetch', async () => {
-    const response = await adapter.request({
-      url: 'https://example.com/api',
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-      },
-      data: {
-        id: 123,
-      },
-    });
-
-    expect(global.fetch).toHaveBeenCalledWith(
-      'https://example.com/api',
-      expect.objectContaining({
-        method: 'POST',
-        headers: expect.any(Object),
-        body: expect.any(String),
-      })
-    );
-
-    expect(response).toEqual(
-      expect.objectContaining({
-        success: true,
-        method: 'POST',
-      })
-    );
-  });
-
-  it('should fallback to XMLHttpRequest if fetch is not available', async () => {
-    // 模拟 fetch API 不可用
-    const originalFetch = global.fetch;
-    global.fetch = undefined as any;
-
-    // 重新创建适配器
-    const xhrAdapter = new BrowserAdapter();
-
-    // 发送请求
-    const promise = xhrAdapter.request({
-      url: 'https://example.com/api',
-      method: 'GET',
-    });
-
-    // 验证请求
-    await expect(promise).resolves.toEqual({ success: true });
-    expect(XMLHttpRequest).toHaveBeenCalled();
-
-    // 恢复 fetch
-    global.fetch = originalFetch;
-  });
-
-  it('should upload file using XMLHttpRequest', async () => {
-    const testFile = new File(['测试内容'], 'upload.txt', {
-      type: 'text/plain',
-    });
-
-    const response = await adapter.uploadFile({
+  it('应该能够上传一个Blob对象', async () => {
+    const mockBlob = new Blob(['test content'], { type: 'text/plain' });
+    const mockOptions = {
       url: 'https://example.com/upload',
-      file: testFile,
-      fieldName: 'file',
-      data: {
-        category: 'documents',
-      },
+      headers: { 'Content-Type': 'application/octet-stream' },
+      data: { chunkIndex: '1' },
+    };
+
+    // 模拟成功响应
+    const mockResponse = { success: true, chunkId: '123' };
+    Object.defineProperty(mockXHR, 'status', { value: 200 });
+    Object.defineProperty(mockXHR, 'responseText', {
+      value: JSON.stringify(mockResponse),
+    });
+
+    // 将 send 方法实现为触发 onload 事件
+    mockXHR.send = vi.fn().mockImplementation(function (this: any) {
+      setTimeout(() => {
+        if (this.onload) this.onload();
+      }, 0);
+    });
+
+    // 执行上传
+    const uploadPromise = adapter.upload(mockBlob, mockOptions);
+
+    // 验证 XHR 配置
+    expect(mockXHR.open).toHaveBeenCalledWith('POST', mockOptions.url, true);
+    expect(mockXHR.setRequestHeader).toHaveBeenCalledWith(
+      'Content-Type',
+      mockOptions.headers['Content-Type']
+    );
+
+    // 等待上传完成
+    const result = await uploadPromise;
+
+    // 验证结果
+    expect(result).toEqual(mockResponse);
+    expect(mockXHR.send).toHaveBeenCalled();
+  });
+
+  it('应该处理上传错误', async () => {
+    const mockBlob = new Blob(['test content'], { type: 'text/plain' });
+    const mockOptions = {
+      url: 'https://example.com/upload',
+      headers: {},
+      data: {},
+    };
+
+    // 模拟错误响应
+    Object.defineProperty(mockXHR, 'status', { value: 500 });
+    Object.defineProperty(mockXHR, 'statusText', {
+      value: 'Internal Server Error',
+    });
+    Object.defineProperty(mockXHR, 'responseText', {
+      value: JSON.stringify({ error: 'Server error' }),
+    });
+
+    // 将 send 方法实现为触发 onerror 事件
+    mockXHR.send = vi.fn().mockImplementation(function (this: any) {
+      setTimeout(() => {
+        if (this.onerror) this.onerror(new Error('Network error'));
+      }, 0);
+    });
+
+    // 执行上传并期望它失败
+    await expect(adapter.upload(mockBlob, mockOptions)).rejects.toThrow();
+  });
+
+  it('应该处理上传进度事件', async () => {
+    const mockBlob = new Blob(['test content'], { type: 'text/plain' });
+    const mockOptions = {
+      url: 'https://example.com/upload',
+      headers: {},
+      data: {},
       onProgress: vi.fn(),
-    });
-
-    expect(XMLHttpRequest).toHaveBeenCalled();
-    expect(response).toEqual({ success: true });
-  });
-
-  it('should handle storage operations', async () => {
-    // 模拟 localStorage
-    const localStorageMock = {
-      getItem: vi.fn(),
-      setItem: vi.fn(),
-      removeItem: vi.fn(),
-    };
-    Object.defineProperty(window, 'localStorage', {
-      value: localStorageMock,
-      writable: true,
-    });
-
-    // 存储数据
-    await adapter.setStorageItem('testKey', { value: 'testValue' });
-    expect(localStorageMock.setItem).toHaveBeenCalledWith(
-      'testKey',
-      expect.any(String)
-    );
-
-    // 模拟返回数据
-    localStorageMock.getItem.mockReturnValue(
-      JSON.stringify({ value: 'testValue' })
-    );
-
-    // 读取数据
-    const data = await adapter.getStorageItem('testKey');
-    expect(localStorageMock.getItem).toHaveBeenCalledWith('testKey');
-    expect(data).toEqual({ value: 'testValue' });
-
-    // 删除数据
-    await adapter.removeStorageItem('testKey');
-    expect(localStorageMock.removeItem).toHaveBeenCalledWith('testKey');
-  });
-
-  it('should handle IndexedDB operations for large data', async () => {
-    // 模拟 IndexedDB
-    const mockIndexedDB = {
-      open: vi.fn().mockReturnValue({
-        onupgradeneeded: null,
-        onsuccess: null,
-        onerror: null,
-        result: {
-          transaction: vi.fn().mockReturnValue({
-            objectStore: vi.fn().mockReturnValue({
-              put: vi.fn().mockReturnValue({
-                onsuccess: null,
-                onerror: null,
-              }),
-              get: vi.fn().mockReturnValue({
-                onsuccess: null,
-                onerror: null,
-              }),
-              delete: vi.fn().mockReturnValue({
-                onsuccess: null,
-                onerror: null,
-              }),
-            }),
-          }),
-        },
-      }),
     };
 
-    Object.defineProperty(window, 'indexedDB', {
-      value: mockIndexedDB,
-      writable: true,
+    // 模拟上传进度事件
+    let progressHandler: ((event: any) => void) | null = null;
+    mockXHR.upload.addEventListener = vi
+      .fn()
+      .mockImplementation((event, handler) => {
+        if (event === 'progress') {
+          progressHandler = handler;
+        }
+      });
+
+    // 模拟成功响应
+    Object.defineProperty(mockXHR, 'status', { value: 200 });
+    Object.defineProperty(mockXHR, 'responseText', {
+      value: JSON.stringify({ success: true }),
     });
 
-    // 创建大量数据
-    const largeData = new ArrayBuffer(10 * 1024 * 1024); // 10MB
+    // 将 send 方法实现为触发 progress 和 onload 事件
+    mockXHR.send = vi.fn().mockImplementation(function (this: any) {
+      setTimeout(() => {
+        // 触发进度事件
+        if (progressHandler) {
+          progressHandler({
+            loaded: 50,
+            total: 100,
+            lengthComputable: true,
+          });
+        }
 
-    // 使用 IndexedDB 存储
-    const promise = adapter.storeChunk('fileId', 1, largeData);
+        // 然后触发完成事件
+        if (this.onload) this.onload();
+      }, 0);
+    });
 
-    // 触发成功回调
-    setTimeout(() => {
-      const request = mockIndexedDB
-        .open()
-        .result.transaction()
-        .objectStore()
-        .put();
-      request.onsuccess && request.onsuccess({} as any);
-    }, 0);
+    // 执行上传
+    await adapter.upload(mockBlob, mockOptions);
 
-    await expect(promise).resolves.not.toThrow();
+    // 验证进度回调被调用
+    expect(mockOptions.onProgress).toHaveBeenCalledWith(
+      expect.objectContaining({
+        loaded: 50,
+        total: 100,
+        progress: 0.5,
+      })
+    );
   });
 
-  it('should detect when running in web worker context', () => {
-    // 模拟 web worker 环境
-    global.self = {} as any;
-    global.window = undefined as any;
+  it('应该支持文件中断/取消上传', async () => {
+    const mockBlob = new Blob(['test content'], { type: 'text/plain' });
+    const mockOptions = {
+      url: 'https://example.com/upload',
+      headers: {},
+      data: {},
+    };
 
-    // 创建适配器
-    const workerAdapter = new BrowserAdapter();
+    // 模拟 XHR abort 方法
+    Object.defineProperty(mockXHR, 'abort', { value: vi.fn() });
 
-    // 检测 worker 环境
-    expect(workerAdapter.isWorkerEnvironment()).toBe(true);
+    // 开始上传但不等待完成
+    adapter.upload(mockBlob, mockOptions).catch(() => {
+      // 忽略预期的取消错误
+    });
 
-    // 恢复环境
-    global.window = window;
+    // 取消上传
+    adapter.abort();
+
+    // 验证 abort 方法被调用
+    expect(mockXHR.abort).toHaveBeenCalled();
   });
 
-  it('should create object URLs from Blob', () => {
-    // 模拟 URL.createObjectURL
-    global.URL.createObjectURL = vi.fn().mockReturnValue('blob:mock-url');
+  it('应该支持自定义请求配置', async () => {
+    const mockBlob = new Blob(['test content'], { type: 'text/plain' });
+    const mockOptions = {
+      url: 'https://example.com/upload',
+      method: 'PUT', // 使用 PUT 而非默认的 POST
+      headers: {
+        'X-Custom-Header': 'CustomValue',
+        'Content-Type': 'application/octet-stream',
+      },
+      data: { id: '123' },
+      withCredentials: true,
+      timeout: 5000,
+    };
 
-    const blob = new Blob(['测试数据']);
-    const url = adapter.createObjectURL(blob);
+    // 模拟成功响应
+    Object.defineProperty(mockXHR, 'status', { value: 200 });
+    Object.defineProperty(mockXHR, 'responseText', {
+      value: JSON.stringify({ success: true }),
+    });
 
-    expect(url).toBe('blob:mock-url');
-    expect(URL.createObjectURL).toHaveBeenCalledWith(blob);
-  });
+    // 将 send 方法模拟为异步成功
+    mockXHR.send = vi.fn().mockImplementation(function (this: any) {
+      setTimeout(() => {
+        if (this.onload) this.onload();
+      }, 0);
+    });
 
-  it('should revoke object URLs', () => {
-    // 模拟 URL.revokeObjectURL
-    global.URL.revokeObjectURL = vi.fn();
+    // 执行上传并等待完成
+    await adapter.upload(mockBlob, mockOptions);
 
-    adapter.revokeObjectURL('blob:mock-url');
+    // 验证 XHR 配置
+    expect(mockXHR.open).toHaveBeenCalledWith(
+      mockOptions.method,
+      mockOptions.url,
+      true
+    );
 
-    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
+    expect(mockXHR.setRequestHeader).toHaveBeenCalledWith(
+      'X-Custom-Header',
+      'CustomValue'
+    );
+
+    expect(mockXHR.setRequestHeader).toHaveBeenCalledWith(
+      'Content-Type',
+      mockOptions.headers['Content-Type']
+    );
+
+    // 验证 withCredentials 和 timeout 设置
+    expect((mockXHR as any).withCredentials).toBe(true);
+    expect((mockXHR as any).timeout).toBe(5000);
   });
 });

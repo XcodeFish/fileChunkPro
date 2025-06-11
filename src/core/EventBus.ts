@@ -8,6 +8,46 @@ import { ErrorUtils } from '../utils/ErrorUtils';
 import { Logger } from '../utils/Logger';
 
 /**
+ * 事件对象接口
+ */
+export interface EventObject<T = any> {
+  /**
+   * 事件类型
+   */
+  type: string;
+
+  /**
+   * 事件数据
+   */
+  data: T;
+
+  /**
+   * 事件来源
+   */
+  source?: string;
+
+  /**
+   * 是否已阻止默认行为
+   */
+  defaultPrevented: boolean;
+
+  /**
+   * 是否已停止传播
+   */
+  propagationStopped: boolean;
+
+  /**
+   * 阻止默认行为
+   */
+  preventDefault(): void;
+
+  /**
+   * 停止事件传播
+   */
+  stopPropagation(): void;
+}
+
+/**
  * 事件处理器类型
  */
 export type EventHandler<T = any> = (data: T) => void;
@@ -181,6 +221,11 @@ export interface IEventBus {
    * @returns 命名空间事件总线
    */
   createNamespace(namespace: string): IEventBus;
+
+  /**
+   * 移除所有监听器
+   */
+  removeAllListeners(): void;
 }
 
 /**
@@ -227,6 +272,22 @@ class EventPipelineImpl<T> implements EventPipeline<T> {
  * 事件总线
  */
 export class EventBus implements IEventBus {
+  /**
+   * 单例实例
+   */
+  private static instance: EventBus;
+
+  /**
+   * 获取事件总线单例
+   * @returns 事件总线实例
+   */
+  public static getInstance(): EventBus {
+    if (!EventBus.instance) {
+      EventBus.instance = new EventBus();
+    }
+    return EventBus.instance;
+  }
+
   /**
    * 所有事件的订阅者映射
    */
@@ -419,6 +480,9 @@ export class EventBus implements IEventBus {
           this.recordEventHistory(fullEventName, data);
         }
 
+        // 创建事件对象
+        const eventObject = createEventObject(eventName, data);
+
         // 创建要执行的订阅副本，以防在遍历过程中有修改
         const subsToExecute = [...subs];
 
@@ -428,11 +492,17 @@ export class EventBus implements IEventBus {
         // 执行所有处理器
         for (const sub of subsToExecute) {
           try {
-            sub.handler(data as T);
+            // 如果已经停止传播，则不再继续执行
+            if (eventObject.propagationStopped) {
+              break;
+            }
+            sub.handler(eventObject as unknown as T);
           } catch (error) {
             // 错误已经被CallbackWrapper处理，这里只是记录日志
             this.logger.error(
-              `事件处理器执行错误: ${fullEventName}, 错误: ${error instanceof Error ? error.message : String(error)}`
+              `事件处理器执行错误: ${fullEventName}, 错误: ${
+                error instanceof Error ? error.message : String(error)
+              }`
             );
           }
         }
@@ -491,7 +561,9 @@ export class EventBus implements IEventBus {
             } catch (error) {
               ErrorUtils.handleError(error);
               this.logger.error(
-                `流水线处理器错误: ${fullEventName}, 错误: ${error instanceof Error ? error.message : String(error)}`
+                `流水线处理器错误: ${fullEventName}, 错误: ${
+                  error instanceof Error ? error.message : String(error)
+                }`
               );
             }
             return result;
@@ -545,7 +617,9 @@ export class EventBus implements IEventBus {
 
     if (this.debug) {
       console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消订阅事件: ${eventName}`
+        `[EventBus${
+          this.namespaceName ? `:${this.namespaceName}` : ''
+        }] 取消订阅事件: ${eventName}`
       );
     }
 
@@ -577,7 +651,9 @@ export class EventBus implements IEventBus {
 
     if (this.debug && count > 0) {
       console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消标签订阅: ${tag}, 数量: ${count}`
+        `[EventBus${
+          this.namespaceName ? `:${this.namespaceName}` : ''
+        }] 取消标签订阅: ${tag}, 数量: ${count}`
       );
     }
 
@@ -595,7 +671,9 @@ export class EventBus implements IEventBus {
 
     if (result && this.debug) {
       console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 取消所有订阅: ${eventName}`
+        `[EventBus${
+          this.namespaceName ? `:${this.namespaceName}` : ''
+        }] 取消所有订阅: ${eventName}`
       );
     }
 
@@ -647,9 +725,18 @@ export class EventBus implements IEventBus {
 
     if (this.debug) {
       console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 清空所有订阅`
+        `[EventBus${
+          this.namespaceName ? `:${this.namespaceName}` : ''
+        }] 清空所有订阅`
       );
     }
+  }
+
+  /**
+   * 移除所有监听器
+   */
+  removeAllListeners(): void {
+    this.clear();
   }
 
   /**
@@ -711,6 +798,40 @@ export class EventBus implements IEventBus {
       this.eventHistory.shift();
     }
   }
+}
+
+/**
+ * 创建事件对象
+ * @param type 事件类型
+ * @param data 事件数据
+ * @param source 事件来源
+ * @returns 事件对象
+ */
+export function createEventObject<T = any>(
+  type: string,
+  data: T,
+  source?: string
+): EventObject<T> {
+  let defaultPrevented = false;
+  let propagationStopped = false;
+
+  return {
+    type,
+    data,
+    source,
+    get defaultPrevented() {
+      return defaultPrevented;
+    },
+    get propagationStopped() {
+      return propagationStopped;
+    },
+    preventDefault() {
+      defaultPrevented = true;
+    },
+    stopPropagation() {
+      propagationStopped = true;
+    },
+  };
 }
 
 // 导出默认实例

@@ -93,7 +93,7 @@ export class ErrorCenter {
    */
   private constructor(options?: Partial<ErrorCenterOptions>) {
     this.options = { ...ErrorCenter.DEFAULT_OPTIONS, ...options };
-    this.eventBus = EventBus.getInstance();
+    this.eventBus = new EventBus(); // 创建新的EventBus实例，而不是使用getInstance
     this.logger = new Logger('ErrorCenter');
 
     // 初始化组件
@@ -375,5 +375,15 @@ export class ErrorCenter {
     ErrorCenter.instance = undefined as any;
 
     this.logger.info('错误中心已销毁');
+  }
+
+  /**
+   * 设置EventBus实例
+   * @param eventBus EventBus实例
+   */
+  public setEventBus(eventBus: EventBus): void {
+    this.eventBus = eventBus;
+    // 重新设置事件监听器
+    this.setupEventListeners();
   }
 }

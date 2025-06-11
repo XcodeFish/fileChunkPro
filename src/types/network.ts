@@ -19,15 +19,38 @@ export type ResponseType = 'json' | 'text' | 'blob' | 'arraybuffer' | 'document'
 export type ProgressCallback = (progress: number) => void;
 
 /**
- * 网络质量枚举
+ * 网络质量
  */
 export enum NetworkQuality {
-  UNKNOWN = 'unknown',
-  POOR = 'poor',
-  MODERATE = 'moderate',
-  GOOD = 'good',
+  /**
+   * 极好
+   */
   EXCELLENT = 'excellent',
-  OFFLINE = 'offline'
+
+  /**
+   * 良好
+   */
+  GOOD = 'good',
+
+  /**
+   * 一般
+   */
+  FAIR = 'fair',
+
+  /**
+   * 较差
+   */
+  POOR = 'poor',
+
+  /**
+   * 非常差
+   */
+  VERY_POOR = 'very_poor',
+
+  /**
+   * 不可用
+   */
+  UNUSABLE = 'unusable',
 }
 
 /**
@@ -904,4 +927,154 @@ export interface NetworkManagerOptions {
    * 是否启用请求队列
    */
   enableQueue: boolean;
+}
+
+/**
+ * 网络类型
+ */
+export enum NetworkType {
+  /**
+   * 未知网络类型
+   */
+  UNKNOWN = 'unknown',
+
+  /**
+   * 4G网络
+   */
+  NETWORK_4G = '4g',
+
+  /**
+   * 3G网络
+   */
+  NETWORK_3G = '3g',
+
+  /**
+   * 2G网络
+   */
+  NETWORK_2G = '2g',
+
+  /**
+   * WIFI网络
+   */
+  WIFI = 'wifi',
+
+  /**
+   * 有线网络
+   */
+  ETHERNET = 'ethernet',
+
+  /**
+   * 5G网络
+   */
+  NETWORK_5G = '5g',
+
+  /**
+   * 蓝牙网络
+   */
+  BLUETOOTH = 'bluetooth',
+
+  /**
+   * VPN网络
+   */
+  VPN = 'vpn',
+}
+
+/**
+ * 环境类型
+ */
+export enum EnvironmentType {
+  /**
+   * 浏览器环境
+   */
+  BROWSER = 'browser',
+
+  /**
+   * 微信小程序环境
+   */
+  WECHAT_MINIPROGRAM = 'wechat_miniprogram',
+
+  /**
+   * 支付宝小程序环境
+   */
+  ALIPAY_MINIPROGRAM = 'alipay_miniprogram',
+
+  /**
+   * 百度小程序环境
+   */
+  BAIDU_MINIPROGRAM = 'baidu_miniprogram',
+
+  /**
+   * 字节跳动小程序环境
+   */
+  BYTEDANCE_MINIPROGRAM = 'bytedance_miniprogram',
+
+  /**
+   * UniApp环境
+   */
+  UNI_APP = 'uni_app',
+
+  /**
+   * Node环境
+   */
+  NODE = 'node',
+
+  /**
+   * 未知环境
+   */
+  UNKNOWN = 'unknown',
+}
+
+/**
+ * 网络条件接口
+ */
+export interface NetworkCondition {
+  /**
+   * 网络是否在线
+   */
+  online: boolean;
+
+  /**
+   * 网络类型
+   */
+  type: NetworkType;
+
+  /**
+   * 网络质量
+   */
+  quality: NetworkQuality;
+
+  /**
+   * 下载速度(Mbps)
+   */
+  downloadSpeed: number;
+
+  /**
+   * 上传速度(Mbps)
+   */
+  uploadSpeed: number;
+
+  /**
+   * 网络延迟(ms)
+   */
+  latency: number;
+
+  /**
+   * 网络稳定性(0-1)
+   */
+  stability: number;
+
+  /**
+   * 丢包率(0-1)
+   */
+  packetLoss: number;
+
+  /**
+   * 网络质量评分(0-100)
+   */
+  qualityScore: number;
+
+  /**
+   * 上次检测时间
+   */
+  lastChecked: number;
 } 

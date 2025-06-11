@@ -5,22 +5,23 @@
 
 import {
   TaskSchedulerOptions,
-  Task,
   ProgressCallback,
   TaskPriority,
   TaskMetadata,
   NetworkStatus,
   TaskState,
   TaskStats,
+  TaskStatus,
 } from '../types';
 import MemoryManager from '../utils/MemoryManager';
 import { StateLockManager } from '../utils/StateLock';
 
 import EventBus from './EventBus';
+import { Logger } from '../utils/Logger';
 
-interface TaskItem {
+interface TaskItem<T = any> {
   id: number; // 任务ID
-  task: Task; // 任务函数
+  task: () => Promise<T>; // 任务函数
   retryCount: number; // 已重试次数
   maxRetries?: number; // 最大重试次数
   currentAttempt: number; // 当前尝试次数
@@ -29,7 +30,7 @@ interface TaskItem {
   metadata?: TaskMetadata; // 任务元数据
   startTime?: number; // 任务开始时间
   endTime?: number; // 任务结束时间
-  state: TaskState; // 任务状态
+  status: TaskStatus; // 任务状态
   error?: Error; // 任务错误
   aborted?: boolean; // 是否被中止
   result?: unknown; // 任务结果
@@ -47,6 +48,7 @@ export class TaskScheduler {
   private progressCallbacks: ProgressCallback[] = [];
   private aborted = false;
   private paused = false;
+  private running = false;
   private lastProgress = 0;
   private networkStatus: NetworkStatus = 'unknown';
   private networkCheckInterval: NodeJS.Timeout | null = null;
@@ -77,42 +79,36 @@ export class TaskScheduler {
   };
   private completedTasks: TaskItem[] = [];
   private lastNetworkStatusTime = 0;
-  private logger?: {
-    debug?: (message: string) => void;
-    info?: (message: string) => void;
-    warn?: (message: string) => void;
-    error?: (message: string) => void;
-  };
+  private logger: Logger;
   private schedulerLockId = 'task-scheduler';
 
   constructor(options: TaskSchedulerOptions, eventBus?: EventBus) {
     this.options = {
       concurrency: 3,
-      retries: 3,
       retryDelay: 1000,
-      priorityQueue: false,
-      autoStart: true,
-      memoryOptimization: true,
-      networkOptimization: true,
-      maxIdleTime: 30000,
+      retries: 3,
+      timeout: 30000,
       ...options,
     };
 
-    this.dynamicConcurrency = this.options.concurrency ?? 1;
-
-    // 如果提供了eventBus，使用它，否则创建一个新的
     this.eventBus = eventBus || new EventBus();
+    this.logger = new Logger('TaskScheduler');
+    this.dynamicConcurrency = this.options.concurrency;
+    this.taskIdCounter = 1; // 从1开始计数任务ID
 
-    if (this.options.memoryOptimization) {
-      this.startMemoryMonitoring();
-    }
+    // 初始化网络监控
+    this.startNetworkMonitoring();
 
-    if (this.options.networkOptimization) {
-      this.startNetworkMonitoring();
-    }
+    // 初始化内存监控
+    this.startMemoryMonitoring();
 
-    // 每30秒根据环境动态调整并发
+    // 初始化并发度动态调整
     this.startConcurrencyAdjustment();
+
+    // 设置全局默认值
+    if (!this.options.defaultPriority) {
+      this.options.defaultPriority = TaskPriority.NORMAL;
+    }
   }
 
   /**
@@ -199,7 +195,7 @@ export class TaskScheduler {
 
           // 计算上一次网络状态变化后的持续时间
           const statusDuration = now - this.lastNetworkStatusTime;
-          this.logger?.debug?.(
+          this.logger.debug(
             `网络状态从 ${previousStatus} 变为 ${this.networkStatus}，持续了 ${statusDuration}ms`
           );
 
@@ -366,19 +362,20 @@ export class TaskScheduler {
 
   /**
    * 添加任务到队列
-   * @param task 任务函数
+   * @param task 要执行的任务函数
    * @param priority 任务优先级
    * @param metadata 任务元数据
    * @returns 任务ID
    */
-  addTask(
-    task: Task,
-    priority: TaskPriority = TaskPriority.NORMAL,
+  public addTask<T = any>(
+    task: () => Promise<T>,
+    priority: TaskPriority = this.options.defaultPriority,
     metadata?: TaskMetadata
   ): number {
-    const taskId = ++this.taskIdCounter;
+    const taskId = this.taskIdCounter++;
 
-    const taskItem: TaskItem = {
+    // 创建任务项
+    const taskItem: TaskItem<T> = {
       id: taskId,
       task,
       retryCount: 0,
@@ -386,24 +383,22 @@ export class TaskScheduler {
       completed: false,
       priority,
       metadata,
-      state: TaskState.PENDING,
+      status: TaskStatus.PENDING,
       maxRetries: this.options.retries,
     };
 
+    // 将任务添加到队列中
     this.taskQueue.push(taskItem);
+
+    // 增加总任务计数
     this.totalTaskCount++;
 
-    // 按优先级排序
-    if (this.options.priorityQueue) {
-      // 注意：优先级越小，优先级越高（TaskPriority.CRITICAL = 0，TaskPriority.LOW = 3）
-      this.taskQueue.sort((a, b) => a.priority - b.priority);
-    }
+    // 触发任务添加事件
+    this.eventBus.emit('task:added', { taskId, priority, metadata });
+    this.logger.debug(`任务 #${taskId} 已添加到队列，优先级: ${priority}`);
 
-    // 通知有新任务
-    this.eventBus.emit('taskAdded', { taskId, metadata });
-
-    // 如果设置了自动启动，那就开始执行任务
-    if (this.options.autoStart && this.taskQueue.length === 1 && !this.paused) {
+    // 如果调度器正在运行，尝试执行任务
+    if (this.running) {
       this.processNextTask();
     }
 
@@ -655,12 +650,15 @@ export class TaskScheduler {
   }
 
   /**
-   * 启动任务处理
+   * 启动调度器
    */
   start(): void {
-    if (this.aborted) return;
+    if (this.paused || this.aborted) return;
 
-    this.paused = false;
+    this.running = true;
+    this.startTime = Date.now();
+
+    // 开始处理任务
     this.processNextTask();
   }
 
@@ -745,7 +743,7 @@ export class TaskScheduler {
       // 触发事件
       this.eventBus.emit('paused', currentState);
 
-      this.logger?.info?.('任务调度器已暂停', currentState);
+      this.logger.info('任务调度器已暂停', currentState);
     });
   }
 
@@ -777,7 +775,7 @@ export class TaskScheduler {
       // 触发事件
       this.eventBus.emit('resumed', currentState);
 
-      this.logger?.info?.('任务调度器已恢复', currentState);
+      this.logger.info('任务调度器已恢复', currentState);
     });
 
     // 锁外处理，以避免死锁
@@ -937,39 +935,54 @@ export class TaskScheduler {
   }
 
   /**
-   * 更新进度并通知订阅者
+   * 更新进度并触发事件
    */
   private updateProgress(): void {
-    const totalTasks = this.totalTaskCount;
-    if (totalTasks === 0) return;
+    // 计算整体进度百分比
+    const total = this.totalTaskCount;
+    const completed =
+      this.completedTaskCount + this.failedTaskCount + this.abortedTaskCount;
 
-    const completedTasks = this.completedTaskCount + this.failedTaskCount;
-    const progress = Math.min(1, completedTasks / totalTasks);
+    if (total === 0) return; // 避免除以零
 
-    // 只有当进度有明显变化时才通知
-    if (Math.abs(progress - this.lastProgress) >= 0.01 || progress === 1) {
+    const progress = Math.min(100, Math.round((completed / total) * 100));
+
+    // 防止重复发送相同进度
+    if (progress !== this.lastProgress || completed === total) {
       this.lastProgress = progress;
 
       const progressData = {
         progress,
-        completed: this.completedTaskCount,
+        completed,
+        total,
+        active: this.runningTasks.size,
         failed: this.failedTaskCount,
         aborted: this.abortedTaskCount,
-        total: totalTasks,
-        remaining: totalTasks - completedTasks,
+        pending: this.getPendingTaskCount(),
+        timestamp: Date.now(),
       };
 
-      // 通知所有订阅者
-      this.progressCallbacks.forEach(callback => {
+      // 触发进度回调
+      for (const callback of this.progressCallbacks) {
         try {
           callback(progressData);
         } catch (error) {
-          console.error('Error in progress callback:', error);
+          this.logger.error('执行进度回调时发生错误', error);
         }
-      });
+      }
 
       // 发出进度事件
       this.eventBus.emit('progress', progressData);
+
+      // 完成时触发完成事件
+      if (completed === total && total > 0) {
+        this.eventBus.emit('allTasksCompleted', {
+          totalTasks: total,
+          failedTasks: this.failedTaskCount,
+          abortedTasks: this.abortedTaskCount,
+          timestamp: Date.now(),
+        });
+      }
     }
   }
 
@@ -978,23 +991,23 @@ export class TaskScheduler {
    * @param taskId 任务ID
    * @returns 任务状态
    */
-  getTaskState(taskId: number): TaskState | null {
+  getTaskState(taskId: number): TaskStatus | null {
     // 在队列中查找
     const queuedTask = this.taskQueue.find(task => task.id === taskId);
     if (queuedTask) {
-      return queuedTask.state;
+      return queuedTask.status;
     }
 
     // 在运行中的任务中查找
     const runningTask = this.runningTasks.get(taskId);
     if (runningTask) {
-      return runningTask.state;
+      return runningTask.status;
     }
 
     // 在已完成任务中查找（如果有存储）
     const completedTask = this.completedTasks.find(task => task.id === taskId);
     if (completedTask) {
-      return completedTask.state;
+      return completedTask.status;
     }
 
     return null;
@@ -1039,7 +1052,7 @@ export class TaskScheduler {
     const queueIndex = this.taskQueue.findIndex(task => task.id === taskId);
     if (queueIndex >= 0) {
       const task = this.taskQueue[queueIndex];
-      task.state = TaskState.CANCELLED;
+      task.status = TaskStatus.CANCELLED;
       this.taskQueue.splice(queueIndex, 1);
 
       // 添加到已完成任务（以便状态查询）
@@ -1052,7 +1065,7 @@ export class TaskScheduler {
     // 检查是否正在运行
     for (const task of this.runningTasks.values()) {
       if (task.id === taskId) {
-        task.state = TaskState.CANCELLED;
+        task.status = TaskStatus.CANCELLED;
         task.aborted = true;
 
         // 添加到已完成任务（以便状态查询）
@@ -1386,12 +1399,12 @@ export class TaskScheduler {
   }
 
   /**
-   * 获取所有任务的状态
-   * @returns 所有任务状态的数组
+   * 获取所有任务状态
+   * @returns 任务状态数组
    */
   public getAllTaskStates(): Array<{
     id: number;
-    state: TaskState;
+    state: TaskStatus;
     metadata?: TaskMetadata;
     retryCount: number;
     priority: TaskPriority;

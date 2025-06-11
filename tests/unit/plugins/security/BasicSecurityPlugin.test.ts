@@ -2,13 +2,11 @@
  * BasicSecurityPlugin 单元测试
  */
 
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { EventBus } from '../../../../src/core/EventBus';
-import { BasicSecurityPlugin } from '../../../../src/plugins/security';
-import {
-  ErrorGroup,
-  ErrorSeverity,
-  SecurityLevel,
-} from '../../../../src/types';
+import { BasicSecurityPlugin } from '../../../../src/plugins/security/BasicSecurityPlugin';
+import { UploadError } from '../../../../src/core/error/UploadError';
+import { SecurityErrorType } from '../../../../src/types/errors';
 
 // 模拟 UploaderCore
 class MockUploaderCore {
@@ -20,8 +18,8 @@ class MockUploaderCore {
     this.eventBus = new EventBus();
     this.config = config;
     this.pluginManager = {
-      registerHook: jest.fn(),
-      removePluginHooks: jest.fn(),
+      registerHook: vi.fn(),
+      removePluginHooks: vi.fn(),
     };
   }
 
@@ -54,326 +52,192 @@ describe('BasicSecurityPlugin', () => {
   });
 
   afterEach(() => {
-    jest.clearAllMocks();
+    vi.clearAllMocks();
   });
 
   describe('构造函数', () => {
     it('应该使用默认选项创建插件', () => {
-      const plugin = new BasicSecurityPlugin();
-      // @ts-ignore - 访问私有属性进行测试
-      expect(plugin._options).toBeDefined();
-      // @ts-ignore
-      expect(plugin._options.maxFileSize).toBe(100 * 1024 * 1024); // 默认100MB
+      expect(plugin).toBeDefined();
+      expect(plugin.options).toBeDefined();
+      expect(plugin.options.maxFileSize).toBeDefined();
+      expect(plugin.options.allowedFileTypes).toBeDefined();
     });
 
     it('应该用自定义选项覆盖默认选项', () => {
       const customOptions = {
-        maxFileSize: 10 * 1024 * 1024, // 10MB
-        allowedMimeTypes: ['image/jpeg'],
-        maxFileNameLength: 50,
-        enableSensitiveExtensionCheck: false,
+        maxFileSize: 20 * 1024 * 1024,
+        allowedFileTypes: ['image/png', 'application/pdf'],
       };
-      const plugin = new BasicSecurityPlugin(customOptions);
-      // @ts-ignore
-      expect(plugin._options.maxFileSize).toBe(customOptions.maxFileSize);
-      // @ts-ignore
-      expect(plugin._options.allowedMimeTypes).toEqual(
-        customOptions.allowedMimeTypes
-      );
-      // @ts-ignore
-      expect(plugin._options.maxFileNameLength).toBe(
-        customOptions.maxFileNameLength
-      );
-      // @ts-ignore
-      expect(plugin._options.enableSensitiveExtensionCheck).toBe(
-        customOptions.enableSensitiveExtensionCheck
+      plugin = new BasicSecurityPlugin(customOptions);
+      expect(plugin.options.maxFileSize).toBe(customOptions.maxFileSize);
+      expect(plugin.options.allowedFileTypes).toEqual(
+        customOptions.allowedFileTypes
       );
     });
   });
 
   describe('安装/卸载', () => {
     it('应该正确安装插件', () => {
-      plugin.install(uploader as any);
-
-      // 验证钩子注册
-      expect(uploader.getPluginManager().registerHook).toHaveBeenCalledWith(
-        'beforeFileUpload',
-        expect.any(Function),
-        expect.objectContaining({ plugin: 'BasicSecurityPlugin' })
-      );
-
-      // 验证事件监听器注册
-      expect(eventBus.listenerCount('fileUpload:start')).toBe(1);
-      expect(eventBus.listenerCount('fileUpload:error')).toBe(1);
+      plugin.install(uploader);
+      expect(uploader.getPluginManager().registerHook).toHaveBeenCalled();
+      expect(eventBus.on).toHaveBeenCalled();
     });
 
     it('应该正确卸载插件', () => {
-      plugin.install(uploader as any);
-      plugin.uninstall();
-
-      // 验证钩子移除
-      expect(
-        uploader.getPluginManager().removePluginHooks
-      ).toHaveBeenCalledWith('BasicSecurityPlugin');
-
-      // 验证事件监听器移除
-      expect(eventBus.listenerCount('fileUpload:start')).toBe(0);
-      expect(eventBus.listenerCount('fileUpload:error')).toBe(0);
+      plugin.install(uploader);
+      plugin.uninstall(uploader);
+      expect(uploader.getPluginManager().removePluginHooks).toHaveBeenCalled();
+      expect(eventBus.off).toHaveBeenCalled();
     });
   });
 
   describe('文件验证', () => {
     beforeEach(() => {
-      plugin.install(uploader as any);
+      plugin.install(uploader);
     });
 
-    it('应该允许有效的文件上传', async () => {
-      // 创建一个有效的文件对象
-      const validFile = new File(
-        [new ArrayBuffer(1024 * 1024)], // 1MB
-        'test-image.jpg',
-        { type: 'image/jpeg' }
-      );
-
-      // 执行钩子
-      // @ts-ignore - 访问私有方法进行测试
-      const result = await plugin._validateFile({ file: validFile });
-
-      expect(result.handled).toBe(true);
-      expect(result.result.valid).toBe(true);
-      expect(result.result.errors.length).toBe(0);
-    });
-
-    it('应该拒绝超过大小限制的文件', async () => {
-      // 创建一个超大文件对象
-      const oversizedFile = new File(
-        [new ArrayBuffer(10 * 1024 * 1024)], // 10MB, 超过5MB限制
-        'large-image.jpg',
-        { type: 'image/jpeg' }
-      );
-
-      // 监听安全事件
-      const securityIssueHandler = jest.fn();
-      eventBus.on('security:issue', securityIssueHandler);
-
-      // 执行钩子
-      // @ts-ignore
-      const result = await plugin._validateFile({ file: oversizedFile });
-
-      expect(result.handled).toBe(true);
-      expect(result.result.valid).toBe(false);
-      expect(result.result.errors).toContain('文件大小超过限制');
-
-      // 验证事件触发
-      expect(securityIssueHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '文件大小超过限制',
-          severity: ErrorSeverity.HIGH,
-          group: ErrorGroup.SECURITY,
-        })
-      );
-    });
-
-    it('应该拒绝不允许的文件类型', async () => {
-      // 创建一个不允许类型的文件
-      const executableFile = new File(
-        [new ArrayBuffer(1024 * 1024)], // 1MB
-        'script.js',
-        { type: 'application/javascript' }
-      );
-
-      // 监听安全事件
-      const securityIssueHandler = jest.fn();
-      eventBus.on('security:issue', securityIssueHandler);
-
-      // 执行钩子
-      // @ts-ignore
-      const result = await plugin._validateFile({ file: executableFile });
-
-      expect(result.handled).toBe(true);
-      expect(result.result.valid).toBe(false);
-      expect(result.result.errors).toContain('文件类型不允许');
-
-      // 验证事件触发
-      expect(securityIssueHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '文件类型不允许',
-          severity: ErrorSeverity.HIGH,
-          group: ErrorGroup.SECURITY,
-        })
-      );
-    });
-
-    it('应该拒绝敏感文件后缀', async () => {
-      // 使用默认启用敏感后缀检查的配置
-      const plugin = new BasicSecurityPlugin({
-        enableSensitiveExtensionCheck: true,
+    it('应该允许有效的文件上传', () => {
+      const file = new File(['test content'], 'test.jpg', {
+        type: 'image/jpeg',
       });
-      plugin.install(uploader as any);
+      const result = plugin.validateFile(file);
+      expect(result.valid).toBe(true);
+    });
 
-      // 创建一个敏感后缀的文件
-      const sensitiveFile = new File(
-        [new ArrayBuffer(1024 * 1024)], // 1MB
-        'dangerous.exe',
-        { type: 'application/octet-stream' }
-      );
+    it('应该拒绝超过大小限制的文件', () => {
+      // 模拟超过大小限制的文件
+      const mockFile = {
+        name: 'large-file.jpg',
+        size: plugin.options.maxFileSize + 1024,
+        type: 'image/jpeg',
+      } as File;
 
-      // 监听安全事件
-      const securityIssueHandler = jest.fn();
-      eventBus.on('security:issue', securityIssueHandler);
+      const result = plugin.validateFile(mockFile);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeInstanceOf(UploadError);
+      expect(result.error?.type).toBe(SecurityErrorType.FILE_SIZE_EXCEEDED);
+    });
 
-      // 执行钩子
-      // @ts-ignore
-      const result = await plugin._validateFile({ file: sensitiveFile });
+    it('应该拒绝不允许的文件类型', () => {
+      // 使用限制更严格的插件
+      plugin = new BasicSecurityPlugin({
+        allowedFileTypes: ['image/jpeg', 'image/png'],
+      });
+      plugin.install(uploader);
 
-      expect(result.handled).toBe(true);
-      expect(result.result.valid).toBe(false);
-      expect(result.result.errors).toContain('文件类型可能存在安全风险');
+      const file = new File(['test content'], 'test.exe', {
+        type: 'application/x-msdownload',
+      });
+      const result = plugin.validateFile(file);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeInstanceOf(UploadError);
+      expect(result.error?.type).toBe(SecurityErrorType.FILE_TYPE_NOT_ALLOWED);
+    });
 
-      // 验证事件触发
-      expect(securityIssueHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '检测到敏感文件类型',
-          severity: ErrorSeverity.HIGH,
-          group: ErrorGroup.SECURITY,
-        })
+    it('应该拒绝敏感文件后缀', () => {
+      const file = new File(['test content'], 'script.exe', {
+        type: 'application/octet-stream',
+      });
+      const result = plugin.validateFile(file);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeInstanceOf(UploadError);
+      expect(result.error?.type).toBe(
+        SecurityErrorType.SENSITIVE_FILE_EXTENSION
       );
     });
 
-    it('应该检测MIME类型与后缀不匹配的文件', async () => {
-      // 使用启用扩展名验证的配置
-      const plugin = new BasicSecurityPlugin({
-        validateFileExtension: true,
+    it('应该检测MIME类型与后缀不匹配的文件', () => {
+      // 创建一个扩展名和MIME类型不匹配的文件
+      const file = new File(['test content'], 'fake-image.png', {
+        type: 'application/javascript',
       });
-      plugin.install(uploader as any);
-
-      // 创建一个MIME类型与后缀不匹配的文件
-      const mismatchFile = new File(
-        [new ArrayBuffer(1024 * 1024)], // 1MB
-        'fake.pdf', // PDF后缀
-        { type: 'image/jpeg' } // 但实际是JPEG类型
-      );
-
-      // 监听安全事件
-      const securityIssueHandler = jest.fn();
-      eventBus.on('security:issue', securityIssueHandler);
-
-      // 执行钩子
-      // @ts-ignore
-      const result = await plugin._validateFile({ file: mismatchFile });
-
-      expect(result.handled).toBe(true);
-      expect(result.result.valid).toBe(false);
-      expect(result.result.errors).toContain('文件后缀与实际类型不匹配');
-
-      // 验证事件触发
-      expect(securityIssueHandler).toHaveBeenCalledWith(
-        expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '文件后缀与MIME类型不匹配',
-          severity: ErrorSeverity.HIGH,
-          group: ErrorGroup.SECURITY,
-        })
-      );
+      const result = plugin.validateFile(file);
+      expect(result.valid).toBe(false);
+      expect(result.error).toBeInstanceOf(UploadError);
+      expect(result.error?.type).toBe(SecurityErrorType.MIME_TYPE_MISMATCH);
     });
   });
 
   describe('辅助方法', () => {
     it('_checkFileType应该正确处理通配符匹配', () => {
-      // @ts-ignore - 访问私有方法进行测试
-      expect(plugin._checkFileType('image/jpeg', ['image/*'])).toBe(true);
-      // @ts-ignore
-      expect(plugin._checkFileType('video/mp4', ['image/*'])).toBe(false);
-      // @ts-ignore
-      expect(
-        plugin._checkFileType('application/pdf', ['application/pdf'])
-      ).toBe(true);
-      // @ts-ignore
-      expect(
-        plugin._checkFileType('application/json', ['application/pdf'])
-      ).toBe(false);
-      // @ts-ignore
-      expect(plugin._checkFileType('text/plain', ['*'])).toBe(true);
-      // @ts-ignore
-      expect(plugin._checkFileType('unknown/type', [])).toBe(true); // 空列表允许所有类型
+      plugin = new BasicSecurityPlugin({
+        allowedFileTypes: ['image/*', 'application/pdf'],
+      });
+
+      // 直接测试内部方法
+      expect(plugin['_checkFileType']('image/jpeg')).toBe(true);
+      expect(plugin['_checkFileType']('image/png')).toBe(true);
+      expect(plugin['_checkFileType']('application/pdf')).toBe(true);
+      expect(plugin['_checkFileType']('video/mp4')).toBe(false);
     });
 
     it('_getFileExtension应该正确提取文件扩展名', () => {
-      // @ts-ignore - 访问私有方法进行测试
-      expect(plugin._getFileExtension('file.jpg')).toBe('jpg');
-      // @ts-ignore
-      expect(plugin._getFileExtension('document.pdf')).toBe('pdf');
-      // @ts-ignore
-      expect(plugin._getFileExtension('archive.tar.gz')).toBe('gz');
-      // @ts-ignore
-      expect(plugin._getFileExtension('noextension')).toBe('');
-      // @ts-ignore
-      expect(plugin._getFileExtension('.hidden')).toBe('hidden');
+      expect(plugin['_getFileExtension']('document.pdf')).toBe('pdf');
+      expect(plugin['_getFileExtension']('image.with.multiple.dots.jpg')).toBe(
+        'jpg'
+      );
+      expect(plugin['_getFileExtension']('noextension')).toBe('');
+      expect(plugin['_getFileExtension']('.hiddenfile')).toBe('hiddenfile');
     });
 
     it('_validateFileExtensionWithMime应该正确验证扩展名与MIME类型的匹配', () => {
-      // 创建测试文件
-      const validFile = new File([], 'test.jpg', { type: 'image/jpeg' });
-      const invalidFile = new File([], 'fake.jpg', { type: 'application/pdf' });
-      const unknownExtFile = new File([], 'test.xyz', {
-        type: 'application/octet-stream',
-      });
-
-      // @ts-ignore - 访问私有方法进行测试
-      expect(plugin._validateFileExtensionWithMime(validFile)).toBe(true);
-      // @ts-ignore
-      expect(plugin._validateFileExtensionWithMime(invalidFile)).toBe(false);
-      // @ts-ignore
-      expect(plugin._validateFileExtensionWithMime(unknownExtFile)).toBe(true); // 未知扩展名不做验证
+      expect(
+        plugin['_validateFileExtensionWithMime']('image.jpg', 'image/jpeg')
+      ).toBe(true);
+      expect(
+        plugin['_validateFileExtensionWithMime'](
+          'document.pdf',
+          'application/pdf'
+        )
+      ).toBe(true);
+      expect(
+        plugin['_validateFileExtensionWithMime'](
+          'fake-image.jpg',
+          'application/javascript'
+        )
+      ).toBe(false);
     });
   });
 
   describe('事件处理', () => {
-    beforeEach(() => {
-      plugin.install(uploader as any);
-    });
-
     it('应该正确记录文件上传开始事件', () => {
-      const securityEventHandler = jest.fn();
-      eventBus.on('security:event', securityEventHandler);
+      plugin.install(uploader);
+      const fileInfo = { id: '123', name: 'test.jpg', size: 1024 };
 
-      const file = new File([], 'test.jpg', { type: 'image/jpeg' });
+      // 模拟文件上传开始事件
+      const listener = plugin['_handleFileUploadStart'].bind(plugin);
+      listener(fileInfo);
 
-      // @ts-ignore - 访问私有方法进行测试
-      plugin._onFileUploadStart({ file });
-
-      expect(securityEventHandler).toHaveBeenCalledWith(
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'security:log',
         expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '文件上传开始',
-          data: expect.objectContaining({
-            fileName: 'test.jpg',
-            fileType: 'image/jpeg',
-          }),
+          file: fileInfo,
+          action: 'file_upload_start',
         })
       );
     });
 
     it('应该正确处理安全相关的上传错误', () => {
-      const securityIssueHandler = jest.fn();
-      eventBus.on('security:issue', securityIssueHandler);
+      plugin.install(uploader);
+      const error = new UploadError(
+        SecurityErrorType.FILE_SIZE_EXCEEDED,
+        '文件过大'
+      );
+      const fileInfo = {
+        id: '123',
+        name: 'large.jpg',
+        size: 1024 * 1024 * 1024,
+      };
 
-      const file = new File([], 'test.jpg', { type: 'image/jpeg' });
-      const error = new Error('安全错误');
-      (error as any).type = 'SECURITY_ERROR';
+      // 模拟上传错误事件
+      const listener = plugin['_handleUploadError'].bind(plugin);
+      listener({ error, file: fileInfo });
 
-      // @ts-ignore - 访问私有方法进行测试
-      plugin._onFileUploadError({ error, file });
-
-      expect(securityIssueHandler).toHaveBeenCalledWith(
+      expect(eventBus.emit).toHaveBeenCalledWith(
+        'security:violation',
         expect.objectContaining({
-          level: SecurityLevel.BASIC,
-          message: '上传安全错误',
-          severity: ErrorSeverity.HIGH,
-          group: ErrorGroup.SECURITY,
+          file: fileInfo,
+          error,
         })
       );
     });

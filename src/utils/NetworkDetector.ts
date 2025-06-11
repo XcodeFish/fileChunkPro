@@ -29,6 +29,20 @@ import {
 } from '../types/network';
 import { DependencyContainer } from '../core/DependencyContainer';
 
+// 导出网络状态类型用于单元测试
+export type NetworkStatus = 'online' | 'offline' | 'unknown';
+
+// 导出连接质量类型
+export interface ConnectionQuality {
+  type: string;
+  speed: string;
+  latency: string;
+  reliability: string;
+}
+
+// 定义事件处理器类型
+export type NetworkEventHandler = (data: any) => void;
+
 export class NetworkDetector {
   private static instance: NetworkDetector;
 
@@ -45,6 +59,7 @@ export class NetworkDetector {
   private networkType: NetworkType = NetworkType.UNKNOWN;
   private currentNetworkQuality: NetworkQuality = NetworkQuality.FAIR;
   private environmentType: EnvironmentType = EnvironmentType.BROWSER;
+  private statusChangeListeners: Array<(status: NetworkStatus) => void> = [];
 
   // 测速相关
   private speedTestUrl = 'https://www.cloudflare.com/cdn-cgi/trace'; // 使用可访问的真实URL
@@ -56,11 +71,14 @@ export class NetworkDetector {
   private pingInterval = 30000; // 30秒
   private pingTimer: ReturnType<typeof setInterval> | null = null;
 
+  // 连接质量覆盖
+  private connectionQualityOverride: ConnectionQuality | null = null;
+
   constructor(options?: {
     autoRefreshInterval?: number;
     enableNetworkListener?: boolean;
   }) {
-    this.eventBus = EventBus.getInstance();
+    this.eventBus = new EventBus();
     this.logger = new Logger('NetworkDetector');
 
     // 初始化模块
@@ -79,17 +97,200 @@ export class NetworkDetector {
     // 检测环境类型
     this.detectEnvironmentType();
 
-    // 注册事件处理
-    this.registerEvents();
-
     // 立即进行一次网络状态检测
     this.detectNetworkState();
+  }
+
+  /**
+   * 启动网络监控
+   */
+  public start(): void {
+    // 注册事件处理
+    this.registerEvents();
 
     // 定时测速
     this.startSpeedTest();
 
     // 定时ping检测
     this.startPingTest();
+  }
+
+  /**
+   * 停止网络监控
+   */
+  public stop(): void {
+    // 浏览器环境下注销网络状态变化事件
+    if (this.environmentType === EnvironmentType.BROWSER) {
+      window.removeEventListener('online', this.handleOnline.bind(this));
+      window.removeEventListener('offline', this.handleOffline.bind(this));
+
+      // 注销网络连接变化监听
+      if ('connection' in navigator) {
+        const connection = (navigator as any).connection;
+        if (connection) {
+          connection.removeEventListener(
+            'change',
+            this.handleConnectionChange.bind(this)
+          );
+        }
+      }
+    }
+
+    // 清除定时器
+    if (this.speedTestTimer) {
+      clearInterval(this.speedTestTimer);
+      this.speedTestTimer = null;
+    }
+
+    if (this.pingTimer) {
+      clearInterval(this.pingTimer);
+      this.pingTimer = null;
+    }
+  }
+
+  /**
+   * 注册事件监听器 - 兼容NetworkManager预期的接口
+   * @param eventName 事件名称
+   * @param handler 事件处理函数
+   * @returns 取消注册的函数
+   */
+  public on(eventName: string, handler: NetworkEventHandler): () => void {
+    this.eventBus.on(eventName, handler);
+    return () => this.off(eventName, handler);
+  }
+
+  /**
+   * 移除事件监听器 - 兼容NetworkManager预期的接口
+   * @param eventName 事件名称
+   * @param handler 事件处理函数
+   */
+  public off(eventName: string, handler: NetworkEventHandler): void {
+    this.eventBus.off(eventName, handler);
+  }
+
+  /**
+   * 获取当前网络状态
+   */
+  public getStatus(): NetworkStatus {
+    if (typeof navigator !== 'undefined' && 'onLine' in navigator) {
+      return navigator.onLine ? 'online' : 'offline';
+    }
+    return this.isOnline ? 'online' : 'offline';
+  }
+
+  /**
+   * 添加状态变化监听器
+   */
+  public addStatusChangeListener(
+    callback: (status: NetworkStatus) => void
+  ): void {
+    if (!this.statusChangeListeners.includes(callback)) {
+      this.statusChangeListeners.push(callback);
+    }
+  }
+
+  /**
+   * 移除状态变化监听器
+   */
+  public removeStatusChangeListener(
+    callback: (status: NetworkStatus) => void
+  ): void {
+    const index = this.statusChangeListeners.indexOf(callback);
+    if (index !== -1) {
+      this.statusChangeListeners.splice(index, 1);
+    }
+  }
+
+  /**
+   * 获取连接质量信息
+   */
+  public getConnectionQuality(): ConnectionQuality {
+    // 如果有覆盖值，返回覆盖值
+    if (this.connectionQualityOverride) {
+      return { ...this.connectionQualityOverride };
+    }
+
+    // 否则返回实际检测值
+    return {
+      type: this.getNetworkType().toLowerCase(),
+      speed: this.mapQualityToSpeed(this.getCurrentNetworkQuality()),
+      latency:
+        this.getCurrentNetworkQuality() === NetworkQuality.EXCELLENT
+          ? 'low'
+          : 'medium',
+      reliability: this.getNetworkStability() > 0.8 ? 'high' : 'medium',
+    };
+  }
+
+  /**
+   * 设置连接质量覆盖（用于测试）
+   */
+  public setConnectionQualityOverride(quality: ConnectionQuality): void {
+    this.connectionQualityOverride = quality;
+  }
+
+  /**
+   * 测试连接
+   */
+  public async testConnection(): Promise<{
+    success: boolean;
+    latency?: number | null;
+    status?: number | null;
+    error?: Error;
+  }> {
+    const startTime = Date.now();
+
+    try {
+      const response = await fetch(this.pingUrl, {
+        method: 'GET',
+        cache: 'no-cache',
+        headers: {
+          'Cache-Control': 'no-cache',
+        },
+        mode: 'cors',
+      });
+
+      const endTime = Date.now();
+      const latency = endTime - startTime;
+
+      if (response.ok) {
+        await response.json(); // 确保数据可以被解析
+        return {
+          success: true,
+          latency,
+          status: response.status,
+        };
+      } else {
+        return {
+          success: false,
+          latency,
+          status: response.status,
+        };
+      }
+    } catch (error) {
+      return {
+        success: false,
+        error: error as Error,
+        latency: null,
+        status: null,
+      };
+    }
+  }
+
+  // 将网络质量映射到速度描述
+  private mapQualityToSpeed(quality: NetworkQuality): string {
+    switch (quality) {
+      case NetworkQuality.EXCELLENT:
+        return 'high';
+      case NetworkQuality.GOOD:
+        return 'good';
+      case NetworkQuality.FAIR:
+        return 'medium';
+      case NetworkQuality.POOR:
+        return 'low';
+      default:
+        return 'unknown';
+    }
   }
 
   public static getInstance(options?: {
@@ -106,6 +307,16 @@ export class NetworkDetector {
       }
     }
     return NetworkDetector.instance;
+  }
+
+  /**
+   * 辅助工厂方法
+   */
+  public static create(options?: {
+    autoRefreshInterval?: number;
+    enableNetworkListener?: boolean;
+  }): NetworkDetector {
+    return NetworkDetector.getInstance(options);
   }
 
   /**
@@ -178,7 +389,10 @@ export class NetworkDetector {
     this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
 
     // 触发事件
-    this.eventBus.emit('network:online', { timestamp: Date.now() });
+    this.eventBus.emit('online', { timestamp: Date.now() });
+
+    // 通知状态变化监听器
+    this.notifyStatusChangeListeners('online');
 
     // 立即进行一次网络状态检测
     this.detectNetworkState();
@@ -198,11 +412,24 @@ export class NetworkDetector {
     };
     this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
 
-    // 更新网络质量为不可用
-    this.updateNetworkQuality(NetworkQuality.UNUSABLE);
-
     // 触发事件
-    this.eventBus.emit('network:offline', { timestamp: Date.now() });
+    this.eventBus.emit('offline', { timestamp: Date.now() });
+
+    // 通知状态变化监听器
+    this.notifyStatusChangeListeners('offline');
+  }
+
+  /**
+   * 通知所有状态变化监听器
+   */
+  private notifyStatusChangeListeners(status: NetworkStatus): void {
+    for (const listener of this.statusChangeListeners) {
+      try {
+        listener(status);
+      } catch (error) {
+        this.logger.error('执行状态变化监听器回调时发生错误', error);
+      }
+    }
   }
 
   /**
@@ -236,7 +463,7 @@ export class NetworkDetector {
       this.stabilityAnalyzer.recordConnectionEvent(connectionEvent);
 
       // 触发事件
-      this.eventBus.emit('network:typeChange', {
+      this.eventBus.emit('typeChange', {
         from: oldNetworkType,
         to: this.networkType,
         timestamp: Date.now(),
@@ -283,7 +510,7 @@ export class NetworkDetector {
       this.evaluateNetworkQuality();
 
       // 触发事件
-      this.eventBus.emit('network:speedTest', {
+      this.eventBus.emit('speedTest', {
         download: result.downloadSpeed,
         upload: result.uploadSpeed,
         latency: result.latency,
@@ -332,7 +559,7 @@ export class NetworkDetector {
         this.stabilityAnalyzer.recordRTTSample(latency);
 
         // 触发事件
-        this.eventBus.emit('network:ping', {
+        this.eventBus.emit('ping', {
           latency,
           timestamp: Date.now(),
         });
@@ -424,7 +651,7 @@ export class NetworkDetector {
       this.trendPredictor.recordNetworkQuality(quality);
 
       // 触发事件
-      this.eventBus.emit('network:qualityChange', {
+      this.eventBus.emit('qualityChange', {
         previousQuality,
         quality,
         timestamp: Date.now(),
@@ -607,9 +834,60 @@ export class NetworkDetector {
     this.logger.info('NetworkDetector已销毁');
     NetworkDetector.instance = undefined as unknown as NetworkDetector;
   }
+
+  /**
+   * 注册到依赖容器
+   * @param container 依赖容器
+   */
+  public registerWithContainer(container: DependencyContainer): void {
+    if (container && typeof container.register === 'function') {
+      container.register('NetworkDetector', this);
+    }
+  }
+
+  /**
+   * 获取当前网络质量
+   * @returns 网络质量评级
+   */
+  public getQuality(): NetworkQuality {
+    if (!this.qualityEvaluator) {
+      return NetworkQuality.UNKNOWN;
+    }
+    return this.qualityEvaluator.getCurrentQuality();
+  }
+
+  /**
+   * 停止网络监控
+   */
+  public stopMonitoring(): void {
+    if (this.isMonitoring) {
+      this.removeEventListeners();
+      this.isMonitoring = false;
+
+      // 停止速度监控
+      if (this.speedMonitor) {
+        this.speedMonitor.stop();
+      }
+
+      // 停止稳定性分析
+      if (this.stabilityAnalyzer) {
+        this.stabilityAnalyzer.stop();
+      }
+
+      // 停止趋势预测
+      if (this.trendPredictor) {
+        this.trendPredictor.stop();
+      }
+
+      // 发送停止监控事件
+      this.eventBus.emit('networkMonitorStopped', {
+        timestamp: Date.now(),
+      });
+    }
+  }
 }
 
-// 注册DI容器
-DependencyContainer.register('NetworkDetector', NetworkDetector);
+// 注释掉静态依赖注册，改为实例化时显式注册
+// DependencyContainer.register('NetworkDetector', NetworkDetector);
 
 export default NetworkDetector;
