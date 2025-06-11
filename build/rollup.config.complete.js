@@ -7,7 +7,6 @@
 const typescript = require('@rollup/plugin-typescript');
 const resolve = require('@rollup/plugin-node-resolve');
 const commonjs = require('@rollup/plugin-commonjs');
-const terser = require('@rollup/plugin-terser');
 const replace = require('@rollup/plugin-replace');
 const dtsPlugin = require('rollup-plugin-dts').default;
 const esbuildPlugin = require('rollup-plugin-esbuild').default;
@@ -18,23 +17,17 @@ const path = require('path');
 // 导入自定义插件
 const environmentPlugin = require('./plugins/environment-plugin');
 const workerPlugin = require('./plugins/worker-plugin');
+const { getOptimizationForTarget } = require('./config/optimization');
 
 // 导入Vue支持插件
 const vuePlugin = require('rollup-plugin-vue');
 
 const pkg = require('../package.json');
+const { TARGETS } = require('../src/utils/constants');
 
 // 构建模式
 const isProd = process.env.NODE_ENV === 'production';
 const TARGET = process.env.TARGET || 'browser';
-
-// 支持的环境目标
-const targets = {
-  BROWSER: 'browser',
-  MINIPROGRAM: 'miniprogram',
-  TARO: 'taro',
-  UNIAPP: 'uni-app',
-};
 
 // Banner
 const banner = `/*!
@@ -102,24 +95,9 @@ const createBasePlugins = (target = 'browser') => [
   commonjs(),
 ];
 
-// 添加压缩插件
-const addTerser = plugins =>
-  isProd
-    ? [
-        ...plugins,
-        terser({
-          compress: {
-            ecma: 2018,
-            pure_getters: true,
-            passes: 2,
-          },
-          format: {
-            comments: (_, comment) =>
-              comment.type === 'comment2' && /^\/*!/.test(comment.value),
-          },
-        }),
-      ]
-    : plugins;
+// 添加环境优化插件
+const addOptimization = (plugins, target) =>
+  isProd ? [...plugins, getOptimizationForTarget(target, { isProd })] : plugins;
 
 // 浏览器构建配置 (ES Module)
 const browserESMConfig = {
@@ -130,15 +108,18 @@ const browserESMConfig = {
     banner,
     sourcemap: true,
   },
-  plugins: addTerser([
-    ...createBasePlugins('browser'),
-    isProd &&
-      visualizer({
-        filename: 'stats/browser-esm.html',
-        title: 'FileChunkPro Browser ESM Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BROWSER),
+      isProd &&
+        visualizer({
+          filename: 'stats/browser-esm.html',
+          title: 'FileChunkPro Browser ESM Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.BROWSER
+  ),
   external: Object.keys(pkg.peerDependencies || {}),
 };
 
@@ -152,15 +133,18 @@ const browserCJSConfig = {
     exports: 'named',
     sourcemap: true,
   },
-  plugins: addTerser([
-    ...createBasePlugins('browser'),
-    isProd &&
-      visualizer({
-        filename: 'stats/browser-cjs.html',
-        title: 'FileChunkPro Browser CJS Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BROWSER),
+      isProd &&
+        visualizer({
+          filename: 'stats/browser-cjs.html',
+          title: 'FileChunkPro Browser CJS Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.BROWSER
+  ),
   external: Object.keys(pkg.peerDependencies || {}),
 };
 
@@ -178,15 +162,18 @@ const browserUMDConfig = {
     },
     sourcemap: true,
   },
-  plugins: addTerser([
-    ...createBasePlugins('browser'),
-    isProd &&
-      visualizer({
-        filename: 'stats/browser-umd.html',
-        title: 'FileChunkPro Browser UMD Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BROWSER),
+      isProd &&
+        visualizer({
+          filename: 'stats/browser-umd.html',
+          title: 'FileChunkPro Browser UMD Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.BROWSER
+  ),
   external: Object.keys(pkg.peerDependencies || {}),
 };
 
@@ -200,15 +187,18 @@ const miniprogramWechatConfig = {
     sourcemap: true,
     exports: 'named',
   },
-  plugins: addTerser([
-    ...createBasePlugins('wechat'),
-    isProd &&
-      visualizer({
-        filename: 'stats/wechat.html',
-        title: 'FileChunkPro WeChat Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.WECHAT),
+      isProd &&
+        visualizer({
+          filename: 'stats/wechat.html',
+          title: 'FileChunkPro WeChat Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.WECHAT
+  ),
   external: ['react', 'vue'],
 };
 
@@ -222,15 +212,18 @@ const miniprogramAlipayConfig = {
     sourcemap: true,
     exports: 'named',
   },
-  plugins: addTerser([
-    ...createBasePlugins('alipay'),
-    isProd &&
-      visualizer({
-        filename: 'stats/alipay.html',
-        title: 'FileChunkPro Alipay Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.ALIPAY),
+      isProd &&
+        visualizer({
+          filename: 'stats/alipay.html',
+          title: 'FileChunkPro Alipay Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.ALIPAY
+  ),
   external: ['react', 'vue'],
 };
 
@@ -244,15 +237,18 @@ const miniprogramBytedanceConfig = {
     sourcemap: true,
     exports: 'named',
   },
-  plugins: addTerser([
-    ...createBasePlugins('bytedance'),
-    isProd &&
-      visualizer({
-        filename: 'stats/bytedance.html',
-        title: 'FileChunkPro ByteDance Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BYTEDANCE),
+      isProd &&
+        visualizer({
+          filename: 'stats/bytedance.html',
+          title: 'FileChunkPro Bytedance Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.BYTEDANCE
+  ),
   external: ['react', 'vue'],
 };
 
@@ -266,81 +262,103 @@ const miniprogramBaiduConfig = {
     sourcemap: true,
     exports: 'named',
   },
-  plugins: addTerser([
-    ...createBasePlugins('baidu'),
-    isProd &&
-      visualizer({
-        filename: 'stats/baidu.html',
-        title: 'FileChunkPro Baidu Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BAIDU),
+      isProd &&
+        visualizer({
+          filename: 'stats/baidu.html',
+          title: 'FileChunkPro Baidu Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.BAIDU
+  ),
   external: ['react', 'vue'],
 };
 
-// Taro构建配置
+// Taro框架构建配置
 const taroConfig = {
   input: 'src/entries/taro.ts',
-  output: [
-    {
-      file: 'dist/taro/index.js',
-      format: 'cjs',
-      banner,
-      sourcemap: true,
-      exports: 'named',
-    },
-    {
-      file: 'dist/taro/index.mjs',
-      format: 'es',
-      banner,
-      sourcemap: true,
-    },
-  ],
-  plugins: addTerser([
-    ...createBasePlugins('taro'),
-    isProd &&
-      visualizer({
-        filename: 'stats/taro.html',
-        title: 'FileChunkPro Taro Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
-  external: ['@tarojs/taro', 'react', 'vue'],
+  output: {
+    file: 'dist/taro/index.js',
+    format: 'cjs',
+    banner,
+    sourcemap: true,
+    exports: 'named',
+  },
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.TARO),
+      isProd &&
+        visualizer({
+          filename: 'stats/taro.html',
+          title: 'FileChunkPro Taro Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.TARO
+  ),
+  external: ['react', 'vue', '@tarojs/taro', '@tarojs/components'],
 };
 
-// Uni-app构建配置
+// 同时生成ES Module格式的Taro构建
+const taroESMConfig = {
+  input: 'src/entries/taro.ts',
+  output: {
+    file: 'dist/taro/index.mjs',
+    format: 'es',
+    banner,
+    sourcemap: true,
+  },
+  plugins: addOptimization([...createBasePlugins(TARGETS.TARO)], TARGETS.TARO),
+  external: ['react', 'vue', '@tarojs/taro', '@tarojs/components'],
+};
+
+// UniApp框架构建配置
 const uniAppConfig = {
-  input: 'src/entries/uniapp.ts',
-  output: [
-    {
-      file: 'dist/uni-app/index.js',
-      format: 'cjs',
-      banner,
-      sourcemap: true,
-      exports: 'named',
-    },
-    {
-      file: 'dist/uni-app/index.mjs',
-      format: 'es',
-      banner,
-      sourcemap: true,
-    },
-  ],
-  plugins: addTerser([
-    ...createBasePlugins('uni-app'),
-    isProd &&
-      visualizer({
-        filename: 'stats/uni-app.html',
-        title: 'FileChunkPro UniApp Bundle Analysis',
-        gzipSize: true,
-      }),
-  ]),
-  external: ['react', 'vue'],
+  input: 'src/entries/uni-app.ts',
+  output: {
+    file: 'dist/uni-app/index.js',
+    format: 'cjs',
+    banner,
+    sourcemap: true,
+    exports: 'named',
+  },
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.UNIAPP),
+      isProd &&
+        visualizer({
+          filename: 'stats/uni-app.html',
+          title: 'FileChunkPro UniApp Bundle Analysis',
+          gzipSize: true,
+        }),
+    ],
+    TARGETS.UNIAPP
+  ),
+  external: ['react', 'vue', 'uni-app'],
 };
 
-// UI组件构建 (React)
-const reactUIConfig = {
-  input: 'src/ui/react/index.ts',
+// 同时生成ES Module格式的UniApp构建
+const uniAppESMConfig = {
+  input: 'src/entries/uni-app.ts',
+  output: {
+    file: 'dist/uni-app/index.mjs',
+    format: 'es',
+    banner,
+    sourcemap: true,
+  },
+  plugins: addOptimization(
+    [...createBasePlugins(TARGETS.UNIAPP)],
+    TARGETS.UNIAPP
+  ),
+  external: ['react', 'vue', 'uni-app'],
+};
+
+// React组件构建配置
+const reactComponentConfig = {
+  input: 'src/ui/react/index.tsx',
   output: [
     {
       file: 'dist/browser/ui/react/index.js',
@@ -352,65 +370,134 @@ const reactUIConfig = {
       file: 'dist/browser/ui/react/index.cjs',
       format: 'cjs',
       banner,
+      exports: 'named',
       sourcemap: true,
-      exports: 'auto',
     },
   ],
-  plugins: addTerser([
-    ...createBasePlugins('browser'),
-    esbuildPlugin({
-      target: 'es2018',
-      minify: isProd,
-      jsx: 'automatic',
-    }),
-  ]),
-  external: ['react', 'react-dom', '../../index'],
+  plugins: addOptimization(
+    [...createBasePlugins(TARGETS.BROWSER)],
+    TARGETS.BROWSER
+  ),
+  external: ['react', 'react-dom'],
+};
+
+// Vue组件构建配置
+const vueComponentConfig = {
+  input: 'src/ui/vue/index.ts',
+  output: [
+    {
+      file: 'dist/browser/ui/vue/index.js',
+      format: 'es',
+      banner,
+      sourcemap: true,
+    },
+    {
+      file: 'dist/browser/ui/vue/index.cjs',
+      format: 'cjs',
+      banner,
+      exports: 'named',
+      sourcemap: true,
+    },
+  ],
+  plugins: addOptimization(
+    [
+      ...createBasePlugins(TARGETS.BROWSER),
+      vuePlugin(), // Vue文件处理
+    ],
+    TARGETS.BROWSER
+  ),
+  external: ['vue'],
+};
+
+// 类型声明构建配置
+const dtsConfig = {
+  input: 'src/index.ts',
+  output: {
+    file: 'types/index.d.ts',
+    format: 'es',
+    banner,
+  },
+  plugins: [dtsPlugin()],
+};
+
+// React组件类型声明
+const reactDtsConfig = {
+  input: 'src/ui/react/index.tsx',
+  output: {
+    file: 'types/ui/react.d.ts',
+    format: 'es',
+    banner,
+  },
+  plugins: [dtsPlugin()],
+};
+
+// Vue组件类型声明
+const vueDtsConfig = {
+  input: 'src/ui/vue/index.ts',
+  output: {
+    file: 'types/ui/vue.d.ts',
+    format: 'es',
+    banner,
+  },
+  plugins: [dtsPlugin()],
 };
 
 // 根据目标选择配置
-let configs = [];
-
-switch (TARGET) {
-  case targets.BROWSER:
-    configs = [
+const selectConfigs = () => {
+  // 浏览器构建
+  if (TARGET === 'browser') {
+    return [
       browserESMConfig,
       browserCJSConfig,
       browserUMDConfig,
-      reactUIConfig,
+      reactComponentConfig,
+      vueComponentConfig,
+      dtsConfig,
+      reactDtsConfig,
+      vueDtsConfig,
     ];
-    break;
+  }
 
-  case targets.MINIPROGRAM:
-    configs = [
+  // 小程序构建
+  if (TARGET === 'miniprogram') {
+    return [
       miniprogramWechatConfig,
       miniprogramAlipayConfig,
       miniprogramBytedanceConfig,
       miniprogramBaiduConfig,
+      dtsConfig,
     ];
-    break;
+  }
 
-  case targets.TARO:
-    configs = [taroConfig];
-    break;
+  // Taro构建
+  if (TARGET === 'taro') {
+    return [taroConfig, taroESMConfig, dtsConfig];
+  }
 
-  case targets.UNIAPP:
-    configs = [uniAppConfig];
-    break;
+  // UniApp构建
+  if (TARGET === 'uni-app') {
+    return [uniAppConfig, uniAppESMConfig, dtsConfig];
+  }
 
-  default:
-    console.log(`Building for target: ${TARGET}`);
-    configs = [
-      browserESMConfig,
-      browserCJSConfig,
-      browserUMDConfig,
-      miniprogramWechatConfig,
-      miniprogramAlipayConfig,
-      miniprogramBytedanceConfig,
-      miniprogramBaiduConfig,
-      taroConfig,
-      uniAppConfig,
-      reactUIConfig,
-    ];
-}
+  // 默认返回所有配置
+  return [
+    browserESMConfig,
+    browserCJSConfig,
+    browserUMDConfig,
+    miniprogramWechatConfig,
+    miniprogramAlipayConfig,
+    miniprogramBytedanceConfig,
+    miniprogramBaiduConfig,
+    taroConfig,
+    taroESMConfig,
+    uniAppConfig,
+    uniAppESMConfig,
+    reactComponentConfig,
+    vueComponentConfig,
+    dtsConfig,
+    reactDtsConfig,
+    vueDtsConfig,
+  ];
+};
 
-module.exports = configs;
+module.exports = selectConfigs();
