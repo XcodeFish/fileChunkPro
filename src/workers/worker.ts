@@ -10,6 +10,8 @@ import { chunkCalculator } from './tasks/chunkCalculator';
 import { hashCalculator } from './tasks/hashCalculator';
 import { processFile } from './tasks/fileProcessor';
 
+import { WorkerErrorBridge } from '../core/WorkerErrorBridge';
+
 // 定义Worker状态类型
 type WorkerState = 'idle' | 'busy' | 'error';
 
@@ -46,8 +48,46 @@ let totalTasksProcessed = 0;
 let totalErrors = 0;
 let lastMemoryUsage = 0;
 
+// Worker类型标识
+const WORKER_TYPE = self.name || 'generic';
+
+// 全局错误处理器
+const handleError = WorkerErrorBridge.createWorkerErrorHandler(WORKER_TYPE);
+
+// 设置全局未捕获错误处理
+self.addEventListener('error', (event) => {
+  handleError(event.error || new Error('Worker全局错误'), 'global');
+  event.preventDefault();
+});
+
+// 设置未捕获的Promise错误处理
+self.addEventListener('unhandledrejection', (event) => {
+  handleError(event.reason || new Error('Worker未处理的Promise拒绝'), 'promise');
+  event.preventDefault();
+});
+
+// 安全执行函数
+function safeExec<T>(fn: () => T, taskId?: string): T {
+  try {
+    return fn();
+  } catch (error) {
+    handleError(error, taskId);
+    throw error;
+  }
+}
+
+// 安全异步执行函数
+async function safeExecAsync<T>(fn: () => Promise<T>, taskId?: string): Promise<T> {
+  try {
+    return await fn();
+  } catch (error) {
+    handleError(error, taskId);
+    throw error;
+  }
+}
+
 // 任务处理器
-const taskHandlers: Record<string, (data: any) => Promise<any>> = {
+const taskHandlers: Record<string, (data: any) => any> = {
   // 分片计算任务
   calculateChunks: async (data: any) => {
     return chunkCalculator.calculateChunks(data);
@@ -66,6 +106,53 @@ const taskHandlers: Record<string, (data: any) => Promise<any>> = {
     return { pong: true, timestamp: Date.now() };
   }
 };
+
+/**
+ * 注册任务处理器
+ * @param type 任务类型
+ * @param handler 处理函数
+ */
+export function registerTaskHandler(type: string, handler: (data: any) => any): void {
+  taskHandlers[type] = handler;
+}
+
+// 性能监控数据
+let performanceData = {
+  taskCount: 0,
+  successCount: 0,
+  errorCount: 0,
+  totalTaskTime: 0,
+  avgTaskTime: 0,
+  memoryUsage: {} as any
+};
+
+/**
+ * 更新性能监控数据
+ */
+function updatePerformanceData(success: boolean, duration: number): void {
+  performanceData.taskCount++;
+  if (success) {
+    performanceData.successCount++;
+  } else {
+    performanceData.errorCount++;
+  }
+  
+  performanceData.totalTaskTime += duration;
+  performanceData.avgTaskTime = performanceData.totalTaskTime / performanceData.taskCount;
+  
+  // 尝试获取内存使用情况
+  try {
+    if ((self as any).performance && (self as any).performance.memory) {
+      performanceData.memoryUsage = {
+        jsHeapSizeLimit: (self as any).performance.memory.jsHeapSizeLimit,
+        totalJSHeapSize: (self as any).performance.memory.totalJSHeapSize,
+        usedJSHeapSize: (self as any).performance.memory.usedJSHeapSize
+      };
+    }
+  } catch (e) {
+    // 忽略错误
+  }
+}
 
 /**
  * 获取内存使用情况
@@ -136,124 +223,116 @@ function initWorker() {
 }
 
 /**
- * 消息处理函数
+ * 处理来自主线程的消息
  */
-self.onmessage = async function(event) {
+self.addEventListener('message', async (event) => {
+  const { action, taskId, data } = event.data;
+  
   try {
-    const message = event.data;
-    
-    // 处理特殊控制消息
-    if (message.action) {
-      switch (message.action) {
-        case 'ping':
-          self.postMessage({ 
-            type: 'PONG', 
-            timestamp: Date.now(),
-            memory: getMemoryUsage()
+    switch (action) {
+      case 'ping': {
+        // 响应ping请求
+        self.postMessage({
+          action: 'pong',
+          timestamp: Date.now()
+        });
+        break;
+      }
+      
+      case 'terminate': {
+        // 安全终止
+        self.postMessage({ action: 'terminating', workerId: WORKER_TYPE });
+        setTimeout(() => self.close(), 100);
+        break;
+      }
+      
+      case 'getStatus': {
+        // 返回状态信息
+        self.postMessage({
+          action: 'status',
+          workerId: WORKER_TYPE,
+          status: 'active',
+          performance: performanceData
+        });
+        break;
+      }
+      
+      case 'task': {
+        // 处理任务
+        if (!taskId) {
+          throw new Error('任务ID缺失');
+        }
+        
+        const { type, ...taskData } = data;
+        
+        if (!type || !taskHandlers[type]) {
+          throw new Error(`未知任务类型: ${type}`);
+        }
+        
+        const startTime = performance.now();
+        
+        try {
+          // 安全执行任务处理器
+          const result = await safeExecAsync(
+            () => Promise.resolve(taskHandlers[type](taskData)),
+            taskId
+          );
+          
+          const endTime = performance.now();
+          const duration = endTime - startTime;
+          
+          // 更新性能数据
+          updatePerformanceData(true, duration);
+          
+          // 发送成功结果
+          self.postMessage({
+            action: 'result',
+            taskId,
+            success: true,
+            result,
+            duration
           });
-          return;
+        } catch (error) {
+          const endTime = performance.now();
+          const duration = endTime - startTime;
           
-        case 'status':
-          sendStatus();
-          return;
+          // 更新性能数据
+          updatePerformanceData(false, duration);
           
-        case 'terminate':
-          // 清理资源后通知准备终止
-          self.postMessage({ type: 'TERMINATE_ACK' });
-          return;
+          // 发送错误结果
+          const errorData = handleError(error, taskId);
           
-        default:
-          break;
-      }
-    }
-    
-    // 处理常规任务
-    const { taskId, type, data } = message;
-    
-    if (!taskId) {
-      throw new Error('缺少任务ID');
-    }
-    
-    if (!type) {
-      throw new Error('缺少任务类型');
-    }
-    
-    // 更新状态
-    setState('busy');
-    currentTaskId = taskId;
-    taskStartTime = Date.now();
-    
-    try {
-      // 检查任务类型是否支持
-      if (!(type in taskHandlers)) {
-        throw new Error(`不支持的任务类型: ${type}`);
-      }
-
-      // 执行对应的任务处理器
-      const handler = taskHandlers[type];
-      const result = await handler(data);
-      
-      // 任务完成
-      totalTasksProcessed++;
-      
-      // 发送成功响应
-      self.postMessage({
-        taskId,
-        success: true,
-        result,
-        performance: {
-          duration: Date.now() - taskStartTime,
-          memory: getMemoryUsage()
+          self.postMessage({
+            action: 'result',
+            taskId,
+            success: false,
+            error: errorData,
+            duration
+          });
         }
-      });
-    } catch (error) {
-      // 记录错误
-      totalErrors++;
+        break;
+      }
       
-      // 发送错误响应
-      self.postMessage({
-        taskId,
-        success: false,
-        error: error instanceof Error ? error.message : '未知错误',
-        performance: {
-          duration: Date.now() - taskStartTime,
-          memory: getMemoryUsage()
-        }
-      });
-    } finally {
-      // 重置状态
-      setState('idle');
-      currentTaskId = null;
+      default:
+        throw new Error(`未知操作: ${action}`);
     }
   } catch (error) {
-    // 处理消息处理器本身的错误
-    totalErrors++;
+    // 处理元操作错误
+    const errorData = handleError(error, taskId || 'meta');
+    
     self.postMessage({
-      type: 'ERROR',
-      error: error instanceof Error ? error.message : '消息处理失败'
+      action: 'error',
+      taskId: taskId || 'meta',
+      error: errorData
     });
-    setState('error');
   }
-};
+});
 
-/**
- * 错误处理
- */
-self.onerror = function(error) {
-  totalErrors++;
-  
-  // 由于 onerror 没有消息上下文，
-  // 所以我们向主线程发送一个通用错误通知
-  self.postMessage({
-    type: 'ERROR',
-    error: error instanceof Error ? error.message : '全局错误',
-    detail: error
-  });
-  
-  setState('error');
-  
-  return true; // 防止默认处理
-};
+// 初始化完成通知
+self.postMessage({ action: 'ready', workerId: WORKER_TYPE });
+
+// 导出工具函数
+export { safeExec, safeExecAsync, handleError };
 
 // 初始化Worker
 initWorker(); 
