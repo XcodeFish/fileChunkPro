@@ -9,12 +9,14 @@ export { Logger } from './Logger';
 // 环境检测相关
 export { EnvUtils } from './EnvUtils';
 export { EnvironmentDetector } from './EnvironmentDetector';
-export { EnhancedEnvironmentDetector } from './EnhancedEnvironmentDetector';
 export { EnvironmentDetectorFactory } from './EnvironmentDetectorFactory';
 export { DeviceCapabilityDetector } from './DeviceCapabilityDetector';
 export { WebViewDetector } from './WebViewDetector';
 export { default as EnvironmentFeatureDatabase } from './EnvironmentFeatureDatabase';
-export { default as EnvironmentDetectionSystem } from './EnvironmentDetectionSystem';
+export {
+  default as EnvironmentDetectionSystem,
+  environmentDetector,
+} from './EnvironmentDetectionSystem';
 
 // 工作线程和性能管理
 export { ThreadWorker } from './ThreadWorker';
@@ -44,3 +46,9 @@ export { MiniProgramOptimizer } from './MiniProgramOptimizer';
 // 预测器
 export * from '../predictors/NetworkTrendPredictor';
 export * from '../predictors/TimeSeriesPredictor';
+
+// 环境检测与适配器模块
+export * from './EnvironmentFeatureDetector';
+export * from './EnvironmentAdapterFactory';
+export { featureDetector } from './EnvironmentFeatureDetector';
+export { adapterFactory } from './EnvironmentAdapterFactory';

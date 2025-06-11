@@ -16,6 +16,95 @@ export interface FeatureSupport {
 export type CapabilityLevel = 'low' | 'normal' | 'high';
 
 /**
+ * 环境类型枚举
+ * 代表应用运行的主要环境类型
+ */
+export enum Environment {
+  Browser = 'browser',
+  WechatMP = 'wechat_miniprogram',
+  AlipayMP = 'alipay_miniprogram',
+  BytedanceMP = 'bytedance_miniprogram',
+  BaiduMP = 'baidu_miniprogram',
+  QQ_MP = 'qq_miniprogram',
+  Taro = 'taro',
+  UniApp = 'uni_app',
+  ReactNative = 'react_native',
+  NodeJS = 'node',
+  ServiceWorker = 'service_worker',
+  WebWorker = 'web_worker',
+  Unknown = 'unknown'
+}
+
+/**
+ * 浏览器类型枚举
+ */
+export enum BrowserType {
+  CHROME = 'chrome',
+  FIREFOX = 'firefox',
+  SAFARI = 'safari',
+  EDGE = 'edge',
+  IE = 'ie',
+  OPERA = 'opera',
+  UC = 'uc',
+  QQ = 'qq',
+  BAIDU = 'baidu',
+  WECHAT = 'wechat',
+  ALIPAY = 'alipay',
+  UNKNOWN = 'unknown'
+}
+
+/**
+ * 操作系统类型枚举
+ */
+export enum OSType {
+  ANDROID = 'android',
+  IOS = 'ios',
+  WINDOWS = 'windows',
+  MACOS = 'macos',
+  LINUX = 'linux',
+  UNKNOWN = 'unknown'
+}
+
+/**
+ * 设备类型枚举
+ */
+export enum DeviceType {
+  MOBILE = 'mobile',
+  TABLET = 'tablet',
+  DESKTOP = 'desktop',
+  TV = 'tv',
+  UNKNOWN = 'unknown'
+}
+
+/**
+ * WebView类型枚举
+ */
+export enum WebViewType {
+  NATIVE_ANDROID = 'android_webview',
+  NATIVE_IOS = 'ios_webview',
+  WKWEBVIEW = 'wkwebview',
+  UIWEBVIEW = 'uiwebview',
+  CROSSWALK = 'crosswalk',
+  X5 = 'x5',
+  NOT_WEBVIEW = 'not_webview',
+  UNKNOWN = 'unknown'
+}
+
+/**
+ * 框架类型枚举
+ */
+export enum FrameworkType {
+  TARO = 'taro',
+  UNI_APP = 'uni_app',
+  REACT_NATIVE = 'react_native',
+  IONIC = 'ionic',
+  CORDOVA = 'cordova',
+  ELECTRON = 'electron',
+  NONE = 'none',
+  UNKNOWN = 'unknown'
+}
+
+/**
  * 浏览器特性枚举
  */
 export enum BrowserFeature {
@@ -70,6 +159,154 @@ export enum NodeFeature {
   STREAM = 'stream',
   WORKER_THREADS = 'worker_threads',
   CRYPTO = 'crypto'
+}
+
+/**
+ * 环境信息接口
+ */
+export interface EnvironmentInfo {
+  /**
+   * 运行环境类型
+   */
+  environment: Environment;
+
+  /**
+   * 是否是小程序环境
+   */
+  isMiniProgram: boolean;
+
+  /**
+   * 是否是Worker环境
+   */
+  isWorker: boolean;
+
+  /**
+   * 是否是浏览器环境
+   */
+  isBrowser: boolean;
+
+  /**
+   * 是否是Node环境
+   */
+  isNode: boolean;
+
+  /**
+   * 是否是混合应用环境
+   */
+  isHybrid: boolean;
+
+  /**
+   * 浏览器信息
+   */
+  browser: {
+    /**
+     * 浏览器类型
+     */
+    type: BrowserType;
+
+    /**
+     * 浏览器版本
+     */
+    version: string;
+
+    /**
+     * 浏览器引擎
+     */
+    engine: string;
+
+    /**
+     * 是否支持WebView
+     */
+    isWebView: boolean;
+
+    /**
+     * WebView类型
+     */
+    webViewType: WebViewType;
+  };
+
+  /**
+   * 操作系统信息
+   */
+  os: {
+    /**
+     * 操作系统类型
+     */
+    type: OSType;
+
+    /**
+     * 操作系统版本
+     */
+    version: string;
+
+    /**
+     * 系统平台
+     */
+    platform: string;
+  };
+
+  /**
+   * 设备信息
+   */
+  device: {
+    /**
+     * 设备类型
+     */
+    type: DeviceType;
+
+    /**
+     * 设备像素比
+     */
+    pixelRatio: number;
+
+    /**
+     * 屏幕尺寸
+     */
+    screenSize: {
+      width: number;
+      height: number;
+    };
+
+    /**
+     * 是否支持触摸
+     */
+    touchSupport: boolean;
+  };
+
+  /**
+   * 框架信息
+   */
+  framework: {
+    /**
+     * 框架类型
+     */
+    type: FrameworkType;
+
+    /**
+     * 框架版本
+     */
+    version: string;
+  };
+
+  /**
+   * 网络信息
+   */
+  network: {
+    /**
+     * 网络类型
+     */
+    type: string;
+
+    /**
+     * 是否在线
+     */
+    online: boolean;
+
+    /**
+     * 是否支持网络信息API
+     */
+    supportsNetworkInfo: boolean;
+  };
 }
 
 /**

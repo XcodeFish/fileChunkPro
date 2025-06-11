@@ -5,7 +5,7 @@
 
 import { Logger } from '../utils/Logger';
 import { EnvironmentType } from './interfaces';
-import { EnhancedEnvironmentDetector } from '../utils/EnhancedEnvironmentDetector';
+import { EnvironmentDetectionSystem } from '../utils/EnvironmentDetectionSystem';
 import {
   IUnifiedAdapter,
   IAdapterOptions,
@@ -94,7 +94,7 @@ export class AdapterFactory implements IAdapterFactory {
     new (options?: IAdapterOptions) => IUnifiedAdapter
   > = new Map();
   private adapterCache: Map<string, IUnifiedAdapter> = new Map();
-  private environmentDetector: EnhancedEnvironmentDetector;
+  private environmentDetector: EnvironmentDetectionSystem;
 
   /**
    * 获取单例实例
@@ -111,7 +111,7 @@ export class AdapterFactory implements IAdapterFactory {
    */
   private constructor() {
     this.logger = new Logger('AdapterFactory');
-    this.environmentDetector = EnhancedEnvironmentDetector.getInstance();
+    this.environmentDetector = EnvironmentDetectionSystem.getInstance();
   }
 
   /**
@@ -294,9 +294,9 @@ export class AdapterFactory implements IAdapterFactory {
   }
 
   /**
-   * 获取环境检测器
+   * 获取环境检测系统
    */
-  public getEnvironmentDetector(): EnhancedEnvironmentDetector {
+  public getEnvironmentDetector(): EnvironmentDetectionSystem {
     return this.environmentDetector;
   }
 

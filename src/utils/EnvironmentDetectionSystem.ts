@@ -1,13 +1,20 @@
 /* eslint-disable @typescript-eslint/no-explicit-any */
 /**
  * EnvironmentDetectionSystem.ts
- * 全面的环境检测系统，检测当前运行环境的特性和能力
+ * 全面的环境检测系统，整合EnhancedEnvironmentDetector和EnvironmentDetector的功能
+ * 提供统一的环境检测、能力评估和最佳实践推荐
  */
 
 import {
   Environment,
   BrowserFeature,
   MiniProgramFeature,
+  BrowserType,
+  OSType,
+  DeviceType,
+  WebViewType,
+  FrameworkType,
+  EnvironmentInfo,
 } from '../types/environment';
 import { EnvironmentType, IAdapter } from '../adapters/interfaces';
 import { Logger } from './Logger';
@@ -59,6 +66,21 @@ export interface EnvDetectionResult {
 }
 
 /**
+ * 用户代理解析结果
+ */
+interface UAParseResult {
+  browser: { name?: string; version?: string; major?: string };
+  engine: { name?: string; version?: string };
+  os: { name?: string; version?: string };
+  device: {
+    model?: string;
+    type?: string;
+    vendor?: string;
+  };
+  cpu: { architecture?: string };
+}
+
+/**
  * 环境检测系统 - 增强版
  * 提供全面的环境检测、能力评估和最佳实践推荐
  */
@@ -72,6 +94,10 @@ export class EnvironmentDetectionSystem {
 
   // 缓存检测结果
   private cachedDetectionResult: EnvDetectionResult | null = null;
+  // 环境信息缓存
+  private _environmentInfo: EnvironmentInfo | null = null;
+  // 特性检测结果缓存
+  private _featureDetectionResults: Map<string, boolean> = new Map();
 
   /**
    * 获取单例实例
@@ -97,6 +123,677 @@ export class EnvironmentDetectionSystem {
   }
 
   /**
+   * 获取环境信息
+   * @param forceRefresh 是否强制刷新缓存
+   * @returns 环境信息
+   */
+  public getEnvironmentInfo(forceRefresh = false): EnvironmentInfo {
+    if (this._environmentInfo && !forceRefresh) {
+      return this._environmentInfo;
+    }
+
+    this._environmentInfo = this.detectEnvironmentDetails();
+    return this._environmentInfo;
+  }
+
+  /**
+   * 检测详细的环境信息
+   * @returns 环境详细信息
+   */
+  private detectEnvironmentDetails(): EnvironmentInfo {
+    const env: EnvironmentInfo = {
+      environment: Environment.Unknown,
+      isMiniProgram: false,
+      isWorker: false,
+      isBrowser: false,
+      isNode: false,
+      isHybrid: false,
+      browser: {
+        type: BrowserType.UNKNOWN,
+        version: '',
+        engine: '',
+        isWebView: false,
+        webViewType: WebViewType.UNKNOWN,
+      },
+      os: {
+        type: OSType.UNKNOWN,
+        version: '',
+        platform: '',
+      },
+      device: {
+        type: DeviceType.UNKNOWN,
+        pixelRatio: 1,
+        screenSize: { width: 0, height: 0 },
+        touchSupport: false,
+      },
+      framework: {
+        type: FrameworkType.UNKNOWN,
+        version: '',
+      },
+      network: {
+        type: 'unknown',
+        online: true,
+        supportsNetworkInfo: false,
+      },
+    };
+
+    // 检测运行环境
+    this.detectRuntimeEnvironment(env);
+
+    // 检测浏览器信息
+    if (env.isBrowser) {
+      this.detectBrowserInfo(env);
+    }
+
+    // 检测操作系统信息
+    this.detectOSInfo(env);
+
+    // 检测设备信息
+    this.detectDeviceInfo(env);
+
+    // 检测框架信息
+    this.detectFrameworkInfo(env);
+
+    // 检测网络信息
+    this.detectNetworkInfo(env);
+
+    return env;
+  }
+
+  /**
+   * 检测运行环境类型
+   * @param env 环境信息对象
+   */
+  private detectRuntimeEnvironment(env: EnvironmentInfo): void {
+    // 检测是否在Node.js环境中
+    if (
+      typeof process !== 'undefined' &&
+      process.versions != null &&
+      process.versions.node != null
+    ) {
+      env.environment = Environment.NodeJS;
+      env.isNode = true;
+      return;
+    }
+
+    // 检测是否在ServiceWorker环境中
+    if (
+      typeof self !== 'undefined' &&
+      'serviceWorker' in navigator &&
+      (self as any).constructor.name === 'ServiceWorkerGlobalScope'
+    ) {
+      env.environment = Environment.ServiceWorker;
+      env.isWorker = true;
+      return;
+    }
+
+    // 检测是否在WebWorker环境中
+    if (
+      typeof self !== 'undefined' &&
+      typeof window === 'undefined' &&
+      (self as any).constructor.name === 'WorkerGlobalScope'
+    ) {
+      env.environment = Environment.WebWorker;
+      env.isWorker = true;
+      return;
+    }
+
+    // 检测是否在浏览器环境中
+    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
+      env.isBrowser = true;
+
+      // 检测是否在小程序环境中
+      if (this.isWechatMiniProgram()) {
+        env.environment = Environment.WechatMP;
+        env.isMiniProgram = true;
+      } else if (this.isAlipayMiniProgram()) {
+        env.environment = Environment.AlipayMP;
+        env.isMiniProgram = true;
+      } else if (this.isBytedanceMiniProgram()) {
+        env.environment = Environment.BytedanceMP;
+        env.isMiniProgram = true;
+      } else if (this.isBaiduMiniProgram()) {
+        env.environment = Environment.BaiduMP;
+        env.isMiniProgram = true;
+      } else if (this.isQQMiniProgram()) {
+        env.environment = Environment.QQ_MP;
+        env.isMiniProgram = true;
+      } else if (this.isTaroEnvironment()) {
+        env.environment = Environment.Taro;
+        env.isHybrid = true;
+      } else if (this.isUniAppEnvironment()) {
+        env.environment = Environment.UniApp;
+        env.isHybrid = true;
+      } else if (this.isReactNativeEnvironment()) {
+        env.environment = Environment.ReactNative;
+        env.isHybrid = true;
+      } else {
+        env.environment = Environment.Browser;
+      }
+    }
+  }
+
+  /**
+   * 检测浏览器信息
+   * @param env 环境信息对象
+   */
+  private detectBrowserInfo(env: EnvironmentInfo): void {
+    if (!env.isBrowser) return;
+
+    const ua = navigator.userAgent;
+    const uaParser = this.parseUserAgent(ua);
+
+    // 设置浏览器类型
+    env.browser.type = this.getBrowserType(uaParser, ua);
+
+    // 设置浏览器版本
+    env.browser.version = uaParser.browser.version || '';
+
+    // 设置浏览器引擎
+    env.browser.engine = uaParser.engine.name || '';
+
+    // 检测是否是WebView
+    env.browser.isWebView = this.isWebView(ua);
+
+    // 检测WebView类型
+    env.browser.webViewType = this.getWebViewType(ua);
+  }
+
+  /**
+   * 检测操作系统信息
+   * @param env 环境信息对象
+   */
+  private detectOSInfo(env: EnvironmentInfo): void {
+    if (typeof navigator !== 'undefined') {
+      const ua = navigator.userAgent;
+      const uaParser = this.parseUserAgent(ua);
+
+      // 设置操作系统类型
+      env.os.type = this.getOSType(uaParser);
+
+      // 设置操作系统版本
+      env.os.version = uaParser.os.version || '';
+
+      // 设置系统平台
+      env.os.platform = navigator.platform || '';
+    }
+  }
+
+  /**
+   * 检测设备信息
+   * @param env 环境信息对象
+   */
+  private detectDeviceInfo(env: EnvironmentInfo): void {
+    if (typeof window !== 'undefined') {
+      // 设置设备类型
+      env.device.type = this.getDeviceType();
+
+      // 设置设备像素比
+      env.device.pixelRatio = window.devicePixelRatio || 1;
+
+      // 设置屏幕尺寸
+      env.device.screenSize = {
+        width: window.screen.width,
+        height: window.screen.height,
+      };
+
+      // 检测是否支持触摸
+      env.device.touchSupport =
+        'ontouchstart' in window ||
+        (navigator as any).maxTouchPoints > 0 ||
+        (navigator as any).msMaxTouchPoints > 0;
+    }
+  }
+
+  /**
+   * 检测框架信息
+   * @param env 环境信息对象
+   */
+  private detectFrameworkInfo(env: EnvironmentInfo): void {
+    if (this.isTaroEnvironment()) {
+      env.framework.type = FrameworkType.TARO;
+      env.framework.version = this.getTaroVersion() || '';
+    } else if (this.isUniAppEnvironment()) {
+      env.framework.type = FrameworkType.UNI_APP;
+      env.framework.version = this.getUniAppVersion() || '';
+    } else if (this.isReactNativeEnvironment()) {
+      env.framework.type = FrameworkType.REACT_NATIVE;
+      env.framework.version = '';
+    } else if (this.isIonicEnvironment()) {
+      env.framework.type = FrameworkType.IONIC;
+      env.framework.version = this.getIonicVersion() || '';
+    } else if (this.isCordovaEnvironment()) {
+      env.framework.type = FrameworkType.CORDOVA;
+      env.framework.version = this.getCordovaVersion() || '';
+    } else if (this.isElectronEnvironment()) {
+      env.framework.type = FrameworkType.ELECTRON;
+      env.framework.version = this.getElectronVersion() || '';
+    } else {
+      env.framework.type = FrameworkType.NONE;
+      env.framework.version = '';
+    }
+  }
+
+  /**
+   * 检测网络信息
+   * @param env 环境信息对象
+   */
+  private detectNetworkInfo(env: EnvironmentInfo): void {
+    if (typeof navigator !== 'undefined') {
+      env.network.online =
+        navigator.onLine !== undefined ? navigator.onLine : true;
+
+      // 检测是否支持NetworkInformation API
+      const connection =
+        (navigator as any).connection ||
+        (navigator as any).mozConnection ||
+        (navigator as any).webkitConnection;
+
+      env.network.supportsNetworkInfo = !!connection;
+
+      if (connection) {
+        env.network.type =
+          connection.effectiveType || connection.type || 'unknown';
+      }
+    }
+  }
+
+  // 用户代理解析 (简化版)
+  private parseUserAgent(ua: string): UAParseResult {
+    const result: UAParseResult = {
+      browser: {},
+      engine: {},
+      os: {},
+      device: {},
+      cpu: {},
+    };
+
+    // 检测浏览器和版本
+    if (ua.includes('Chrome/')) {
+      result.browser.name = 'Chrome';
+      const match = /Chrome\/([0-9.]+)/.exec(ua);
+      if (match) result.browser.version = match[1];
+    } else if (ua.includes('Firefox/')) {
+      result.browser.name = 'Firefox';
+      const match = /Firefox\/([0-9.]+)/.exec(ua);
+      if (match) result.browser.version = match[1];
+    } else if (ua.includes('Safari/') && !ua.includes('Chrome/')) {
+      result.browser.name = 'Safari';
+      const match = /Version\/([0-9.]+)/.exec(ua);
+      if (match) result.browser.version = match[1];
+    } else if (ua.includes('Edge/') || ua.includes('Edg/')) {
+      result.browser.name = 'Edge';
+      const match = /(?:Edge|Edg)\/([0-9.]+)/.exec(ua);
+      if (match) result.browser.version = match[1];
+    } else if (ua.includes('MSIE') || ua.includes('Trident/')) {
+      result.browser.name = 'Internet Explorer';
+      const match = /(?:MSIE |rv:)([0-9.]+)/.exec(ua);
+      if (match) result.browser.version = match[1];
+    }
+
+    // 检测操作系统
+    if (ua.includes('Windows')) {
+      result.os.name = 'Windows';
+      if (ua.includes('Windows NT 10.0')) result.os.version = '10';
+      else if (ua.includes('Windows NT 6.3')) result.os.version = '8.1';
+      else if (ua.includes('Windows NT 6.2')) result.os.version = '8';
+      else if (ua.includes('Windows NT 6.1')) result.os.version = '7';
+    } else if (ua.includes('Mac OS X')) {
+      result.os.name = 'Mac OS';
+      const match = /Mac OS X (\d+[_.]\d+[_.]\d+)/.exec(ua);
+      if (match) result.os.version = match[1].replace(/_/g, '.');
+    } else if (ua.includes('Android')) {
+      result.os.name = 'Android';
+      const match = /Android (\d+\.\d+)/.exec(ua);
+      if (match) result.os.version = match[1];
+    } else if (
+      ua.includes('iOS') ||
+      ua.includes('iPhone') ||
+      ua.includes('iPad')
+    ) {
+      result.os.name = 'iOS';
+      const match = /OS (\d+[_]\d+)/.exec(ua);
+      if (match) result.os.version = match[1].replace(/_/g, '.');
+    } else if (ua.includes('Linux')) {
+      result.os.name = 'Linux';
+    }
+
+    // 检测引擎
+    if (ua.includes('Gecko/')) {
+      result.engine.name = 'Gecko';
+    } else if (ua.includes('WebKit/') || ua.includes('AppleWebKit/')) {
+      result.engine.name = 'WebKit';
+    } else if (ua.includes('Trident/')) {
+      result.engine.name = 'Trident';
+    } else if (ua.includes('Presto/')) {
+      result.engine.name = 'Presto';
+    }
+
+    // 检测设备类型
+    if (ua.includes('Mobile')) {
+      result.device.type = 'mobile';
+    } else if (ua.includes('Tablet') || ua.includes('iPad')) {
+      result.device.type = 'tablet';
+    } else {
+      result.device.type = 'desktop';
+    }
+
+    return result;
+  }
+
+  /**
+   * 根据UA解析结果获取浏览器类型
+   */
+  private getBrowserType(uaParser: UAParseResult, ua: string): BrowserType {
+    const browserName = uaParser.browser.name?.toLowerCase() || '';
+
+    if (browserName.includes('chrome')) return BrowserType.CHROME;
+    if (browserName.includes('firefox')) return BrowserType.FIREFOX;
+    if (browserName.includes('safari')) return BrowserType.SAFARI;
+    if (browserName.includes('edge')) return BrowserType.EDGE;
+    if (browserName.includes('internet explorer')) return BrowserType.IE;
+    if (browserName.includes('opera')) return BrowserType.OPERA;
+
+    // 检测特定浏览器
+    if (ua.includes('UCBrowser')) return BrowserType.UC;
+    if (ua.includes('QQBrowser')) return BrowserType.QQ;
+    if (ua.includes('Baidu')) return BrowserType.BAIDU;
+    if (ua.includes('MicroMessenger')) return BrowserType.WECHAT;
+    if (ua.includes('AlipayClient')) return BrowserType.ALIPAY;
+
+    return BrowserType.UNKNOWN;
+  }
+
+  /**
+   * 根据UA解析结果获取操作系统类型
+   */
+  private getOSType(uaParser: UAParseResult): OSType {
+    const osName = uaParser.os.name?.toLowerCase() || '';
+
+    if (osName.includes('android')) return OSType.ANDROID;
+    if (
+      osName.includes('ios') ||
+      osName.includes('iphone os') ||
+      osName.includes('ipad')
+    )
+      return OSType.IOS;
+    if (osName.includes('windows')) return OSType.WINDOWS;
+    if (osName.includes('mac os')) return OSType.MACOS;
+    if (osName.includes('linux')) return OSType.LINUX;
+
+    return OSType.UNKNOWN;
+  }
+
+  /**
+   * 获取设备类型
+   */
+  private getDeviceType(): DeviceType {
+    // 检测是否在浏览器环境中
+    if (typeof navigator === 'undefined') return DeviceType.UNKNOWN;
+
+    const ua = navigator.userAgent;
+
+    // 检测是否是移动设备
+    const isMobile = /Mobile|Android|iPhone|iPad|iPod|Windows Phone/i.test(ua);
+
+    // 检测是否是平板
+    const isTablet = /iPad|Android(?!.*Mobile)/i.test(ua);
+
+    // 检测是否是智能电视
+    const isTV =
+      /TV|SmartTV|NetCast|NETTV|AppleTV|boxee|Kylo|DLNADOC|CE-HTML/i.test(ua);
+
+    if (isTV) return DeviceType.TV;
+    if (isTablet) return DeviceType.TABLET;
+    if (isMobile) return DeviceType.MOBILE;
+
+    return DeviceType.DESKTOP;
+  }
+
+  /**
+   * 检测是否是WebView
+   */
+  private isWebView(ua: string): boolean {
+    // Android WebView
+    const isAndroidWebView = /; wv\)/.test(ua) || /Version\/[0-9.]+/.test(ua);
+
+    // iOS WebView
+    const isIosWebView = /(iPhone|iPod|iPad).*AppleWebKit(?!.*Safari)/i.test(
+      ua
+    );
+
+    return isAndroidWebView || isIosWebView;
+  }
+
+  /**
+   * 获取WebView类型
+   */
+  private getWebViewType(ua: string): WebViewType {
+    if (!this.isWebView(ua)) return WebViewType.NOT_WEBVIEW;
+
+    // iOS WebView类型检测
+    if (/(iPhone|iPod|iPad)/i.test(ua)) {
+      if (/WKWebView/i.test(ua)) {
+        return WebViewType.WKWEBVIEW;
+      } else if (/(iPhone|iPod|iPad).*AppleWebKit(?!.*Safari)/i.test(ua)) {
+        return WebViewType.UIWEBVIEW;
+      }
+      return WebViewType.NATIVE_IOS;
+    }
+
+    // Android WebView类型检测
+    if (/; wv\)/.test(ua)) {
+      return WebViewType.NATIVE_ANDROID;
+    }
+
+    // X5内核检测
+    if (/TBS/i.test(ua) || /MQQBrowser/i.test(ua)) {
+      return WebViewType.X5;
+    }
+
+    // Crosswalk检测
+    if (/Crosswalk/i.test(ua)) {
+      return WebViewType.CROSSWALK;
+    }
+
+    return WebViewType.UNKNOWN;
+  }
+
+  /**
+   * 检测是否是微信小程序环境
+   */
+  private isWechatMiniProgram(): boolean {
+    if (typeof window !== 'undefined') {
+      // 检测是否存在微信小程序环境
+      // @ts-ignore
+      return (
+        typeof wx !== 'undefined' &&
+        typeof wx.getSystemInfo === 'function' &&
+        // @ts-ignore
+        typeof __wxjs_environment !== 'undefined' &&
+        __wxjs_environment === 'miniprogram'
+      );
+    }
+    return false;
+  }
+
+  /**
+   * 检测是否是支付宝小程序环境
+   */
+  private isAlipayMiniProgram(): boolean {
+    if (typeof window !== 'undefined') {
+      // 检测是否存在支付宝小程序环境
+      // @ts-ignore
+      return (
+        typeof my !== 'undefined' && typeof my.getSystemInfo === 'function'
+      );
+    }
+    return false;
+  }
+
+  /**
+   * 检测是否是字节跳动小程序环境
+   */
+  private isBytedanceMiniProgram(): boolean {
+    if (typeof window !== 'undefined') {
+      // 检测是否存在字节跳动小程序环境
+      // @ts-ignore
+      return (
+        typeof tt !== 'undefined' && typeof tt.getSystemInfo === 'function'
+      );
+    }
+    return false;
+  }
+
+  /**
+   * 检测是否是百度小程序环境
+   */
+  private isBaiduMiniProgram(): boolean {
+    if (typeof window !== 'undefined') {
+      // 检测是否存在百度小程序环境
+      // @ts-ignore
+      return (
+        typeof swan !== 'undefined' && typeof swan.getSystemInfo === 'function'
+      );
+    }
+    return false;
+  }
+
+  /**
+   * 检测是否是QQ小程序环境
+   */
+  private isQQMiniProgram(): boolean {
+    if (typeof window !== 'undefined') {
+      // 检测是否存在QQ小程序环境
+      // @ts-ignore
+      return (
+        typeof qq !== 'undefined' && typeof qq.getSystemInfo === 'function'
+      );
+    }
+    return false;
+  }
+
+  /**
+   * 检测是否是Taro环境
+   */
+  private isTaroEnvironment(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof (window as any).Taro !== 'undefined'
+    );
+  }
+
+  /**
+   * 检测是否是uni-app环境
+   */
+  private isUniAppEnvironment(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof (window as any).uni !== 'undefined' &&
+      typeof (window as any).uni.getSystemInfo === 'function'
+    );
+  }
+
+  /**
+   * 检测是否是React Native环境
+   */
+  private isReactNativeEnvironment(): boolean {
+    return (
+      typeof navigator !== 'undefined' && navigator.product === 'ReactNative'
+    );
+  }
+
+  /**
+   * 检测是否是Ionic环境
+   */
+  private isIonicEnvironment(): boolean {
+    return typeof window !== 'undefined' && !!(window as any).Ionic;
+  }
+
+  /**
+   * 检测是否是Cordova环境
+   */
+  private isCordovaEnvironment(): boolean {
+    return typeof window !== 'undefined' && !!(window as any).cordova;
+  }
+
+  /**
+   * 检测是否是Electron环境
+   */
+  private isElectronEnvironment(): boolean {
+    return (
+      typeof window !== 'undefined' &&
+      typeof (window as any).process !== 'undefined' &&
+      (window as any).process.type === 'renderer'
+    );
+  }
+
+  /**
+   * 获取Taro版本
+   */
+  private getTaroVersion(): string | null {
+    if (!this.isTaroEnvironment()) return null;
+
+    try {
+      return (window as any).Taro.getVersion?.() || '';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 获取uni-app版本
+   */
+  private getUniAppVersion(): string | null {
+    if (!this.isUniAppEnvironment()) return null;
+
+    try {
+      return (window as any).__uniConfig?.nvue?.compilerVersion || '';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 获取Ionic版本
+   */
+  private getIonicVersion(): string | null {
+    if (!this.isIonicEnvironment()) return null;
+
+    try {
+      return (window as any).Ionic.version || '';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 获取Cordova版本
+   */
+  private getCordovaVersion(): string | null {
+    if (!this.isCordovaEnvironment()) return null;
+
+    try {
+      return (window as any).cordova.version || '';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
+   * 获取Electron版本
+   */
+  private getElectronVersion(): string | null {
+    if (!this.isElectronEnvironment()) return null;
+
+    try {
+      return (window as any).process.versions.electron || '';
+    } catch (e) {
+      return null;
+    }
+  }
+
+  /**
    * 执行全面环境检测
    */
   public async detectEnvironment(): Promise<EnvDetectionResult> {
@@ -107,8 +804,11 @@ export class EnvironmentDetectionSystem {
 
     this.logger.debug('开始执行全面环境检测');
 
+    // 获取详细环境信息
+    const envInfo = this.getEnvironmentInfo();
+
     // 基础环境检测
-    const environment = this.envDetector.getEnvironment();
+    const environment = envInfo.environment;
     const environmentType = this.envDetector.getEnvironmentType();
 
     // 初始化检测结果
@@ -733,14 +1433,18 @@ export class EnvironmentDetectionSystem {
 
   /**
    * 重置环境检测缓存
-   * 当环境可能变化时调用（如切换到不同域名或从App内WebView跳转到系统浏览器）
    */
   public resetCache(): void {
     this.cachedDetectionResult = null;
-    this.webViewDetector.resetCache(); // 重置WebView检测缓存
-    this.deviceCapabilityDetector.resetCache(); // 重置设备能力检测缓存
+    this._environmentInfo = null;
+    this._featureDetectionResults.clear();
+    this.webViewDetector.resetCache();
+    this.deviceCapabilityDetector.resetCache();
     this.logger.debug('环境检测缓存已重置');
   }
 }
+
+// 导出环境检测系统单例
+export const environmentDetector = EnvironmentDetectionSystem.getInstance();
 
 export default EnvironmentDetectionSystem;

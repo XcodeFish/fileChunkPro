@@ -3,6 +3,8 @@
  * 提供文件内容加密和解密功能
  */
 
+import { encryptWithChaCha20, decryptWithChaCha20 } from './ChaCha20Encryption';
+
 /**
  * 文件加密选项
  */
@@ -385,21 +387,33 @@ export default class FileEncryptionSystem {
    * @returns 加密后的数据
    */
   private async encryptWithChaCha20(data: ArrayBuffer): Promise<ArrayBuffer> {
-    // 注意: WebCrypto API目前不原生支持ChaCha20
-    // 此实现为示例，实际环境中可能需要使用第三方库或polyfill
-
-    if (!this.encryptionKey || !this.currentIV) {
-      throw new Error('加密密钥或IV未初始化');
+    if (!this.encryptionKey) {
+      throw new Error('加密密钥未初始化');
     }
 
     try {
-      // 在实际实现中，应该使用ChaCha20算法加密数据
-      // 由于WebCrypto API不原生支持ChaCha20，这里仅作为示例
-      // 在实际项目中应考虑使用第三方库如TweetNaCl.js或libsodium
+      // 确保IV已初始化 - 对ChaCha20使用12字节nonce
+      if (!this.currentIV) {
+        this.currentIV = crypto.getRandomValues(new Uint8Array(12));
+      }
 
-      // 模拟加密结果(实际项目中应替换为真实实现)
-      console.warn('ChaCha20加密暂未实现，将回退到AES-GCM');
-      return this.encryptWithAesGcm(data);
+      // 从CryptoKey中导出原始密钥
+      const rawKey = await crypto.subtle.exportKey('raw', this.encryptionKey);
+      const keyBytes = new Uint8Array(rawKey);
+
+      // 使用我们的ChaCha20实现加密数据
+      const { encrypted, nonce } = encryptWithChaCha20(
+        data,
+        keyBytes,
+        this.currentIV
+      );
+
+      // 更新元数据中的IV信息
+      if (this.metadata) {
+        this.metadata.iv = this.uint8ArrayToBase64(nonce);
+      }
+
+      return encrypted.buffer;
     } catch (error) {
       console.error('ChaCha20加密失败:', error);
       throw new Error(`ChaCha20加密失败: ${(error as Error).message}`);
@@ -494,20 +508,19 @@ export default class FileEncryptionSystem {
     encryptedData: ArrayBuffer,
     iv: Uint8Array
   ): Promise<ArrayBuffer> {
-    // 注意: WebCrypto API目前不原生支持ChaCha20
-    // 此实现为示例，实际环境中可能需要使用第三方库或polyfill
-
     if (!this.encryptionKey) {
       throw new Error('加密密钥未初始化');
     }
 
     try {
-      // 在实际实现中，应该使用ChaCha20算法解密数据
-      // 由于WebCrypto API不原生支持ChaCha20，这里仅作为示例
+      // 从CryptoKey中导出原始密钥
+      const rawKey = await crypto.subtle.exportKey('raw', this.encryptionKey);
+      const keyBytes = new Uint8Array(rawKey);
 
-      // 模拟解密结果(实际项目中应替换为真实实现)
-      console.warn('ChaCha20解密暂未实现，将回退到AES-GCM');
-      return this.decryptWithAesGcm(encryptedData, iv);
+      // 使用我们的ChaCha20实现解密数据
+      const decrypted = decryptWithChaCha20(encryptedData, keyBytes, iv);
+
+      return decrypted.buffer;
     } catch (error) {
       console.error('ChaCha20解密失败:', error);
       throw new Error(`ChaCha20解密失败: ${(error as Error).message}`);

@@ -43,9 +43,44 @@ export interface CSRFProtectionOptions {
   storageKey?: string;
 
   /**
-   * 是否使用本地存储持久化令牌
+   * 存储方式：'memory'(仅内存), 'cookie'(安全cookie), 'localStorage'(本地存储)
+   * @default 'memory'
    */
-  useLocalStorage?: boolean;
+  storageMode?: 'memory' | 'cookie' | 'localStorage';
+
+  /**
+   * Cookie选项（当storageMode为'cookie'时使用）
+   */
+  cookieOptions?: {
+    /**
+     * 是否设置为HttpOnly （推荐，防止XSS攻击）
+     * @default true
+     */
+    httpOnly?: boolean;
+
+    /**
+     * 是否设置为Secure（推荐，需要HTTPS）
+     * @default true
+     */
+    secure?: boolean;
+
+    /**
+     * 是否设置为SameSite=Strict（推荐，防止CSRF）
+     * @default true
+     */
+    sameSite?: 'Strict' | 'Lax' | 'None';
+
+    /**
+     * Cookie路径
+     * @default '/'
+     */
+    path?: string;
+
+    /**
+     * Cookie域名
+     */
+    domain?: string;
+  };
 }
 
 /**
@@ -105,7 +140,15 @@ export class CSRFProtection {
       autoRefresh: options.autoRefresh ?? true,
       refreshThreshold: options.refreshThreshold ?? 0.2, // 剩余20%有效期时刷新
       storageKey: options.storageKey ?? 'csrf_token_info',
-      useLocalStorage: options.useLocalStorage ?? true,
+      storageMode: options.storageMode ?? 'memory',
+      cookieOptions: {
+        httpOnly: options.cookieOptions?.httpOnly ?? true,
+        secure: options.cookieOptions?.secure ?? true,
+        sameSite: options.cookieOptions?.sameSite ?? 'Strict',
+        path: options.cookieOptions?.path ?? '/',
+        domain: options.cookieOptions?.domain,
+        ...options.cookieOptions,
+      },
     };
 
     // 从存储中恢复令牌
@@ -126,6 +169,10 @@ export class CSRFProtection {
     this.options = {
       ...this.options,
       ...options,
+      cookieOptions: {
+        ...this.options.cookieOptions,
+        ...options.cookieOptions,
+      },
     };
 
     // 如果URL或头名称发生变化，清除现有令牌
@@ -173,13 +220,21 @@ export class CSRFProtection {
    */
   public async refreshToken(): Promise<string> {
     try {
-      const response = await fetch(this.options.tokenUrl, {
+      // 添加防止缓存的查询参数
+      const timestamp = Date.now();
+      const url = this.options.tokenUrl.includes('?')
+        ? `${this.options.tokenUrl}&_=${timestamp}`
+        : `${this.options.tokenUrl}?_=${timestamp}`;
+
+      const response = await fetch(url, {
         method: 'GET',
         credentials: this.options.includeCredentials
           ? 'include'
           : 'same-origin',
         headers: {
           Accept: 'application/json',
+          'Cache-Control': 'no-cache, no-store, max-age=0, must-revalidate',
+          Pragma: 'no-cache',
         },
       });
 
@@ -200,18 +255,18 @@ export class CSRFProtection {
       this.setToken(token);
       return token;
     } catch (error) {
-      // 如果仍有有效令牌，则继续使用
-      if (this.tokenInfo?.token && this.tokenInfo.expiresAt > Date.now()) {
+      console.error('Failed to refresh CSRF token:', error);
+      // 如果有现有令牌，继续使用，避免完全中断功能
+      if (this.tokenInfo?.token) {
         return this.tokenInfo.token;
       }
-
       throw error;
     }
   }
 
   /**
-   * 获取包含CSRF令牌的请求头
-   * @returns 请求头对象Promise
+   * 获取CSRF请求头
+   * @returns 包含CSRF令牌的请求头对象
    */
   public async getCSRFHeader(): Promise<Record<string, string>> {
     const token = await this.getToken();
@@ -219,9 +274,9 @@ export class CSRFProtection {
   }
 
   /**
-   * 将CSRF令牌添加到现有请求头
-   * @param headers 现有请求头
-   * @returns 合并后的请求头Promise
+   * 添加CSRF令牌到现有请求头
+   * @param headers 现有请求头对象
+   * @returns 添加CSRF令牌后的请求头对象
    */
   public async appendToHeaders(
     headers: Record<string, string>
@@ -231,87 +286,186 @@ export class CSRFProtection {
   }
 
   /**
-   * 设置CSRF令牌
+   * 设置令牌
    * @param token 令牌值
    */
   private setToken(token: string): void {
-    const expiresAt = Date.now() + this.options.tokenLifetime;
+    // 设置令牌信息
+    this.tokenInfo = {
+      token,
+      expiresAt: Date.now() + this.options.tokenLifetime,
+    };
 
-    this.tokenInfo = { token, expiresAt };
+    // 持久化令牌
+    this.persistToken();
 
-    // 如果启用本地存储，则保存令牌
-    if (this.options.useLocalStorage) {
-      this.persistToken();
-    }
-
-    // 如果启用自动刷新，则调度刷新
+    // 如果启用自动刷新，设置刷新计时器
     if (this.options.autoRefresh) {
       this.scheduleRefresh();
     }
   }
 
   /**
-   * 清除CSRF令牌
+   * 清除令牌
    */
   public clearToken(): void {
+    // 清除内存中的令牌
     this.tokenInfo = null;
 
-    // 清除存储中的令牌
-    if (this.options.useLocalStorage && typeof localStorage !== 'undefined') {
-      localStorage.removeItem(this.options.storageKey);
-    }
-
-    // 清除刷新定时器
+    // 清除刷新计时器
     if (this.refreshTimer !== null) {
-      clearTimeout(this.refreshTimer);
+      window.clearTimeout(this.refreshTimer);
       this.refreshTimer = null;
     }
+
+    // 清除持久化的令牌
+    this.clearPersistedToken();
   }
 
   /**
-   * 将令牌持久化到本地存储
+   * 持久化令牌
    */
   private persistToken(): void {
-    if (
-      this.options.useLocalStorage &&
-      typeof localStorage !== 'undefined' &&
-      this.tokenInfo
-    ) {
-      try {
-        localStorage.setItem(
-          this.options.storageKey,
-          JSON.stringify(this.tokenInfo)
-        );
-      } catch (error) {
-        // 忽略存储错误
-        console.warn('Failed to persist CSRF token:', error);
+    if (!this.tokenInfo) return;
+
+    try {
+      const tokenData = JSON.stringify({
+        token: this.tokenInfo.token,
+        expiresAt: this.tokenInfo.expiresAt,
+      });
+
+      // 根据存储模式选择不同的存储方式
+      switch (this.options.storageMode) {
+        case 'localStorage':
+          // 警告：localStorage方式容易受到XSS攻击
+          console.warn(
+            'Warning: Using localStorage for CSRF token storage is vulnerable to XSS attacks'
+          );
+          localStorage.setItem(this.options.storageKey, tokenData);
+          break;
+
+        case 'cookie':
+          // 使用安全的cookie存储（通过服务端设置）
+          this.setSecureCookie(this.options.storageKey, tokenData);
+          break;
+
+        case 'memory':
+        default:
+          // 内存存储（不持久化）
+          break;
       }
+    } catch (error) {
+      console.error('Failed to persist CSRF token:', error);
     }
   }
 
   /**
-   * 从本地存储恢复令牌
+   * 从存储中恢复令牌
    */
   private restoreToken(): void {
-    if (this.options.useLocalStorage && typeof localStorage !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(this.options.storageKey);
+    try {
+      let tokenData: string | null = null;
 
-        if (stored) {
-          const parsed = JSON.parse(stored) as TokenInfo;
+      // 根据存储模式选择不同的恢复方式
+      switch (this.options.storageMode) {
+        case 'localStorage':
+          tokenData = localStorage.getItem(this.options.storageKey);
+          break;
 
-          // 仅在令牌未过期时恢复
-          if (parsed && parsed.expiresAt > Date.now()) {
-            this.tokenInfo = parsed;
-          } else {
-            // 如果令牌已过期，则清除存储
-            localStorage.removeItem(this.options.storageKey);
-          }
-        }
-      } catch (error) {
-        // 忽略解析错误
-        console.warn('Failed to restore CSRF token:', error);
+        case 'cookie':
+          tokenData = this.getSecureCookie(this.options.storageKey);
+          break;
+
+        case 'memory':
+        default:
+          // 内存存储不需要恢复
+          return;
       }
+
+      if (tokenData) {
+        const { token, expiresAt } = JSON.parse(tokenData);
+
+        // 检查令牌是否过期
+        if (expiresAt && expiresAt > Date.now()) {
+          this.tokenInfo = { token, expiresAt };
+        } else {
+          // 令牌已过期，清除
+          this.clearPersistedToken();
+        }
+      }
+    } catch (error) {
+      console.error('Failed to restore CSRF token:', error);
+    }
+  }
+
+  /**
+   * 设置安全的CSRF令牌Cookie
+   * @param key Cookie键名
+   * @param value Cookie值
+   */
+  private setSecureCookie(key: string, value: string): void {
+    // 注意：由于前端设置的cookie无法设置为HttpOnly，这需要服务端配合
+    // 这里我们设置客户端能设置的最大安全级别
+    const { cookieOptions } = this.options;
+    const cookieString = [
+      `${key}=${encodeURIComponent(value)}`,
+      `path=${cookieOptions.path || '/'}`,
+      cookieOptions.domain ? `domain=${cookieOptions.domain}` : '',
+      cookieOptions.secure ? 'secure' : '',
+      `SameSite=${cookieOptions.sameSite || 'Strict'}`,
+      `expires=${new Date(this.tokenInfo!.expiresAt).toUTCString()}`,
+    ]
+      .filter(Boolean)
+      .join('; ');
+
+    // 设置cookie
+    document.cookie = cookieString;
+
+    // 添加警告，因为从前端设置的cookie不能为HttpOnly
+    if (cookieOptions.httpOnly) {
+      console.warn(
+        'Warning: HttpOnly flag for CSRF token cookie must be set from server-side. ' +
+          'Current cookie is not HttpOnly and might be vulnerable to XSS attacks.'
+      );
+    }
+  }
+
+  /**
+   * 获取CSRF令牌Cookie
+   * @param key Cookie键名
+   * @returns Cookie值
+   */
+  private getSecureCookie(key: string): string | null {
+    const cookiePattern = new RegExp(`(^|;)\\s*${key}\\s*=\\s*([^;]+)`);
+    const match = document.cookie.match(cookiePattern);
+    return match ? decodeURIComponent(match[2]) : null;
+  }
+
+  /**
+   * 清除持久化的令牌
+   */
+  private clearPersistedToken(): void {
+    try {
+      switch (this.options.storageMode) {
+        case 'localStorage':
+          localStorage.removeItem(this.options.storageKey);
+          break;
+
+        case 'cookie':
+          // 通过设置过期时间为过去，删除cookie
+          document.cookie = `${this.options.storageKey}=; path=${this.options.cookieOptions.path || '/'}; ${
+            this.options.cookieOptions.domain
+              ? `domain=${this.options.cookieOptions.domain};`
+              : ''
+          } expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+          break;
+
+        case 'memory':
+        default:
+          break;
+      }
+    } catch (error) {
+      console.error('Failed to clear persisted CSRF token:', error);
     }
   }
 
@@ -319,40 +473,57 @@ export class CSRFProtection {
    * 调度令牌刷新
    */
   private scheduleRefresh(): void {
-    if (!this.options.autoRefresh || !this.tokenInfo) {
-      return;
-    }
-
-    // 清除现有定时器
+    // 清除现有的计时器
     if (this.refreshTimer !== null) {
-      clearTimeout(this.refreshTimer);
-      this.refreshTimer = null;
+      window.clearTimeout(this.refreshTimer);
     }
 
+    if (!this.tokenInfo) return;
+
+    // 计算刷新时间（令牌剩余有效期的80%后刷新）
     const now = Date.now();
-    const expiresAt = this.tokenInfo.expiresAt;
+    const remainingTime = this.tokenInfo.expiresAt - now;
+    const refreshTime = remainingTime * (1 - this.options.refreshThreshold);
 
-    // 计算刷新时间（在剩余有效期达到阈值时刷新）
-    const refreshThreshold =
-      this.options.tokenLifetime * this.options.refreshThreshold;
-    const refreshAt = expiresAt - refreshThreshold;
-
-    // 如果已经到了刷新时间，立即刷新
-    if (refreshAt <= now) {
-      this.refreshToken().catch(() => {
-        // 如果刷新失败，稍后重试
-        setTimeout(() => this.scheduleRefresh(), 5000);
-      });
-      return;
-    }
-
-    // 设置定时器在适当时间刷新令牌
-    const delay = refreshAt - now;
+    // 设置计时器
     this.refreshTimer = window.setTimeout(() => {
-      this.refreshToken().catch(() => {
-        // 如果刷新失败，稍后重试
-        setTimeout(() => this.scheduleRefresh(), 5000);
+      this.refreshToken().catch(error => {
+        console.error('Failed to auto refresh CSRF token:', error);
       });
-    }, delay);
+    }, refreshTime);
+  }
+
+  /**
+   * 获取一个新的nonce值，用于防止重放攻击
+   * @returns 随机生成的nonce
+   */
+  public generateNonce(): string {
+    const array = new Uint8Array(16);
+    crypto.getRandomValues(array);
+    return Array.from(array, byte => byte.toString(16).padStart(2, '0')).join(
+      ''
+    );
+  }
+
+  /**
+   * 添加防重放nonce和时间戳到请求
+   * @param headers 现有请求头对象
+   * @returns 添加了防重放参数的请求头
+   */
+  public async addAntiReplayHeaders(
+    headers: Record<string, string>
+  ): Promise<Record<string, string>> {
+    // 添加CSRF令牌
+    const withCsrf = await this.appendToHeaders(headers);
+
+    // 添加nonce和时间戳
+    const nonce = this.generateNonce();
+    const timestamp = Date.now().toString();
+
+    return {
+      ...withCsrf,
+      'X-Request-Nonce': nonce,
+      'X-Request-Timestamp': timestamp,
+    };
   }
 }

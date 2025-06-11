@@ -8,8 +8,8 @@ import {
   IEnvironmentDetectionOptions,
   IEnvironmentDetectorFactory,
 } from '../types/environment-detection';
-import { EnhancedEnvironmentDetector } from './EnhancedEnvironmentDetector';
 import { Logger } from './Logger';
+import { EnvironmentDetectionSystem } from './EnvironmentDetectionSystem';
 
 /**
  * 环境检测器工厂
@@ -51,8 +51,8 @@ export class EnvironmentDetectorFactory implements IEnvironmentDetectorFactory {
       return this.detectorCache.get(key)!;
     }
 
-    // 创建增强版环境检测器
-    const detector = EnhancedEnvironmentDetector.getInstance(options);
+    // 创建环境检测系统实例
+    const detector = EnvironmentDetectionSystem.getInstance();
 
     // 缓存检测器
     this.detectorCache.set(key, detector);

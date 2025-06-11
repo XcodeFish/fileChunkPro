@@ -14,7 +14,10 @@ import { registerAdapters, AdapterFactory } from './adapters';
 import { IUnifiedAdapter } from './adapters/OptimizedAdapterInterfaces';
 
 // 环境检测
-import { EnhancedEnvironmentDetector } from './utils/EnhancedEnvironmentDetector';
+import {
+  environmentDetector,
+  EnvironmentDetectionSystem,
+} from './utils/EnvironmentDetectionSystem';
 import { EnvironmentDetectorFactory } from './utils/EnvironmentDetectorFactory';
 
 // 配置相关
@@ -116,7 +119,8 @@ export * from './types/environment-detection';
 
 // 导出主要工具类
 export {
-  EnhancedEnvironmentDetector,
+  environmentDetector,
+  EnvironmentDetectionSystem,
   EnvironmentDetectorFactory,
   AdaptiveConfigManager,
   FallbackStrategyManager,
