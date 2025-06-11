@@ -9,6 +9,7 @@ import { WorkerTaskQueue } from './workers/WorkerTaskQueue';
 import { WorkerPoolManager } from './workers/WorkerPoolManager';
 import { StateLock } from '../utils/StateLock';
 import { IWorkerAdapter } from '../adapters/interfaces';
+import { noop } from '../utils/common';
 
 /**
  * 工作线程配置
@@ -266,8 +267,8 @@ export class OptimizedWorkerManager {
       data: taskData,
       createdAt: Date.now(),
       priority: options.priority || 0,
-      resolve: _result => {},
-      reject: _error => {},
+      resolve: noop as any,
+      reject: noop as any,
       onCancel: options.onCancel,
       timeout: options.timeout,
       tags: options.tags,

@@ -1,0 +1,39 @@
+# 默认环境配置（浏览器环境）
+[production]
+# 覆盖率大于0.5%的浏览器
+> 0.5%
+# 不包括已经停止更新的浏览器
+not dead
+# 排除IE浏览器
+not IE 11
+# 排除已过时的浏览器
+not op_mini all
+# 最近两个版本
+last 2 versions
+
+# 开发环境配置（更宽松，提高开发体验）
+[development]
+last 1 chrome version
+last 1 firefox version
+last 1 safari version
+
+# 小程序环境配置（更严格的兼容性）
+[miniprogram]
+chrome >= 53
+safari >= 10.1
+firefox >= 60
+edge >= 79
+
+# 跨端框架配置
+[taro]
+chrome >= 53
+ios_saf >= 10
+> 0.5%
+not dead
+
+[uni-app]
+chrome >= 53
+ios_saf >= 10
+android >= 5
+> 1%
+not dead 

@@ -10,6 +10,15 @@ import { ErrorUtils } from '../utils/ErrorUtils';
 import { AsyncControl } from '../utils/AsyncControl';
 import { EventBus } from './EventBus';
 import { UploadErrorType } from '../types';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  IWorkerManager,
+  WorkerTaskType,
+  IWorkerRequestMessage,
+  IWorkerResponseMessage,
+} from '../types/worker';
+import { ErrorCenter } from './ErrorCenter';
+import { noop } from '../utils/common';
 
 // 扩展Navigator接口以支持deviceMemory属性
 declare global {
@@ -108,16 +117,19 @@ interface WorkerConfig {
  * WorkerManager 类
  * 负责 Worker 创建与管理、任务分发机制、Worker 通信接口、错误边界处理、降级方案处理
  */
-export default class WorkerManager {
-  private workers: Map<string, WorkerInstance> = new Map();
-  private taskCallbacks: Map<
+export class WorkerManager implements IWorkerManager {
+  private workers: Worker[] = [];
+  private taskQueue: Map<
     string,
     {
-      resolve: (value: any) => void;
-      reject: (reason: any) => void;
-      timer: NodeJS.Timeout | null;
+      resolve: (value: unknown) => void;
+      reject: (reason: Error) => void;
+      taskType: WorkerTaskType;
     }
   > = new Map();
+  private maxWorkers: number;
+  private workerScript: string;
+  private errorCenter: ErrorCenter;
   private options: WorkerManagerOptions;
   private isWorkerSupported: boolean;
   private initialized = false;
@@ -225,15 +237,7 @@ export default class WorkerManager {
           const worker = await this.createWorker(type);
           if (worker) {
             const id = `${type}:${i}`;
-            this.workers.set(id, {
-              worker,
-              status: 'idle',
-              taskCount: 0,
-              totalTaskTime: 0,
-              errorCount: 0,
-              lastResponseTime: Date.now(),
-              creationTime: Date.now(),
-            });
+            this.workers.push(worker);
           } else {
             this.logger.warn(`初始化 ${type} Worker #${i} 失败`);
             initSuccess = false;
@@ -364,7 +368,7 @@ export default class WorkerManager {
 
           // 清理事件监听器
           if (messageHandler) {
-            worker.removeEventListener('message', messageHandler || (() => {}));
+            worker.removeEventListener('message', messageHandler);
           }
 
           reject(new Error('Worker初始化超时'));
@@ -385,7 +389,7 @@ export default class WorkerManager {
             }
 
             // 移除事件监听
-            worker.removeEventListener('message', messageHandler || (() => {}));
+            worker.removeEventListener('message', messageHandler);
 
             resolve(true);
           }
@@ -408,7 +412,7 @@ export default class WorkerManager {
             clearTimeout(timeoutId);
           }
           if (messageHandler) {
-            worker.removeEventListener('message', messageHandler || (() => {}));
+            worker.removeEventListener('message', messageHandler);
           }
 
           reject(
@@ -533,17 +537,17 @@ export default class WorkerManager {
     }
 
     // 查找指定类型的空闲Worker
-    for (const [_id, instance] of this.workers.entries()) {
-      if (_id.startsWith(`${type}:`) && instance.status === 'idle') {
-        return instance.worker;
+    for (const worker of this.workers) {
+      if (worker.name === type) {
+        return worker;
       }
     }
 
     // 如果没有空闲的指定类型Worker，尝试复用其他类型
     if (type !== 'default') {
-      for (const [_id, instance] of this.workers.entries()) {
-        if (instance.status === 'idle') {
-          return instance.worker;
+      for (const worker of this.workers) {
+        if (worker.name === 'default') {
+          return worker;
         }
       }
     }
@@ -585,14 +589,9 @@ export default class WorkerManager {
     }
 
     // 处理常规任务响应
-    const callback = this.taskCallbacks.get(response.taskId);
+    const taskInfo = this.taskQueue.get(response.taskId);
 
-    if (callback) {
-      // 清除超时定时器
-      if (callback.timer) {
-        clearTimeout(callback.timer);
-      }
-
+    if (taskInfo) {
       // 更新Worker实例统计信息
       this.updateWorkerStats(workerType, response.success);
 
@@ -601,13 +600,20 @@ export default class WorkerManager {
 
       // 处理响应结果
       if (response.success) {
-        callback.resolve(response.result);
+        taskInfo.resolve(response.result);
       } else {
-        callback.reject(new Error(response.error || '任务失败'));
+        const error = new Error(response.error || '任务失败');
+        if (response.error?.code) {
+          (error as any).code = response.error.code;
+        }
+        if (response.error?.stack) {
+          error.stack = response.error.stack;
+        }
+        taskInfo.reject(error);
       }
 
       // 清理回调
-      this.taskCallbacks.delete(response.taskId);
+      this.taskQueue.delete(response.taskId);
 
       // 处理等待中的任务
       this.processPendingTasks(workerType);
@@ -618,11 +624,10 @@ export default class WorkerManager {
    * 处理Worker就绪消息
    */
   private handleWorkerReady(workerType: string): void {
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${workerType}:`)) {
-        instance.status = 'idle';
-        instance.lastResponseTime = Date.now();
-        this.logger.debug(`Worker ${id} 已就绪`);
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
+        worker.name = 'default';
+        this.logger.debug(`Worker ${worker.name} 已就绪`);
       }
     }
 
@@ -637,10 +642,9 @@ export default class WorkerManager {
    * 处理Worker心跳响应
    */
   private handleWorkerPong(workerType: string): void {
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${workerType}:`)) {
-        instance.lastResponseTime = Date.now();
-        instance.unresponsiveCount = 0;
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
+        worker.name = 'default';
       }
     }
   }
@@ -650,18 +654,18 @@ export default class WorkerManager {
    */
   private handleWorkerStatus(response: any, workerType: string): void {
     // 更新Worker状态
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${workerType}:`)) {
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
         if (response.status) {
-          instance.status = response.status;
+          worker.name = response.status;
         }
 
         if (response.memory) {
-          instance.memoryUsage = response.memory;
+          worker.name = response.memory;
         }
 
         if (response.stats) {
-          Object.assign(instance, response.stats);
+          Object.assign(worker, response.stats);
         }
       }
     }
@@ -696,9 +700,9 @@ export default class WorkerManager {
     this.logger.error(`Worker ${workerType} 错误:`, response.error || response);
 
     // 更新Worker实例统计
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${workerType}:`)) {
-        instance.errorCount = (instance.errorCount || 0) + 1;
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
+        worker.name = 'error';
       }
     }
 
@@ -714,18 +718,10 @@ export default class WorkerManager {
    * 更新Worker统计信息
    */
   private updateWorkerStats(workerType: string, success: boolean): void {
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${workerType}:`)) {
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
         // 更新任务计数
-        instance.taskCount = (instance.taskCount || 0) + 1;
-
-        // 如果是错误，增加错误计数
-        if (!success) {
-          instance.errorCount = (instance.errorCount || 0) + 1;
-        }
-
-        // 更新状态
-        instance.status = 'idle';
+        worker.name = 'busy';
       }
     }
   }
@@ -735,56 +731,50 @@ export default class WorkerManager {
    * 增强错误处理逻辑，根据错误类型做出不同处理
    */
   private handleWorkerError(event: ErrorEvent, workerType: string): void {
-    const workerId = Array.from(this.workers.entries()).find(
-      ([_, w]) => w.worker === event.target
-    )?.[0];
+    const worker = this.workers.find(worker => worker.name === workerType);
 
-    if (workerId) {
-      const worker = this.workers.get(workerId);
-      if (worker) {
-        worker.errorCount = (worker.errorCount || 0) + 1;
-        worker.status = 'error';
+    if (worker) {
+      worker.name = 'error';
 
-        // 根据错误类型和次数决定是否需要重新创建Worker
-        const needsRestart = worker.errorCount >= 3;
-        const errorType = this.analyzeWorkerError(event);
+      // 根据错误类型和次数决定是否需要重新创建Worker
+      const needsRestart = this.analyzeWorkerError(event);
+      const errorType = this.analyzeWorkerError(event);
 
-        // 使用ErrorUtils处理错误
-        ErrorUtils.handleError({
-          message: `Worker错误: ${event.message}`,
-          filename: event.filename,
-          lineno: event.lineno,
-          colno: event.colno,
-          type: UploadErrorType.WORKER_ERROR,
-          workerType,
-          workerId,
-          needsRestart,
-        });
+      // 使用ErrorUtils处理错误
+      ErrorUtils.handleError({
+        message: `Worker错误: ${event.message}`,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        type: UploadErrorType.WORKER_ERROR,
+        workerType,
+        workerId: worker.name,
+        needsRestart,
+      });
 
-        this.eventBus?.emit('worker:error', {
-          message: event.message,
-          filename: event.filename,
-          lineno: event.lineno,
-          colno: event.colno,
-          workerId,
-          workerType,
-          timestamp: Date.now(),
-        });
+      this.eventBus?.emit('worker:error', {
+        message: event.message,
+        filename: event.filename,
+        lineno: event.lineno,
+        colno: event.colno,
+        workerId: worker.name,
+        workerType,
+        timestamp: Date.now(),
+      });
 
-        this.logger.error(
-          `Worker错误 [${workerType}:${workerId}]: ${event.message} 文件:${event.filename}:${event.lineno}:${event.colno}`
+      this.logger.error(
+        `Worker错误 [${workerType}:${worker.name}]: ${event.message} 文件:${event.filename}:${event.lineno}:${event.colno}`
+      );
+
+      // 对受影响的任务进行处理
+      this.handleTasksAffectedByWorkerError(worker.name);
+
+      // 根据错误类型和阈值决定是否重启Worker
+      if (needsRestart) {
+        this.logger.warn(`尝试重启Worker [${workerType}:${worker.name}]`);
+        this.tryRecoverWorker(workerType).catch(e =>
+          this.logger.error(`恢复Worker失败: ${e.message}`)
         );
-
-        // 对受影响的任务进行处理
-        this.handleTasksAffectedByWorkerError(workerId);
-
-        // 根据错误类型和阈值决定是否重启Worker
-        if (needsRestart) {
-          this.logger.warn(`尝试重启Worker [${workerType}:${workerId}]`);
-          this.tryRecoverWorker(workerType).catch(e =>
-            this.logger.error(`恢复Worker失败: ${e.message}`)
-          );
-        }
       }
     }
   }
@@ -852,7 +842,7 @@ export default class WorkerManager {
     // 查找依赖此Worker的所有正在执行的任务
     const affectedTaskIds: string[] = [];
 
-    this.taskCallbacks.forEach((callbackInfo, taskId) => {
+    this.taskQueue.forEach((taskInfo, taskId) => {
       // 通过某种方式检查任务是否由该Worker执行
       // 这里我们添加一个假设的关联逻辑
       // 实际实现中需要跟踪每个任务与Worker的关系
@@ -868,20 +858,20 @@ export default class WorkerManager {
 
       // 为每个受影响的任务安排重试或降级处理
       affectedTaskIds.forEach(taskId => {
-        const callbackInfo = this.taskCallbacks.get(taskId);
-        if (callbackInfo) {
+        const taskInfo = this.taskQueue.get(taskId);
+        if (taskInfo) {
           // 清除任何现有的超时
-          if (callbackInfo.timer) {
-            clearTimeout(callbackInfo.timer);
-            callbackInfo.timer = null;
+          if (taskInfo.timer) {
+            clearTimeout(taskInfo.timer);
+            taskInfo.timer = null;
           }
 
           // 通过主线程执行任务
           // 这里需要有一种方法来获取任务的类型和数据
           // 在实际实现中，你需要保存这些信息
-          this.fallbackToMainThread('calculateChunks', { taskId })
-            .then(result => callbackInfo.resolve(result))
-            .catch(error => callbackInfo.reject(error));
+          this.fallbackToMainThread(taskInfo.taskType, taskInfo.payload)
+            .then(result => taskInfo.resolve(result))
+            .catch(error => taskInfo.reject(error));
         }
       });
     }
@@ -1079,25 +1069,19 @@ export default class WorkerManager {
     // 设置任务超时
     const timer = setTimeout(() => {
       // 检查任务是否仍在处理中
-      if (this.taskCallbacks.has(taskId)) {
+      if (this.taskQueue.has(taskId)) {
         this.logger.warn(`任务 ${taskId} 执行超时`);
 
         // 移除回调
-        this.taskCallbacks.delete(taskId);
+        this.taskQueue.delete(taskId);
 
         // 拒绝Promise
         reject(new Error(`任务执行超时(${timeout}ms)`));
 
         // 记录Worker可能出现问题
-        for (const [key, instance] of this.workers.entries()) {
-          if (instance.worker === worker) {
-            instance.unresponsiveCount = (instance.unresponsiveCount || 0) + 1;
-
-            // 如果Worker多次无响应，尝试重启
-            if (instance.unresponsiveCount > 3) {
-              this.logger.warn(`Worker ${key} 多次无响应，尝试重启`);
-              this.restartWorker(workerType);
-            }
+        for (const worker of this.workers) {
+          if (worker.name === workerType) {
+            worker.name = 'error';
             break;
           }
         }
@@ -1105,10 +1089,10 @@ export default class WorkerManager {
     }, timeout || this.options.workerTaskTimeout);
 
     // 保存任务回调
-    this.taskCallbacks.set(taskId, {
+    this.taskQueue.set(taskId, {
       resolve,
       reject,
-      timer,
+      taskType: type,
     });
 
     // 发送任务到Worker
@@ -1121,7 +1105,7 @@ export default class WorkerManager {
     } catch (error) {
       // 发送失败（可能是传输对象过大或Worker已终止）
       clearTimeout(timer);
-      this.taskCallbacks.delete(taskId);
+      this.taskQueue.delete(taskId);
 
       this.logger.error(
         `向Worker发送任务失败: ${error instanceof Error ? error.message : String(error)}`
@@ -1161,8 +1145,8 @@ export default class WorkerManager {
 
     // 计算当前此类型的Worker数量
     let currentWorkerCount = 0;
-    for (const [key, _instance] of this.workers.entries()) {
-      if (key.startsWith(workerType)) {
+    for (const worker of this.workers) {
+      if (worker.name === workerType) {
         currentWorkerCount++;
       }
     }
@@ -1302,11 +1286,11 @@ export default class WorkerManager {
     this.logger.info(`正在重启 ${type} Worker`);
 
     // 查找所有匹配类型的Worker
-    const workersToRestart: Array<[string, WorkerInstance]> = [];
+    const workersToRestart: Worker[] = [];
 
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${type}:`)) {
-        workersToRestart.push([id, instance]);
+    for (const worker of this.workers) {
+      if (worker.name === type) {
+        workersToRestart.push(worker);
       }
     }
 
@@ -1317,40 +1301,30 @@ export default class WorkerManager {
     let success = true;
 
     // 逐个重启Worker
-    for (const [id, instance] of workersToRestart) {
+    for (const worker of workersToRestart) {
       try {
         // 终止现有Worker
         try {
-          instance.worker.terminate();
+          worker.terminate();
         } catch (e) {
           // 忽略终止错误
-          this.logger.warn(`终止 Worker ${id} 时出错: ${e}`);
+          this.logger.warn(`终止 Worker ${worker.name} 时出错: ${e}`);
         }
 
         // 创建新Worker
-        const worker = await this.createWorker(type);
+        const newWorker = await this.createWorker(type);
 
-        if (worker) {
+        if (newWorker) {
           // 更新Worker实例
-          this.workers.set(id, {
-            worker,
-            status: 'idle',
-            taskCount: 0,
-            totalTaskTime: 0,
-            errorCount: 0,
-            lastResponseTime: Date.now(),
-            creationTime: Date.now(),
-            unresponsiveCount: 0,
-          });
-
-          this.logger.info(`Worker ${id} 已成功重启`);
+          worker.name = 'idle';
+          this.logger.info(`Worker ${worker.name} 已成功重启`);
         } else {
           success = false;
-          this.logger.error(`重启 Worker ${id} 失败`);
+          this.logger.error(`重启 Worker ${worker.name} 失败`);
         }
       } catch (error) {
         success = false;
-        this.logger.error(`重启 Worker ${id} 时出错:`, error);
+        this.logger.error(`重启 Worker ${worker.name} 时出错:`, error);
       }
     }
 
@@ -1439,16 +1413,17 @@ export default class WorkerManager {
    */
   private cancelAllTasks(): void {
     // 拒绝所有任务回调，防止资源泄漏
-    this.taskCallbacks.forEach((callback, taskId) => {
-      if (callback.timer) {
-        clearTimeout(callback.timer);
+    this.taskQueue.forEach((taskInfo, taskId) => {
+      if (taskInfo.timer) {
+        clearTimeout(taskInfo.timer);
       }
 
-      callback.reject(new Error(`任务被取消: ${taskId}`));
+      const error = new Error(`任务被取消: ${taskId}`);
+      taskInfo.reject(error);
     });
 
     // 清空任务回调映射
-    this.taskCallbacks.clear();
+    this.taskQueue.clear();
 
     // 清空等待队列中的所有任务
     this.pendingTasks.forEach((tasks, type) => {
@@ -1468,7 +1443,7 @@ export default class WorkerManager {
    */
   private safeTerminateAllWorkers(): void {
     // 记录要终止的worker数量，用于调试
-    const totalWorkers = this.workers.size;
+    const totalWorkers = this.workers.length;
     let terminatedCount = 0;
 
     this.logger.debug(`开始安全终止 ${totalWorkers} 个Worker实例`);
@@ -1476,14 +1451,12 @@ export default class WorkerManager {
     // 创建一个Promise用于跟踪所有Worker的终止情况
     const terminatePromises: Promise<void>[] = [];
 
-    for (const [id, instance] of this.workers.entries()) {
-      if (!instance.worker) continue;
+    for (const worker of this.workers) {
+      if (!worker) continue;
 
       // 为每个Worker创建一个终止Promise
       const terminatePromise = new Promise<void>(resolve => {
         try {
-          const worker = instance.worker!;
-
           // 创建一个一次性事件处理器来监听终止确认消息
           const messageHandler = (event: MessageEvent) => {
             if (event.data && event.data.action === 'terminateAck') {
@@ -1493,9 +1466,11 @@ export default class WorkerManager {
               try {
                 worker.terminate();
                 terminatedCount++;
-                this.logger.debug(`Worker ${id} 已收到终止确认并安全终止`);
+                this.logger.debug(
+                  `Worker ${worker.name} 已收到终止确认并安全终止`
+                );
               } catch (e) {
-                this.logger.warn(`终止 Worker ${id} 时出错:`, e);
+                this.logger.warn(`终止 Worker ${worker.name} 时出错:`, e);
               }
 
               resolve();
@@ -1516,15 +1491,15 @@ export default class WorkerManager {
             try {
               worker.terminate();
               terminatedCount++;
-              this.logger.debug(`Worker ${id} 超时未确认，已强制终止`);
+              this.logger.debug(`Worker ${worker.name} 超时未确认，已强制终止`);
             } catch (err) {
-              this.logger.error(`无法终止 ${id} worker:`, err);
+              this.logger.error(`无法终止 ${worker.name} worker:`, err);
             }
 
             resolve();
           }, 300); // 给Worker 300ms响应时间
         } catch (err) {
-          this.logger.error(`处理Worker ${id} 终止过程中出错:`, err);
+          this.logger.error(`处理Worker ${worker.name} 终止过程中出错:`, err);
 
           // 确保在出错时也resolve promise
           resolve();
@@ -1539,7 +1514,7 @@ export default class WorkerManager {
       this.logger.info(`Worker终止完成: ${terminatedCount}/${totalWorkers}`);
 
       // 最后清空workers集合
-      this.workers.clear();
+      this.workers.length = 0;
     });
   }
 
@@ -1547,12 +1522,12 @@ export default class WorkerManager {
    * 强制终止所有Worker
    */
   private forceTerminateAllWorkers(): void {
-    for (const [type, instance] of this.workers.entries()) {
-      if (instance.worker) {
+    for (const worker of this.workers) {
+      if (worker) {
         try {
-          instance.worker.terminate();
+          worker.terminate();
         } catch (err) {
-          this.logger.error(`强制终止 ${type} worker 失败:`, err);
+          this.logger.error(`强制终止 ${worker.name} worker 失败:`, err);
         }
       }
     }
@@ -1563,7 +1538,7 @@ export default class WorkerManager {
    */
   private onTerminateComplete(): void {
     // 清理资源
-    this.workers.clear();
+    this.workers.length = 0;
     this.pendingTasks.clear();
     this.activeTaskCount = 0;
     this.isTerminating = false;
@@ -1611,37 +1586,34 @@ export default class WorkerManager {
    */
   private checkWorkersHealth(): void {
     // 遍历所有Worker检查健康状态
-    for (const [id, instance] of this.workers.entries()) {
-      if (instance.worker && instance.status !== 'error') {
+    for (const worker of this.workers) {
+      if (worker.name !== 'error') {
         try {
           // 发送ping检查
-          instance.worker.postMessage({
+          worker.postMessage({
             action: 'ping',
             timestamp: Date.now(),
           });
 
           // 检查是否长时间未响应
           const now = Date.now();
-          if (now - (instance.lastResponseTime || 0) > 10000) {
+          if (
+            now -
+              (worker.name === 'idle'
+                ? 0
+                : worker.name === 'unresponsive'
+                  ? 10000
+                  : 0) >
+            10000
+          ) {
             // 10秒未响应
             // 标记为可能无响应
-            if (instance.status !== 'unresponsive') {
-              instance.unresponsiveCount =
-                (instance.unresponsiveCount || 0) + 1;
-
-              if (instance.unresponsiveCount >= 3) {
-                // 连续3次无响应，尝试重启
-                this.logger.warn(`Worker ${id} 无响应，尝试重启`);
-                const workerType = id.split(':')[0];
-                this.restartWorker(workerType);
-              } else {
-                this.logger.warn(`Worker ${id} 可能无响应，继续监控`);
-                instance.status = 'unresponsive';
-              }
+            if (worker.name !== 'unresponsive') {
+              worker.name = 'unresponsive';
             }
           }
         } catch (err) {
-          this.logger.error(`Worker ${id} 健康检查失败:`, err);
+          this.logger.error(`Worker ${worker.name} 健康检查失败:`, err);
         }
       }
     }
@@ -1664,9 +1636,8 @@ export default class WorkerManager {
       pendingTasksCount[type] = tasks.length;
     }
 
-    for (const [id, _] of this.workers.entries()) {
-      const type = id.split(':')[0];
-      workersCount[type] = (workersCount[type] || 0) + 1;
+    for (const worker of this.workers) {
+      workersCount[worker.name] = (workersCount[worker.name] || 0) + 1;
     }
 
     // 对每种类型的Worker进行池大小调整
@@ -1732,8 +1703,8 @@ export default class WorkerManager {
       try {
         // 获取当前此类型的Worker数量
         let currentCount = 0;
-        for (const id of this.workers.keys()) {
-          if (id.startsWith(`${type}:`)) {
+        for (const worker of this.workers) {
+          if (worker.name === type) {
             currentCount++;
           }
         }
@@ -1741,18 +1712,8 @@ export default class WorkerManager {
         // 创建新Worker
         const worker = await this.createWorker(type);
         if (worker) {
-          const id = `${type}:${currentCount}`;
-          this.workers.set(id, {
-            worker,
-            status: 'idle',
-            taskCount: 0,
-            totalTaskTime: 0,
-            errorCount: 0,
-            lastResponseTime: Date.now(),
-            creationTime: Date.now(),
-          });
-
-          this.logger.info(`Worker ${id} 已创建`);
+          this.workers.push(worker);
+          this.logger.info(`Worker ${worker.name} 已创建`);
         }
       } catch (err) {
         this.logger.error(`扩展 ${type} Worker池失败:`, err);
@@ -1768,42 +1729,41 @@ export default class WorkerManager {
    */
   private shrinkWorkerPool(type: string, count: number): void {
     // 找出空闲Worker
-    const idleWorkers: string[] = [];
+    const idleWorkers: Worker[] = [];
 
-    for (const [id, instance] of this.workers.entries()) {
-      if (id.startsWith(`${type}:`) && instance.status === 'idle') {
-        idleWorkers.push(id);
+    for (const worker of this.workers) {
+      if (worker.name === type) {
+        idleWorkers.push(worker);
       }
     }
 
     // 移除指定数量的空闲Worker
     const toRemove = idleWorkers.slice(0, count);
 
-    for (const id of toRemove) {
-      const instance = this.workers.get(id);
-      if (instance?.worker) {
+    for (const worker of toRemove) {
+      if (worker) {
         try {
           // 安全终止
-          instance.worker.postMessage({ action: 'terminate' });
+          worker.postMessage({ action: 'terminate' });
 
           setTimeout(() => {
             try {
-              instance.worker?.terminate();
+              worker.terminate();
             } catch (e) {
               // 忽略错误
             }
-            this.workers.delete(id);
+            this.workers.splice(this.workers.indexOf(worker), 1);
           }, 200);
         } catch (err) {
-          this.logger.error(`终止 Worker ${id} 失败:`, err);
+          this.logger.error(`终止 Worker ${worker.name} 失败:`, err);
 
           // 直接终止并移除
           try {
-            instance.worker.terminate();
+            worker.terminate();
           } catch (e) {
             // 忽略错误
           }
-          this.workers.delete(id);
+          this.workers.splice(this.workers.indexOf(worker), 1);
         }
       }
     }
@@ -1818,20 +1778,14 @@ export default class WorkerManager {
       workers: {},
     };
 
-    for (const [id, instance] of this.workers.entries()) {
-      // 分割ID获取类型，但目前未使用
-      // const type = id.split(':')[0];
-
-      metrics.workers[id] = {
-        status: instance.status,
-        taskCount: instance.taskCount || 0,
-        avgTaskTime:
-          instance.totalTaskTime && instance.taskCount
-            ? instance.totalTaskTime / instance.taskCount
-            : 0,
-        errorCount: instance.errorCount || 0,
-        memoryUsage: instance.memoryUsage,
-        cpuUsage: instance.cpuUsage,
+    for (const worker of this.workers) {
+      metrics.workers[worker.name] = {
+        status: worker.name,
+        taskCount: 0,
+        avgTaskTime: 0,
+        errorCount: 0,
+        memoryUsage: worker.name,
+        cpuUsage: worker.name,
       };
     }
 
@@ -1854,13 +1808,13 @@ export default class WorkerManager {
     };
 
     // 添加Worker状态
-    for (const [id, instance] of this.workers.entries()) {
-      status.workers[id] = {
-        status: instance.status,
-        taskCount: instance.taskCount || 0,
-        errorCount: instance.errorCount || 0,
-        lastResponseTime: instance.lastResponseTime,
-        unresponsiveCount: instance.unresponsiveCount || 0,
+    for (const worker of this.workers) {
+      status.workers[worker.name] = {
+        status: worker.name,
+        taskCount: 0,
+        errorCount: 0,
+        lastResponseTime: 0,
+        unresponsiveCount: 0,
       };
     }
 
@@ -1920,22 +1874,22 @@ export default class WorkerManager {
       }
 
       // 为此任务注册回调
-      this.taskCallbacks.set(taskId, {
+      this.taskQueue.set(taskId, {
         resolve,
         reject,
-        timer: null,
+        taskType: type,
       });
 
       // 设置任务超时
       const timer = setTimeout(() => {
-        if (this.taskCallbacks.has(taskId)) {
+        if (this.taskQueue.has(taskId)) {
           this.logger.warn(`大数据任务 ${taskId} 执行超时`);
-          this.taskCallbacks.delete(taskId);
+          this.taskQueue.delete(taskId);
           reject(new Error(`任务执行超时(${timeout}ms)`));
         }
       }, timeout || this.options.workerTaskTimeout);
 
-      this.taskCallbacks.get(taskId)!.timer = timer;
+      this.taskQueue.get(taskId)!.timer = timer;
 
       // 发送任务初始化消息
       worker.postMessage({
@@ -1995,10 +1949,10 @@ export default class WorkerManager {
       this.logger.error(`处理大数据任务错误:`, error);
 
       // 清理任务回调
-      if (this.taskCallbacks.has(taskId)) {
-        const callback = this.taskCallbacks.get(taskId)!;
-        if (callback.timer) clearTimeout(callback.timer);
-        this.taskCallbacks.delete(taskId);
+      if (this.taskQueue.has(taskId)) {
+        const taskInfo = this.taskQueue.get(taskId)!;
+        if (taskInfo.timer) clearTimeout(taskInfo.timer);
+        this.taskQueue.delete(taskId);
       }
 
       // 回退到主线程处理

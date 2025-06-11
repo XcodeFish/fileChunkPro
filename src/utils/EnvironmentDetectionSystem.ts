@@ -605,11 +605,10 @@ export class EnvironmentDetectionSystem {
   private isWechatMiniProgram(): boolean {
     if (typeof window !== 'undefined') {
       // 检测是否存在微信小程序环境
-      // @ts-ignore
+
       return (
         typeof wx !== 'undefined' &&
         typeof wx.getSystemInfo === 'function' &&
-        // @ts-ignore
         typeof __wxjs_environment !== 'undefined' &&
         __wxjs_environment === 'miniprogram'
       );
@@ -623,7 +622,6 @@ export class EnvironmentDetectionSystem {
   private isAlipayMiniProgram(): boolean {
     if (typeof window !== 'undefined') {
       // 检测是否存在支付宝小程序环境
-      // @ts-ignore
       return (
         typeof my !== 'undefined' && typeof my.getSystemInfo === 'function'
       );
@@ -637,7 +635,7 @@ export class EnvironmentDetectionSystem {
   private isBytedanceMiniProgram(): boolean {
     if (typeof window !== 'undefined') {
       // 检测是否存在字节跳动小程序环境
-      // @ts-ignore
+
       return (
         typeof tt !== 'undefined' && typeof tt.getSystemInfo === 'function'
       );
@@ -651,7 +649,7 @@ export class EnvironmentDetectionSystem {
   private isBaiduMiniProgram(): boolean {
     if (typeof window !== 'undefined') {
       // 检测是否存在百度小程序环境
-      // @ts-ignore
+
       return (
         typeof swan !== 'undefined' && typeof swan.getSystemInfo === 'function'
       );
@@ -665,7 +663,7 @@ export class EnvironmentDetectionSystem {
   private isQQMiniProgram(): boolean {
     if (typeof window !== 'undefined') {
       // 检测是否存在QQ小程序环境
-      // @ts-ignore
+
       return (
         typeof qq !== 'undefined' && typeof qq.getSystemInfo === 'function'
       );

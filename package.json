@@ -1,197 +1,159 @@
 {
-  "name": "file-chunk-pro",
+  "name": "filechunkpro",
   "version": "1.0.0",
-  "description": "高性能大文件上传工具，支持多环境",
-  "main": "dist/browser/fileChunkPro.cjs.js",
-  "module": "dist/browser/fileChunkPro.esm.js",
-  "browser": "dist/browser/fileChunkPro.umd.js",
-  "types": "types/index.d.ts",
-  "sideEffects": false,
+  "description": "高性能、跨环境文件分片上传解决方案",
+  "author": "FileChunkPro开发团队",
+  "license": "MIT",
+  "engines": {
+    "node": ">=14.0.0"
+  },
+  "type": "module",
+  "main": "./dist/browser/index.cjs",
+  "module": "./dist/browser/index.js",
+  "types": "./dist/types/index.d.ts",
+  "unpkg": "./dist/browser/filechunkpro.min.js",
+  "jsdelivr": "./dist/browser/filechunkpro.min.js",
   "exports": {
     ".": {
-      "import": "./dist/browser/fileChunkPro.esm.js",
-      "require": "./dist/browser/fileChunkPro.cjs.js",
-      "browser": "./dist/browser/fileChunkPro.umd.js",
-      "types": "./types/index.d.ts"
+      "types": "./dist/types/index.d.ts",
+      "import": "./dist/browser/index.js",
+      "require": "./dist/browser/index.cjs",
+      "default": "./dist/browser/index.js"
     },
-    "./miniprogram/wechat": {
-      "require": "./dist/miniprogram/wechat/index.js",
-      "types": "./types/index.d.ts"
+    "./browser": {
+      "types": "./dist/types/browser.d.ts",
+      "import": "./dist/browser/index.js",
+      "require": "./dist/browser/index.cjs",
+      "default": "./dist/browser/index.js"
     },
-    "./miniprogram/alipay": {
-      "require": "./dist/miniprogram/alipay/index.js",
-      "types": "./types/index.d.ts"
-    },
-    "./miniprogram/bytedance": {
-      "require": "./dist/miniprogram/bytedance/index.js",
-      "types": "./types/index.d.ts"
-    },
-    "./miniprogram/baidu": {
-      "require": "./dist/miniprogram/baidu/index.js",
-      "types": "./types/index.d.ts"
+    "./miniprogram": {
+      "types": "./dist/types/miniprogram.d.ts",
+      "import": "./dist/miniprogram/index.js",
+      "require": "./dist/miniprogram/index.cjs",
+      "default": "./dist/miniprogram/index.js"
     },
     "./taro": {
-      "require": "./dist/taro/index.js",
-      "import": "./dist/taro/index.mjs",
-      "types": "./types/index.d.ts"
+      "types": "./dist/types/taro.d.ts",
+      "import": "./dist/taro/index.js",
+      "require": "./dist/taro/index.cjs",
+      "default": "./dist/taro/index.js"
     },
     "./uni-app": {
-      "require": "./dist/uni-app/index.js",
-      "import": "./dist/uni-app/index.mjs",
-      "types": "./types/index.d.ts"
+      "types": "./dist/types/uni-app.d.ts",
+      "import": "./dist/uni-app/index.js",
+      "require": "./dist/uni-app/index.cjs",
+      "default": "./dist/uni-app/index.js"
     },
-    "./ui/react": {
-      "import": "./dist/browser/ui/react/index.js",
-      "require": "./dist/browser/ui/react/index.cjs",
-      "types": "./types/ui/react.d.ts"
+    "./plugins/*": {
+      "types": "./dist/types/plugins/*.d.ts",
+      "import": "./dist/plugins/*/index.js",
+      "require": "./dist/plugins/*/index.cjs",
+      "default": "./dist/plugins/*/index.js"
     },
-    "./ui/vue": {
-      "import": "./dist/browser/ui/vue/index.js",
-      "require": "./dist/browser/ui/vue/index.cjs",
-      "types": "./types/ui/vue.d.ts"
+    "./adapters/*": {
+      "types": "./dist/types/adapters/*.d.ts",
+      "import": "./dist/adapters/*/index.js",
+      "require": "./dist/adapters/*/index.cjs",
+      "default": "./dist/adapters/*/index.js"
     },
     "./package.json": "./package.json"
   },
+  "sideEffects": false,
   "files": [
     "dist",
-    "types",
-    "workers",
     "LICENSE",
-    "README.md"
+    "README.md",
+    "CHANGELOG.md"
   ],
-  "scripts": {
-    "clean": "node build/build.js clean",
-    "type-check": "tsc --noEmit",
-    "type-declarations": "tsc --emitDeclarationOnly --outDir types",
-    "lint": "eslint . --ext .js,.ts,.tsx --fix",
-    "prettier": "prettier --write \"**/*.{js,ts,tsx,json,md}\"",
-    "build": "pnpm run clean && pnpm run type-check && node build/build.js all && pnpm run build:sw",
-    "build:browser": "cross-env NODE_ENV=production node build/build.js browser",
-    "build:miniprogram": "cross-env NODE_ENV=production node build/build.js miniprogram",
-    "build:taro": "cross-env NODE_ENV=production node build/build.js taro",
-    "build:uniapp": "cross-env NODE_ENV=production node build/build.js uniapp",
-    "build:workers": "cross-env NODE_ENV=production node build/build.js workers",
-    "build:sw": "node scripts/build-sw.js",
-    "build:dev": "cross-env NODE_ENV=development node build/build.js all",
-    "build:prod": "cross-env NODE_ENV=production node build/build.js all",
-    "build:examples": "rollup -c build/example.config.js",
-    "build:resume-example": "cross-env NODE_ENV=development rollup -c build/example.config.js",
-    "dev:resume-example": "cross-env NODE_ENV=development rollup -c build/example.config.js -w",
-    "analyze": "cross-env NODE_ENV=production node build/build.js all && size-limit --why",
-    "test": "vitest run",
-    "test:unit": "vitest run tests/unit",
-    "test:plugins": "vitest run tests/unit/plugins",
-    "test:security": "vitest run tests/unit/plugins/SecurityPlugin.test.ts",
-    "test:integration": "vitest run tests/integration",
-    "test:performance": "vitest run tests/performance",
-    "test:watch": "vitest",
-    "test:coverage": "vitest run --coverage",
-    "test:all": "bash tests/run-tests.sh",
-    "quality": "node scripts/quality-check.js --check-all",
-    "quality:unused": "node scripts/quality-check.js --check-unused",
-    "quality:duplicated": "node scripts/quality-check.js --check-duplicated",
-    "quality:size": "node scripts/quality-check.js --check-size",
-    "quality:fix": "node scripts/quality-check.js --check-all --fix",
-    "ci": "pnpm run lint && pnpm run type-check && pnpm run test && pnpm run quality",
-    "size": "size-limit",
-    "prepare": "husky install",
-    "release": "bumpp && pnpm build:prod && pnpm publish",
-    "build:wasm": "node scripts/copy-wasm-files.js",
-    "build:wasm:dev": "node scripts/copy-wasm-files.js",
-    "build:wasm:prod": "cd src/workers/wasm && bash build-all.sh"
-  },
-  "size-limit": [
-    {
-      "path": "dist/browser/fileChunkPro.esm.js",
-      "limit": "12 KB"
-    },
-    {
-      "path": "dist/browser/fileChunkPro.umd.js",
-      "limit": "15 KB"
-    }
-  ],
-  "peerDependencies": {
-    "react": ">=16.8.0",
-    "vue": ">=3.0.0"
-  },
-  "peerDependenciesMeta": {
-    "react": {
-      "optional": true
-    },
-    "vue": {
-      "optional": true
-    }
-  },
-  "devDependencies": {
-    "@commitlint/cli": "^17.6.6",
-    "@commitlint/config-conventional": "^17.6.6",
-    "@rollup/plugin-alias": "^5.0.0",
-    "@rollup/plugin-commonjs": "^25.0.3",
-    "@rollup/plugin-node-resolve": "^15.1.0",
-    "@rollup/plugin-replace": "^5.0.2",
-    "@rollup/plugin-terser": "^0.4.3",
-    "@rollup/plugin-typescript": "^11.1.2",
-    "@size-limit/preset-small-lib": "^8.2.6",
-    "@types/node": "^20.19.0",
-    "@types/react": "^18.2.15",
-    "@typescript-eslint/eslint-plugin": "^5.62.0",
-    "@typescript-eslint/parser": "^5.62.0",
-    "@vitest/coverage-c8": "^0.33.0",
-    "@vitest/coverage-v8": "^3.2.3",
-    "@vue/compiler-sfc": "^3.5.16",
-    "bumpp": "^9.1.1",
-    "chalk": "^4.1.2",
-    "cross-env": "^7.0.3",
-    "esbuild": "^0.18.11",
-    "eslint": "^8.44.0",
-    "eslint-config-prettier": "^8.8.0",
-    "eslint-plugin-import": "^2.27.5",
-    "eslint-plugin-react": "^7.32.2",
-    "eslint-plugin-react-hooks": "^4.6.0",
-    "husky": "^8.0.3",
-    "jsdom": "^26.1.0",
-    "lint-staged": "^13.2.3",
-    "prettier": "^3.0.0",
-    "react": "^18.2.0",
-    "rimraf": "^5.0.1",
-    "rollup": "^3.26.2",
-    "rollup-plugin-dts": "^5.3.0",
-    "rollup-plugin-esbuild": "^5.0.0",
-    "rollup-plugin-visualizer": "^5.9.2",
-    "rollup-plugin-vue": "^6.0.0",
-    "size-limit": "^8.2.6",
-    "tslib": "^2.6.0",
-    "typescript": "^5.8.3",
-    "vitest": "^0.33.0",
-    "vue": "^3.3.4"
-  },
-  "dependencies": {
-    "tslib": "^2.6.0"
-  },
-  "lint-staged": {
-    "*.{js,jsx,ts,tsx}": [
-      "eslint --fix",
-      "prettier --write"
-    ],
-    "*.{json,md,yml}": [
-      "prettier --write"
-    ]
-  },
-  "author": "codefish",
-  "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-organization/fileChunkPro.git"
+    "url": "https://github.com/organization/filechunkpro"
   },
   "keywords": [
     "file",
     "upload",
     "chunk",
-    "browser",
+    "resumable",
+    "cross-platform",
     "miniprogram",
     "taro",
-    "uni-app",
-    "wechat",
-    "alipay"
-  ]
+    "uni-app"
+  ],
+  "scripts": {
+    "dev": "pnpm run clean && cross-env NODE_ENV=development rollup -c -w",
+    "build": "pnpm run clean && pnpm run build:all",
+    "build:all": "pnpm run build:types && pnpm run build:browser && pnpm run build:miniprogram && pnpm run build:taro && pnpm run build:uniapp",
+    "build:types": "tsc --emitDeclarationOnly --outDir dist/types",
+    "build:browser": "cross-env BUILD_TARGET=browser rollup -c",
+    "build:miniprogram": "cross-env BUILD_TARGET=miniprogram rollup -c",
+    "build:taro": "cross-env BUILD_TARGET=taro rollup -c",
+    "build:uniapp": "cross-env BUILD_TARGET=uni-app rollup -c",
+    "clean": "rimraf dist",
+    "lint": "eslint . --ext .ts,.tsx",
+    "lint:fix": "eslint . --ext .ts,.tsx --fix",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "docs": "typedoc",
+    "prepare": "husky install",
+    "prepublishOnly": "pnpm run lint && pnpm run test && pnpm run build",
+    "release": "standard-version"
+  },
+  "devDependencies": {
+    "@babel/core": "^7.20.12",
+    "@babel/preset-env": "^7.20.2",
+    "@babel/preset-typescript": "^7.18.6",
+    "@commitlint/cli": "^17.4.2",
+    "@commitlint/config-conventional": "^17.4.2",
+    "@rollup/plugin-babel": "^6.0.3",
+    "@rollup/plugin-commonjs": "^24.0.1",
+    "@rollup/plugin-json": "^6.0.0",
+    "@rollup/plugin-node-resolve": "^15.0.1",
+    "@rollup/plugin-replace": "^5.0.2",
+    "@rollup/plugin-terser": "^0.4.0",
+    "@rollup/plugin-typescript": "^11.0.0",
+    "@types/node": "^18.11.18",
+    "@types/uuid": "^9.0.0",
+    "@typescript-eslint/eslint-plugin": "^5.50.0",
+    "@typescript-eslint/parser": "^5.50.0",
+    "cross-env": "^7.0.3",
+    "css-minimizer-webpack-plugin": "^4.2.2",
+    "eslint": "^8.33.0",
+    "eslint-config-prettier": "^8.6.0",
+    "eslint-plugin-prettier": "^4.2.1",
+    "html-minimizer-webpack-plugin": "^4.3.0",
+    "husky": "^8.0.3",
+    "lint-staged": "^13.1.0",
+    "prettier": "^2.8.3",
+    "rimraf": "^4.1.2",
+    "rollup": "^3.12.1",
+    "rollup-plugin-dts": "^5.1.1",
+    "rollup-plugin-peer-deps-external": "^2.2.4",
+    "rollup-plugin-polyfill-node": "^0.12.0",
+    "standard-version": "^9.5.0",
+    "terser-webpack-plugin": "^5.3.7",
+    "tslib": "^2.5.0",
+    "typedoc": "^0.23.24",
+    "typescript": "^4.9.5",
+    "vitest": "^0.28.3",
+    "webpack": "^5.75.0",
+    "webpack-cli": "^5.0.1",
+    "webpack-dev-server": "^4.11.1",
+    "webpack-merge": "^5.8.0"
+  },
+  "dependencies": {
+    "eventemitter3": "^5.0.0",
+    "uuid": "^9.0.0"
+  },
+  "browserslist": [
+    "last 2 versions",
+    "not dead",
+    "not IE 11"
+  ],
+  "lint-staged": {
+    "*.{ts,tsx}": [
+      "eslint --fix",
+      "prettier --write"
+    ]
+  }
 }

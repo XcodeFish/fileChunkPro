@@ -45,6 +45,29 @@ export * from './environment';
 // 导出错误相关类型
 export * from './errors';
 
+// 导出所有共享类型
+
+// 核心类型
+export * from './core';
+
+// 适配器类型
+export * from './adapters';
+
+// 插件类型
+export * from './plugins';
+
+// Worker类型
+export * from './worker';
+
+// 事件类型
+export * from './events';
+
+// 配置类型
+export * from './config';
+
+// 通用类型
+export * from './common';
+
 /**
  * 文件信息
  */
