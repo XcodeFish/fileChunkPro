@@ -12,11 +12,15 @@ import {
   HookType,
   HookHandler,
   HookResult,
+  SecurityLevel,
 } from '../types/plugin';
 import { EventBus } from './EventBus';
 import DependencyContainer from './DependencyContainer';
 import { UploadError, ErrorCenter } from './ErrorCenter';
 import { UploadErrorType } from '../types';
+import SecurityPluginManager, {
+  SecurityPluginManagerOptions,
+} from '../plugins/security/SecurityPluginManager';
 
 /**
  * 插件管理器类
@@ -63,6 +67,11 @@ export class PluginManager {
    * 插件接口类型映射
    */
   private interfaceMap: Map<string, keyof PluginInterfaceMap> = new Map();
+
+  /**
+   * 安全插件管理器
+   */
+  private _securityManager?: SecurityPluginManager;
 
   /**
    * 创建插件管理器
@@ -676,6 +685,87 @@ export class PluginManager {
 
     // 发出清除事件
     this.eventBus.emit('plugin:allCleared', {});
+  }
+
+  /**
+   * 初始化安全插件管理器
+   * @param options 安全插件管理器选项
+   */
+  public initSecurityManager(options: SecurityPluginManagerOptions = {}): void {
+    // 如果已经存在安全插件管理器，先卸载
+    if (this._securityManager) {
+      this._securityManager.uninstall();
+    }
+
+    // 创建并安装新的安全插件管理器
+    this._securityManager = new SecurityPluginManager(options);
+    this._securityManager.install(this.uploader);
+  }
+
+  /**
+   * 根据安全级别加载安全插件
+   * @param securityLevel 安全级别
+   * @param options 安全插件选项
+   * @deprecated 使用initSecurityManager代替
+   */
+  public loadSecurityPluginByLevel(
+    securityLevel: SecurityLevel,
+    options: any = {}
+  ): void {
+    console.warn(
+      'loadSecurityPluginByLevel方法已弃用，请使用initSecurityManager代替'
+    );
+
+    this.initSecurityManager({
+      initialSecurityLevel: securityLevel,
+      basicOptions: options,
+      standardOptions: options,
+      advancedOptions: options,
+    });
+  }
+
+  /**
+   * 获取安全插件管理器
+   * @returns 安全插件管理器实例
+   */
+  public getSecurityManager(): SecurityPluginManager | undefined {
+    return this._securityManager;
+  }
+
+  /**
+   * 升级安全级别
+   * @param targetLevel 目标安全级别
+   * @returns 是否升级成功
+   */
+  public upgradeSecurityLevel(targetLevel: SecurityLevel): boolean {
+    if (!this._securityManager) {
+      console.error('安全插件管理器未初始化，无法升级安全级别');
+      return false;
+    }
+
+    return this._securityManager.upgradeSecurityLevel(targetLevel);
+  }
+
+  /**
+   * 降级安全级别
+   * @param targetLevel 目标安全级别
+   * @returns 是否降级成功
+   */
+  public downgradeSecurityLevel(targetLevel: SecurityLevel): boolean {
+    if (!this._securityManager) {
+      console.error('安全插件管理器未初始化，无法降级安全级别');
+      return false;
+    }
+
+    return this._securityManager.downgradeSecurityLevel(targetLevel);
+  }
+
+  /**
+   * 获取当前安全级别
+   * @returns 当前安全级别
+   */
+  public getCurrentSecurityLevel(): SecurityLevel | undefined {
+    return this._securityManager?.getCurrentSecurityLevel();
   }
 }
 
