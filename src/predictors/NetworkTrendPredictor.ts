@@ -12,6 +12,11 @@ import { Logger } from '../utils/Logger';
 import { NetworkQuality } from '../types/network';
 import { ConnectionEvent } from '../analyzers/NetworkStabilityAnalyzer';
 import { SpeedSample } from '../monitors/NetworkSpeedMonitor';
+import TimeSeriesPredictor, {
+  DataPoint,
+  PredictionOptions,
+  PredictionResult,
+} from './TimeSeriesPredictor';
 
 export interface NetworkPrediction {
   expectedQuality: NetworkQuality; // 预期网络质量
@@ -20,6 +25,13 @@ export interface NetworkPrediction {
   expectedSpeed: number; // 预期速度(KB/s)
   predictionTimestamp: number; // 预测生成时间
   forTimePeriod: number; // 预测有效时间(ms)
+  predictionMethod?: string; // 使用的预测方法
+  seasonalityDetected?: boolean; // 是否检测到季节性
+  confidenceInterval?: {
+    // 置信区间
+    latency: { low: number; high: number };
+    speed: { low: number; high: number };
+  };
 }
 
 export interface PeriodicalPattern {
@@ -50,8 +62,12 @@ export class NetworkTrendPredictor {
   // 最大历史记录数
   private readonly MAX_HISTORY = 200;
 
+  // 时间序列预测器
+  private timeSeriesPredictor: TimeSeriesPredictor;
+
   constructor() {
     this.logger = new Logger('NetworkTrendPredictor');
+    this.timeSeriesPredictor = new TimeSeriesPredictor();
   }
 
   /**
@@ -118,7 +134,7 @@ export class NetworkTrendPredictor {
       };
     }
 
-    // 检测周期性
+    // 使用高级时间序列分析检测周期性
     const periodicalPattern = this.detectPeriodicalPattern();
 
     // 如果存在强烈的周期性，使用周期预测
@@ -129,50 +145,353 @@ export class NetworkTrendPredictor {
       );
     }
 
-    // 检测趋势
-    const trend = this.detectTrend();
+    // 使用增强的时间序列预测
+    return this.predictUsingTimeSeries(predictionPeriodMs);
+  }
 
-    // 获取当前质量
-    const currentQuality = this.getCurrentQuality();
+  /**
+   * 使用高级时间序列分析进行网络预测
+   * @param predictionPeriodMs 预测时间长度(ms)
+   * @returns 网络预测结果
+   */
+  private predictUsingTimeSeries(
+    predictionPeriodMs: number
+  ): NetworkPrediction {
+    // 准备网络质量数据点
+    // 注意：NetworkQuality是枚举，为了数值分析，我们需要将其转换为数值
+    const qualityDataPoints: DataPoint[] = this.qualityHistory.map(item => ({
+      value: this.qualityToNumber(item.quality),
+      timestamp: item.timestamp,
+    }));
 
-    // 根据趋势预测质量
-    let expectedQuality = currentQuality;
-    let confidenceLevel = 0.6;
+    // 准备延迟数据点
+    const latencyDataPoints: DataPoint[] = this.speedHistory
+      .filter(sample => sample.latency !== undefined)
+      .map(sample => ({
+        value: sample.latency || 0,
+        timestamp: sample.timestamp,
+      }));
 
-    if (trend === 'improving' && currentQuality > NetworkQuality.EXCELLENT) {
-      expectedQuality = currentQuality - 1;
-      confidenceLevel = 0.65;
-    } else if (
-      trend === 'degrading' &&
-      currentQuality < NetworkQuality.UNUSABLE
-    ) {
-      expectedQuality = currentQuality + 1;
-      confidenceLevel = 0.65;
-    } else if (trend === 'stable') {
-      confidenceLevel = 0.8;
-    }
+    // 准备下载速度数据点
+    const speedDataPoints: DataPoint[] = this.speedHistory
+      .filter(sample => sample.direction === 'download')
+      .map(sample => ({
+        value: sample.speed,
+        timestamp: sample.timestamp,
+      }));
+
+    // 计算预测点数量
+    const avgTimeDiff = this.getAverageTimeDiff();
+    const predictionPoints = Math.max(
+      1,
+      Math.ceil(predictionPeriodMs / avgTimeDiff)
+    );
+
+    // 预测网络质量
+    const qualityPrediction = this.predictTimeSeriesValue(
+      qualityDataPoints,
+      predictionPoints,
+      true // 检查季节性
+    );
+
+    // 预测延迟
+    const latencyPrediction = this.predictTimeSeriesValue(
+      latencyDataPoints,
+      predictionPoints
+    );
+
+    // 预测速度
+    const speedPrediction = this.predictTimeSeriesValue(
+      speedDataPoints,
+      predictionPoints
+    );
+
+    // 取预测点中的第一个作为主要预测结果
+    const predictedQualityValue =
+      qualityPrediction.predictions[0]?.value ||
+      this.qualityToNumber(this.getCurrentQuality());
+
+    // 将数值转换回网络质量枚举
+    const expectedQuality = this.numberToQuality(predictedQualityValue);
+
+    // 获取预测的延迟和速度
+    const expectedLatency =
+      latencyPrediction.predictions[0]?.value || this.predictLatency();
+    const expectedSpeed =
+      speedPrediction.predictions[0]?.value || this.predictSpeed();
+
+    // 计算综合置信度
+    // 我们可以基于预测方法和准确性来估计置信度
+    const qualityConfidence =
+      this.calculateConfidenceFromPrediction(qualityPrediction);
+    const latencyConfidence =
+      this.calculateConfidenceFromPrediction(latencyPrediction);
+    const speedConfidence =
+      this.calculateConfidenceFromPrediction(speedPrediction);
+
+    // 计算整体置信度（三种预测的加权平均）
+    const confidenceLevel =
+      qualityConfidence * 0.5 +
+      latencyConfidence * 0.25 +
+      speedConfidence * 0.25;
 
     // 创建预测结果
     const prediction: NetworkPrediction = {
       expectedQuality,
       confidenceLevel,
-      expectedLatency: this.predictLatency(),
-      expectedSpeed: this.predictSpeed(),
+      expectedLatency,
+      expectedSpeed,
       predictionTimestamp: Date.now(),
       forTimePeriod: predictionPeriodMs,
+      predictionMethod: qualityPrediction.method,
+      seasonalityDetected:
+        qualityPrediction.seasonalityDetected ||
+        latencyPrediction.seasonalityDetected ||
+        speedPrediction.seasonalityDetected,
+      confidenceInterval: {
+        latency: {
+          low:
+            latencyPrediction.predictions[0]?.confidenceLow ||
+            expectedLatency * 0.8,
+          high:
+            latencyPrediction.predictions[0]?.confidenceHigh ||
+            expectedLatency * 1.2,
+        },
+        speed: {
+          low:
+            speedPrediction.predictions[0]?.confidenceLow ||
+            expectedSpeed * 0.8,
+          high:
+            speedPrediction.predictions[0]?.confidenceHigh ||
+            expectedSpeed * 1.2,
+        },
+      },
     };
 
     this.lastPrediction = prediction;
 
-    this.logger.debug('网络趋势预测', {
-      trend,
+    this.logger.debug('高级网络趋势预测', {
       expectedQuality,
       confidenceLevel,
       expectedLatency: Math.round(prediction.expectedLatency) + 'ms',
       expectedSpeed: Math.round(prediction.expectedSpeed) + 'KB/s',
+      method: prediction.predictionMethod,
+      seasonality: prediction.seasonalityDetected,
     });
 
     return prediction;
+  }
+
+  /**
+   * 预测时间序列数据
+   */
+  private predictTimeSeriesValue(
+    dataPoints: DataPoint[],
+    horizon: number,
+    detectSeasonality = false
+  ): PredictionResult {
+    if (dataPoints.length < 3) {
+      // 数据不足，返回空预测结果
+      return {
+        predictions: [],
+        method: 'insufficient_data',
+        accuracy: {},
+        seasonalityDetected: false,
+      };
+    }
+
+    // 设置预测选项
+    const options: PredictionOptions = {
+      method: 'auto', // 自动选择最佳方法
+      horizon,
+      confidenceInterval: true,
+    };
+
+    // 如果要检测季节性，添加季节性选项
+    if (detectSeasonality) {
+      // 检查常见周期（小时、半天、天、周）
+      const potentialPeriods = [24, 12, 7, 31]; // 小时为单位的常见周期
+
+      // 找出最匹配的周期
+      let bestPeriod = 0;
+      let bestAutocorrelation = 0;
+
+      for (const period of potentialPeriods) {
+        // 转换数据点为纯数值数组
+        const values = dataPoints.map(p => p.value);
+        const autocorrelation = this.calculateAutocorrelation(values, period);
+
+        if (autocorrelation > 0.4 && autocorrelation > bestAutocorrelation) {
+          bestAutocorrelation = autocorrelation;
+          bestPeriod = period;
+        }
+      }
+
+      // 如果检测到明显周期，设置季节性参数
+      if (bestPeriod > 0) {
+        options.seasonalPeriod = bestPeriod;
+      }
+    }
+
+    // 执行时间序列预测
+    return this.timeSeriesPredictor.predict(dataPoints, options);
+  }
+
+  /**
+   * 计算自相关系数
+   */
+  private calculateAutocorrelation(values: number[], lag: number): number {
+    if (values.length <= lag) return 0;
+
+    // 计算均值
+    let sum = 0;
+    for (const val of values) {
+      sum += val;
+    }
+    const mean = sum / values.length;
+
+    // 计算分母（方差）
+    let denominator = 0;
+    for (const val of values) {
+      denominator += Math.pow(val - mean, 2);
+    }
+
+    if (denominator === 0) return 0;
+
+    // 计算自相关
+    let numerator = 0;
+    for (let i = 0; i < values.length - lag; i++) {
+      numerator += (values[i] - mean) * (values[i + lag] - mean);
+    }
+
+    return numerator / denominator;
+  }
+
+  /**
+   * 基于预测结果计算置信度
+   */
+  private calculateConfidenceFromPrediction(
+    prediction: PredictionResult
+  ): number {
+    // 如果无法进行预测，返回低置信度
+    if (prediction.predictions.length === 0) return 0.5;
+
+    // 基于预测方法调整基础置信度
+    let baseConfidence = 0;
+    switch (prediction.method) {
+      case 'exponential_smoothing':
+        baseConfidence = 0.8;
+        break;
+      case 'moving_average':
+        baseConfidence = 0.7;
+        break;
+      case 'arima_simplified':
+        baseConfidence = 0.75;
+        break;
+      default:
+        baseConfidence = 0.6;
+    }
+
+    // 如果检测到季节性，略微提高置信度
+    if (prediction.seasonalityDetected) {
+      baseConfidence += 0.05;
+    }
+
+    // 如果有误差指标，基于误差调整置信度
+    if (prediction.accuracy.mape !== undefined) {
+      // 较低的MAPE表示更高的准确性
+      const mapeAdjustment = Math.max(
+        0,
+        Math.min(0.2, 0.2 - prediction.accuracy.mape / 100)
+      );
+      baseConfidence += mapeAdjustment;
+    }
+
+    // 确保置信度在有效范围内
+    return Math.max(0.1, Math.min(0.95, baseConfidence));
+  }
+
+  /**
+   * 获取数据点的平均时间间隔
+   */
+  private getAverageTimeDiff(): number {
+    // 首选使用网络质量历史数据计算时间间隔
+    if (this.qualityHistory.length > 1) {
+      let totalDiff = 0;
+      for (let i = 1; i < this.qualityHistory.length; i++) {
+        totalDiff +=
+          this.qualityHistory[i].timestamp -
+          this.qualityHistory[i - 1].timestamp;
+      }
+      return totalDiff / (this.qualityHistory.length - 1);
+    }
+
+    // 如果质量历史不足，使用速度样本
+    if (this.speedHistory.length > 1) {
+      let totalDiff = 0;
+      const sortedSamples = [...this.speedHistory].sort(
+        (a, b) => a.timestamp - b.timestamp
+      );
+      for (let i = 1; i < sortedSamples.length; i++) {
+        totalDiff +=
+          sortedSamples[i].timestamp - sortedSamples[i - 1].timestamp;
+      }
+      return totalDiff / (sortedSamples.length - 1);
+    }
+
+    // 默认值：1分钟
+    return 60 * 1000;
+  }
+
+  /**
+   * 将网络质量枚举转换为数值
+   * 较小的值表示更好的质量
+   */
+  private qualityToNumber(quality: NetworkQuality): number {
+    switch (quality) {
+      case NetworkQuality.EXCELLENT:
+        return 1;
+      case NetworkQuality.GOOD:
+        return 2;
+      case NetworkQuality.FAIR:
+        return 3;
+      case NetworkQuality.POOR:
+        return 4;
+      case NetworkQuality.VERY_POOR:
+        return 5;
+      case NetworkQuality.UNUSABLE:
+        return 6;
+      default:
+        return 3; // 默认为FAIR
+    }
+  }
+
+  /**
+   * 将数值转换回网络质量枚举
+   */
+  private numberToQuality(value: number): NetworkQuality {
+    // 四舍五入到最接近的整数
+    const rounded = Math.round(value);
+
+    switch (rounded) {
+      case 1:
+        return NetworkQuality.EXCELLENT;
+      case 2:
+        return NetworkQuality.GOOD;
+      case 3:
+        return NetworkQuality.FAIR;
+      case 4:
+        return NetworkQuality.POOR;
+      case 5:
+        return NetworkQuality.VERY_POOR;
+      case 6:
+        return NetworkQuality.UNUSABLE;
+      default:
+        // 对于范围外的值，限制在有效范围内
+        if (rounded < 1) return NetworkQuality.EXCELLENT;
+        if (rounded > 6) return NetworkQuality.UNUSABLE;
+        return NetworkQuality.FAIR;
+    }
   }
 
   /**
@@ -186,7 +505,7 @@ export class NetworkTrendPredictor {
     predictionPeriodMs: number
   ): NetworkPrediction {
     if (!pattern.intervalMs) {
-      return this.predictNetworkQualityByTrend(predictionPeriodMs);
+      return this.predictUsingTimeSeries(predictionPeriodMs);
     }
 
     // 找到最匹配的历史周期
@@ -212,55 +531,73 @@ export class NetworkTrendPredictor {
       return {
         expectedQuality: similarTimePoints[0].quality,
         confidenceLevel: Math.min(0.9, pattern.confidence + 0.1),
-        expectedLatency: this.predictLatency(),
-        expectedSpeed: this.predictSpeed(),
+        expectedLatency: this.predictLatencyWithTimeSeries(),
+        expectedSpeed: this.predictSpeedWithTimeSeries(),
         predictionTimestamp: now,
         forTimePeriod: predictionPeriodMs,
+        seasonalityDetected: true,
+        predictionMethod: `cyclical_pattern_${pattern.patternType || 'custom'}`,
       };
     } else {
-      // 回退到趋势预测
-      return this.predictNetworkQualityByTrend(predictionPeriodMs);
+      // 回退到时间序列预测
+      return this.predictUsingTimeSeries(predictionPeriodMs);
     }
   }
 
   /**
-   * 根据趋势预测网络质量
+   * 预测延迟（使用时间序列分析）
+   * @returns 预测的延迟(ms)
    */
-  private predictNetworkQualityByTrend(
-    predictionPeriodMs: number
-  ): NetworkPrediction {
-    // 检测趋势
-    const trend = this.detectTrend();
+  private predictLatencyWithTimeSeries(): number {
+    // 提取延迟数据
+    const latencyDataPoints: DataPoint[] = this.speedHistory
+      .filter(sample => sample.latency !== undefined)
+      .map(sample => ({
+        value: sample.latency || 0,
+        timestamp: sample.timestamp,
+      }));
 
-    // 获取当前质量
-    const currentQuality = this.getCurrentQuality();
-
-    // 根据趋势预测质量
-    let expectedQuality = currentQuality;
-    let confidenceLevel = 0.6;
-
-    if (trend === 'improving' && currentQuality > NetworkQuality.EXCELLENT) {
-      expectedQuality = currentQuality - 1;
-      confidenceLevel = 0.65;
-    } else if (
-      trend === 'degrading' &&
-      currentQuality < NetworkQuality.UNUSABLE
-    ) {
-      expectedQuality = currentQuality + 1;
-      confidenceLevel = 0.65;
-    } else if (trend === 'stable') {
-      confidenceLevel = 0.8;
+    if (latencyDataPoints.length < 3) {
+      // 数据不足，回退到简单预测
+      return this.predictLatency();
     }
 
-    // 创建预测结果
-    return {
-      expectedQuality,
-      confidenceLevel,
-      expectedLatency: this.predictLatency(),
-      expectedSpeed: this.predictSpeed(),
-      predictionTimestamp: Date.now(),
-      forTimePeriod: predictionPeriodMs,
-    };
+    // 使用时间序列预测
+    const prediction = this.predictTimeSeriesValue(latencyDataPoints, 1);
+
+    if (prediction.predictions.length > 0) {
+      return prediction.predictions[0].value;
+    } else {
+      return this.predictLatency(); // 回退到简单预测
+    }
+  }
+
+  /**
+   * 预测速度（使用时间序列分析）
+   * @returns 预测的速度(KB/s)
+   */
+  private predictSpeedWithTimeSeries(): number {
+    // 提取下载速度数据
+    const speedDataPoints: DataPoint[] = this.speedHistory
+      .filter(sample => sample.direction === 'download')
+      .map(sample => ({
+        value: sample.speed,
+        timestamp: sample.timestamp,
+      }));
+
+    if (speedDataPoints.length < 3) {
+      // 数据不足，回退到简单预测
+      return this.predictSpeed();
+    }
+
+    // 使用时间序列预测
+    const prediction = this.predictTimeSeriesValue(speedDataPoints, 1);
+
+    if (prediction.predictions.length > 0) {
+      return prediction.predictions[0].value;
+    } else {
+      return this.predictSpeed(); // 回退到简单预测
+    }
   }
 
   /**
@@ -445,6 +782,49 @@ export class NetworkTrendPredictor {
       return { exists: false, confidence: 0 };
     }
 
+    // 使用时间序列分析更精确地检测周期
+    const qualityDataPoints: DataPoint[] = this.qualityHistory.map(item => ({
+      value: this.qualityToNumber(item.quality),
+      timestamp: item.timestamp,
+    }));
+
+    // 准备预测选项，指定检测季节性
+    const options: PredictionOptions = {
+      method: 'auto',
+      horizon: 1,
+      confidenceInterval: true,
+    };
+
+    // 执行预测（主要是为了获取季节性检测结果）
+    const prediction = this.timeSeriesPredictor.predict(
+      qualityDataPoints,
+      options
+    );
+
+    // 如果检测到季节性
+    if (prediction.seasonalityDetected && prediction.dominantPeriod) {
+      // 根据主周期长度确定周期类型
+      let patternType: 'daily' | 'hourly' | 'custom' = 'custom';
+
+      // 计算周期时长（毫秒）
+      const periodMs = prediction.dominantPeriod * this.getAverageTimeDiff();
+
+      // 确定周期类型
+      if (Math.abs(periodMs - 24 * 60 * 60 * 1000) < 2 * 60 * 60 * 1000) {
+        patternType = 'daily';
+      } else if (Math.abs(periodMs - 60 * 60 * 1000) < 15 * 60 * 1000) {
+        patternType = 'hourly';
+      }
+
+      return {
+        exists: true,
+        intervalMs: periodMs,
+        confidence: 0.7 + Math.min(0.2, (qualityDataPoints.length / 100) * 0.2), // 样本量越大，置信度越高
+        patternType,
+      };
+    }
+
+    // 传统周期检测（作为后备）
     // 检查是否有每日周期
     const dailyPattern = this.checkPeriod(24 * 60 * 60 * 1000);
     if (dailyPattern.confidence > 0.7) {
@@ -466,9 +846,6 @@ export class NetworkTrendPredictor {
         patternType: 'hourly',
       };
     }
-
-    // 检查自定义周期
-    // 暂时简化实现
 
     return { exists: false, confidence: 0 };
   }
@@ -565,17 +942,28 @@ export class NetworkTrendPredictor {
       suggestions.push('网络速度较慢，建议减小分片大小以提高成功率');
     }
 
-    // 检测周期性
-    const periodicalPattern = this.detectPeriodicalPattern();
-    if (periodicalPattern.exists && periodicalPattern.confidence > 0.7) {
-      if (periodicalPattern.patternType === 'daily') {
-        suggestions.push(
-          '检测到每日网络波动周期，建议在网络质量较好的时段进行大文件上传'
-        );
-      } else if (periodicalPattern.patternType === 'hourly') {
-        suggestions.push(
-          '检测到每小时网络波动周期，建议在网络质量较好的时段进行大文件上传'
-        );
+    // 使用时间序列分析检测周期性
+    if (prediction.seasonalityDetected) {
+      suggestions.push(
+        '检测到网络波动周期，建议在网络质量较好的时段进行大文件上传'
+      );
+    }
+
+    // 检查置信区间范围
+    if (prediction.confidenceInterval) {
+      const latencyRange =
+        prediction.confidenceInterval.latency.high -
+        prediction.confidenceInterval.latency.low;
+      const speedRange =
+        prediction.confidenceInterval.speed.high -
+        prediction.confidenceInterval.speed.low;
+
+      // 如果范围较宽，表示网络不稳定
+      if (
+        latencyRange > prediction.expectedLatency * 0.5 ||
+        speedRange > prediction.expectedSpeed * 0.5
+      ) {
+        suggestions.push('网络状况预测波动范围较大，建议使用更保守的上传策略');
       }
     }
 
