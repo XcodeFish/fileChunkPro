@@ -58,8 +58,8 @@ export class BrowserCompatibilityTester {
   private _testCases: ITestCase[] = [];
   private _browserInfo: IBrowserInfo;
 
-  constructor(detector: WebStandardDetector) {
-    this._detector = detector;
+  constructor(detector?: WebStandardDetector) {
+    this._detector = detector || new WebStandardDetector();
     this._browserInfo = this.detectBrowser();
     this.registerDefaultTests();
   }
@@ -539,6 +539,54 @@ export class BrowserCompatibilityTester {
     }
 
     return config;
+  }
+
+  /**
+   * 获取当前浏览器环境支持的最大上传文件大小
+   * 不同浏览器和版本对文件大小有不同的限制
+   * @returns 字节为单位的最大文件大小，如果无法确定则返回null
+   */
+  public getMaxUploadFileSize(): number | null {
+    const { name, version } = this._browserInfo;
+
+    // 不同浏览器的文件大小限制
+    switch (name.toLowerCase()) {
+      case 'chrome':
+        return 2 * 1024 * 1024 * 1024; // Chrome: 2GB
+
+      case 'firefox': {
+        const majorVersion = parseInt(version.split('.')[0], 10);
+        if (majorVersion >= 70) {
+          return 5 * 1024 * 1024 * 1024; // Firefox 70+: 5GB
+        } else if (majorVersion >= 50) {
+          return 2 * 1024 * 1024 * 1024; // Firefox 50-69: 2GB
+        }
+        return 800 * 1024 * 1024; // 旧版Firefox: 800MB
+      }
+
+      case 'safari': {
+        const majorVersion = parseInt(version.split('.')[0], 10);
+        if (majorVersion >= 15) {
+          return 4 * 1024 * 1024 * 1024; // Safari 15+: 4GB
+        } else if (majorVersion >= 13) {
+          return 2 * 1024 * 1024 * 1024; // Safari 13-14: 2GB
+        }
+        return 1 * 1024 * 1024 * 1024; // 旧版Safari: 1GB
+      }
+
+      case 'edge':
+        return 4 * 1024 * 1024 * 1024; // Edge (基于Chromium): 4GB
+
+      case 'internet explorer':
+        return 4 * 1024 * 1024 * 1024; // IE11: 4GB (理论上，实际可能更小)
+
+      case 'opera':
+        return 2 * 1024 * 1024 * 1024; // Opera: 2GB
+
+      default:
+        // 默认较为保守的估计
+        return 1 * 1024 * 1024 * 1024; // 默认: 1GB
+    }
   }
 }
 

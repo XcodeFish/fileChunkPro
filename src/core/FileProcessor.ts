@@ -23,6 +23,7 @@ import { EventBus } from './EventBus';
 import { ErrorCenter } from './ErrorCenter';
 import WorkerManager from './WorkerManager';
 import dependencyContainer from './DependencyContainer';
+import { BrowserCompatibilityTester } from '../utils/BrowserCompatibilityTester';
 
 // 文件类型统一接口
 export interface AnyFile {
@@ -40,6 +41,7 @@ export class FileProcessor {
   private errorCenter: ErrorCenter;
   private workerManager: WorkerManager;
   private options: FileProcessorOptions;
+  private browserCompat: BrowserCompatibilityTester;
 
   /**
    * 创建文件处理器
@@ -51,6 +53,7 @@ export class FileProcessor {
       dependencyContainer.getService<ErrorCenter>('errorCenter');
     this.workerManager =
       dependencyContainer.getService<WorkerManager>('workerManager');
+    this.browserCompat = new BrowserCompatibilityTester();
 
     // 默认选项
     this.options = {
@@ -62,6 +65,9 @@ export class FileProcessor {
       validateFileSize: true,
       defaultHashAlgorithm: HashAlgorithm.MD5,
       useWorkerForHashing: true,
+      allowEmptyFiles: false, // 默认不允许空文件
+      autoFixFileNames: false, // 默认不自动修复文件名
+      detectBrowserLimits: true, // 默认检测浏览器限制
       ...options,
     };
   }
@@ -82,6 +88,25 @@ export class FileProcessor {
       );
     }
 
+    // 空文件检查
+    if (file.size === 0) {
+      if (!this.options.allowEmptyFiles) {
+        errors.push('文件大小为0，不允许上传空文件');
+      } else {
+        warnings.push('文件大小为0，这是一个空文件');
+      }
+    }
+
+    // 检测浏览器对文件大小的限制
+    if (this.options.detectBrowserLimits && typeof window !== 'undefined') {
+      const browserLimit = this.browserCompat.getMaxUploadFileSize();
+      if (browserLimit && file.size > browserLimit) {
+        errors.push(
+          `文件大小超出当前浏览器限制: ${this.formatFileSize(file.size)} > ${this.formatFileSize(browserLimit)}`
+        );
+      }
+    }
+
     // 检查文件类型
     if (this.options.allowedFileTypes.length > 0) {
       const fileType = file.type || this.getFileTypeFromName(file.name);
@@ -100,14 +125,21 @@ export class FileProcessor {
       warnings.push('文件名过长，可能不被某些系统支持');
     }
 
-    // 文件名特殊字符检查
+    // 文件名特殊字符检查与处理
+    let hasSpecialChars = false;
     if (file.name && /[<>:"/\\|?*]/.test(file.name)) {
-      warnings.push('文件名包含特殊字符，可能不被某些系统支持');
-    }
+      hasSpecialChars = true;
 
-    // 空文件检查
-    if (file.size === 0) {
-      warnings.push('文件大小为0，这是一个空文件');
+      if (this.options.autoFixFileNames && 'name' in file) {
+        // 自动修复文件名中的特殊字符
+        const originalName = file.name;
+        file.name = this.sanitizeFileName(file.name);
+        warnings.push(
+          `文件名包含特殊字符，已自动修正: ${originalName} -> ${file.name}`
+        );
+      } else {
+        warnings.push('文件名包含特殊字符，可能不被某些系统支持');
+      }
     }
 
     // 大文件警告
@@ -128,6 +160,8 @@ export class FileProcessor {
       valid: errors.length === 0,
       errors,
       warnings,
+      hasSpecialChars,
+      isEmptyFile: file.size === 0,
     });
 
     return {
@@ -165,6 +199,32 @@ export class FileProcessor {
       // 验证文件
       if (this.options.validateFileSize || this.options.validateFileType) {
         await this.validateFile(file);
+      }
+
+      // 空文件特殊处理
+      if (file.size === 0) {
+        if (!this.options.allowEmptyFiles) {
+          throw new UploadError(UploadErrorType.FILE_ERROR, '不允许上传空文件');
+        }
+
+        // 对于空文件，返回一个虚拟分片以便于处理流程一致性
+        const emptyChunk: FileChunk = {
+          index: 0,
+          start: 0,
+          end: 0,
+          size: 0,
+          blob: new Blob([], { type: file.type }),
+          total: 1,
+          priority: 10, // 高优先级处理
+        };
+
+        this.eventBus.emit('fileProcessor:chunkComplete', {
+          file,
+          chunks: [emptyChunk],
+          options: chunkOptions,
+        });
+
+        return [emptyChunk];
       }
 
       const chunks: FileChunk[] = [];
@@ -215,6 +275,31 @@ export class FileProcessor {
         fileSize: file.size,
       });
     }
+  }
+
+  /**
+   * 净化文件名，去除或替换不安全字符
+   * @param fileName 原始文件名
+   * @returns 处理后的安全文件名
+   */
+  public sanitizeFileName(fileName: string): string {
+    // 保留文件扩展名
+    const lastDotIndex = fileName.lastIndexOf('.');
+    let extension = '';
+    let baseName = fileName;
+
+    if (lastDotIndex > 0) {
+      extension = fileName.substring(lastDotIndex);
+      baseName = fileName.substring(0, lastDotIndex);
+    }
+
+    // 替换特殊字符
+    const safeBaseName = baseName
+      .replace(/[<>:"/\\|?*]/g, '_') // 替换不安全字符为下划线
+      .replace(/\s+/g, ' ') // 合并多个空格为一个
+      .trim();
+
+    return safeBaseName + extension;
   }
 
   /**
@@ -800,8 +885,32 @@ export class FileProcessor {
   }
 
   /**
-   * 更新处理器选项
-   * @param options 新选项
+   * 获取当前环境下可处理的最大文件大小
+   * 考虑浏览器限制和内存限制
+   */
+  public getMaxPossibleFileSize(): number {
+    let maxSize = this.options.maxFileSize;
+
+    // 检查浏览器限制
+    if (typeof window !== 'undefined') {
+      const browserLimit = this.browserCompat.getMaxUploadFileSize();
+      if (browserLimit && browserLimit < maxSize) {
+        maxSize = browserLimit;
+      }
+    }
+
+    // 检查内存限制
+    const memoryLimit = MemoryManager.getAvailableMemory() * 0.8; // 使用80%可用内存作为上限
+    if (memoryLimit < maxSize) {
+      maxSize = memoryLimit;
+    }
+
+    return maxSize;
+  }
+
+  /**
+   * 更新配置选项
+   * @param options 新的配置选项
    */
   public updateOptions(options: Partial<FileProcessorOptions>): void {
     this.options = {
@@ -813,8 +922,8 @@ export class FileProcessor {
   }
 
   /**
-   * 获取当前选项
-   * @returns 当前配置的选项
+   * 获取当前配置选项
+   * @returns 当前配置选项
    */
   public getOptions(): FileProcessorOptions {
     return { ...this.options };

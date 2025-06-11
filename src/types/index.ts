@@ -110,6 +110,24 @@ export interface FileProcessorOptions {
    * 是否使用Worker计算哈希
    */
   useWorkerForHashing: boolean;
+  
+  /**
+   * 是否允许上传空文件
+   * @default false
+   */
+  allowEmptyFiles: boolean;
+  
+  /**
+   * 是否自动修复文件名中的特殊字符
+   * @default false
+   */
+  autoFixFileNames: boolean;
+  
+  /**
+   * 是否检测浏览器对文件大小的限制
+   * @default true
+   */
+  detectBrowserLimits: boolean;
 }
 
 /**
