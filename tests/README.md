@@ -1,99 +1,238 @@
-# fileChunkPro 测试文档
+# fileChunkPro 测试指南
+
+本文档介绍 fileChunkPro 项目的测试结构、运行方法和测试约定。
 
 ## 测试结构
 
-fileChunkPro 的测试套件分为三个主要部分：
+测试目录结构如下：
 
-1. **单元测试** - 针对单个组件和功能的基础测试
-2. **集成测试** - 测试组件间的交互和跨平台功能
-3. **性能测试** - 测试上传性能、内存使用和各种优化策略
-
-## 测试覆盖范围
-
-### 单元测试
-
-单元测试位于 `tests/unit` 目录，包括：
-
-- 核心功能测试 - 测试UploaderCore、TaskScheduler、EventBus等核心组件
-- 插件测试 - 测试各种插件功能
-
-#### 已实现的插件测试
-
-- `ChunkPlugin.test.ts` - 测试分片上传功能
-- `SecurityPlugin.test.ts` - 测试文件安全验证功能
-- `PrecheckPlugin.test.ts` - 测试秒传功能
-- `ValidatorPlugin.test.ts` - 测试文件验证功能
-- `ProgressPlugin.test.ts` - 测试上传进度监控功能
-- `SmartConcurrencyPlugin.test.ts` - 测试智能并发控制功能
-
-### 集成测试
-
-集成测试位于 `tests/integration` 目录，包括：
-
-- `CrossPlatformAdapter.test.ts` - 测试跨平台适配器功能
-- `ErrorRecovery.test.ts` - 测试错误恢复策略
-
-### 性能测试
-
-性能测试位于 `tests/performance` 目录，包括：
-
-- `MemoryUsage.test.ts` - 测试内存使用效率和优化策略
-- `PerformanceBenchmark.test.ts` - 性能基准测试
-- `CrossPlatformPerformance.test.ts` - 跨平台性能比较
-- `UploadPerformance.test.ts` - 上传性能测试
+```
+tests/
+├── unit/                   # 单元测试目录
+│   ├── core/               # 核心模块单元测试
+│   ├── adapters/           # 适配器单元测试
+│   ├── plugins/            # 插件单元测试
+│   └── utils/              # 工具函数单元测试
+├── integration/            # 集成测试目录
+│   ├── ModuleCoop.test.ts  # 模块协作测试
+│   ├── NetworkHandling.test.ts  # 网络处理测试
+│   ├── CrossEnvironment.test.ts # 跨环境测试
+│   ├── ErrorRecovery.test.ts    # 错误恢复测试
+│   ├── CrossPlatformAdapter.test.ts # 跨平台适配测试
+│   └── helpers/            # 测试辅助工具
+│       ├── testServer.ts   # 模拟服务器
+│       └── environmentManager.ts # 环境管理工具
+├── performance/            # 性能测试目录
+├── setup.ts                # 全局测试设置
+├── run-tests.sh            # 测试运行脚本
+└── TEST-SUMMARY.md         # 测试结果摘要
+```
 
 ## 运行测试
 
-可以通过以下命令运行测试：
+### 安装依赖
 
 ```bash
-# 运行所有测试
-pnpm test:all
+pnpm install
+```
 
-# 运行单元测试
-pnpm test:unit
+### 运行单元测试
 
-# 运行集成测试
+```bash
+pnpm test
+```
+
+### 运行集成测试
+
+```bash
 pnpm test:integration
+```
 
-# 运行性能测试
-pnpm test:performance
+### 监视模式运行集成测试
 
-# 运行测试覆盖率报告
+```bash
+pnpm test:integration:watch
+```
+
+### 运行测试并生成覆盖率报告
+
+```bash
 pnpm test:coverage
 ```
 
-## 测试策略
+## 测试框架与工具
 
-### 跨平台测试
+- **测试框架**: Vitest
+- **模拟库**: MSW (Mock Service Worker)
+- **DOM 环境**: JSDOM
+- **测试辅助工具**:
+  - `testServer.ts`: 模拟服务器，支持自定义网络延迟、错误率等
+  - `environmentManager.ts`: 环境模拟工具，支持模拟不同的运行环境
+  - 内置测试文件生成器：`TestFileGenerator`
 
-跨平台测试通过模拟不同环境（浏览器、小程序等）的API，验证适配器的正确功能。测试确保在不同平台上文件读取、网络请求和存储操作能够正常工作。
+## 集成测试框架
 
-### 错误恢复测试
+集成测试专注于验证模块间协作、跨环境兼容性和真实场景模拟。我们提供了以下测试辅助工具：
 
-错误恢复测试模拟各种错误情况（网络中断、服务器错误等），验证上传器能够正确处理并恢复上传。测试包括自动重试、错误分类和适当的用户反馈。
+### 1. 测试服务器模拟 (`testServer.ts`)
 
-### 内存使用测试
+模拟上传服务器，支持以下特性：
 
-内存使用测试验证上传器在处理大文件时的内存效率。测试不同的内存优化策略（流式处理、动态分片大小等）并确保内存使用在可接受范围内。
+- 可配置网络延迟
+- 可设置随机错误率
+- 支持指定特定分片失败
+- 提供完整的上传流程API
+- 支持模拟网络中断
+- 支持修改服务器配置
+- 跟踪文件和分片上传状态
 
-### 性能基准测试
+使用示例：
 
-性能基准测试比较不同配置和环境下的上传性能，提供优化建议。测试包括处理速度、网络效率和资源使用等指标。
+```typescript
+const testServer = createTestServer({
+  networkLatency: 100,  // 100ms延迟
+  errorRate: 0.1,       // 10%的请求会失败
+  failedChunks: [2, 5]  // 第2和第5个分片会失败
+});
 
-## 注意事项
+// 开始监听
+testServer.server.listen();
 
-- 在Node.js环境中运行测试时，部分浏览器和小程序API会被模拟
-- 性能测试结果可能因运行环境而异
-- 运行完整测试套件可能需要较长时间
-- 测试覆盖率报告可以在 `coverage/` 目录查看
+// 模拟网络中断5秒
+testServer.simulateNetworkFailure(5000);
 
-## 添加新测试
+// 获取服务器状态
+const state = testServer.getState();
 
-添加新测试时，请遵循以下原则：
+// 清理
+testServer.server.close();
+```
 
-1. 单一职责 - 每个测试文件应关注一个特定功能或组件
-2. 模拟依赖 - 适当模拟外部依赖，减少测试的不确定性
-3. 全面覆盖 - 测试正常路径和错误路径
-4. 适当隔离 - 确保测试之间不相互影响
-5. 命名清晰 - 使用描述性的测试名称
+### 2. 环境管理器 (`environmentManager.ts`)
+
+模拟不同运行环境，支持以下特性：
+
+- 预定义多种环境（浏览器、微信、支付宝等）
+- 控制环境功能特性（如Worker、Blob支持）
+- 模拟网络状况
+- 模拟内存限制
+- 动态变更环境状态
+
+使用示例：
+
+```typescript
+// 应用浏览器环境
+applyEnvironment(predefinedEnvironments.browser);
+
+// 应用自定义环境
+applyEnvironment({
+  ...predefinedEnvironments.wechat,
+  network: {
+    quality: 'poor',
+    type: '3g',
+    downlink: 1,
+    rtt: 300
+  }
+});
+
+// 模拟环境变化
+simulateEnvironmentChange({
+  network: { quality: 'poor', type: '3g' },
+  memory: { isLowMemory: true }
+});
+
+// 重置环境
+resetEnvironment();
+```
+
+### 3. 测试文件生成器
+
+创建各种类型的测试文件：
+
+```typescript
+// 创建文本文件
+const textFile = TestFileGenerator.createTextFile(1024 * 1024, 'test.txt');
+
+// 创建二进制文件
+const binaryFile = TestFileGenerator.createBinaryFile(2 * 1024 * 1024, 'test.bin');
+
+// 创建图片文件
+const imageFile = await TestFileGenerator.createImageFile(400, 'test.png');
+```
+
+## 测试覆盖场景
+
+集成测试覆盖以下关键场景：
+
+### 1. 模块协作测试
+
+- 核心模块与插件系统协同工作
+- 状态共享和事件传播
+- 插件间的互操作性
+
+### 2. 网络处理测试
+
+- 弱网络/网络波动场景
+- 超时和重试机制
+- 并发控制
+- 跨域和认证
+
+### 3. 跨环境测试
+
+- 自动环境适配
+- 特性检测与降级
+- 统一错误处理
+- 环境特定配置
+
+### 4. 错误恢复测试
+
+- 断点续传
+- 错误重试策略
+- 资源释放
+- 状态持久化
+
+## 测试约定
+
+1. **测试命名**:
+   - 模块测试文件：`模块名.test.ts`
+   - 集成场景测试：`场景名.test.ts`
+
+2. **测试结构**:
+   - 使用`describe`嵌套按功能组织测试
+   - 测试标题使用"应该..."/"应..."风格描述预期行为
+
+3. **模拟与桩**:
+   - 单元测试中尽量模拟依赖
+   - 集成测试中尽量使用真实实现
+   - 使用`beforeEach`/`afterEach`设置和清理模拟
+
+4. **异步测试**:
+   - 使用`async/await`处理异步测试
+   - 对于定时器相关测试，使用`vi.useFakeTimers()`和`vi.advanceTimersByTime()`
+
+5. **环境隔离**:
+   - 每个测试后重置环境
+   - 使用独立的上传实例，避免状态共享
+   - 测试后释放资源
+
+## 贡献测试
+
+添加新测试时，请确保：
+
+1. 遵循现有测试的结构和命名约定
+2. 测试覆盖常规使用和边界情况
+3. 测试设置清晰，预期结果明确
+4. 测试后清理所有资源
+5. 测试应独立可重复运行
+
+## 调试测试
+
+如果测试失败，可以使用以下方法调试：
+
+```bash
+# 仅运行特定测试文件
+pnpm vitest run tests/integration/ModuleCoop.test.ts
+
+# 使用调试模式
+pnpm vitest --inspect-brk tests/integration/ErrorRecovery.test.ts
+```
