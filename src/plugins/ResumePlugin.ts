@@ -22,6 +22,7 @@ import {
   StorageOptions,
   UploadStatus,
 } from '../types/resume';
+import { UploadConsistencyChecker } from '../utils/UploadConsistencyChecker';
 
 /**
  * 断点续传插件
@@ -53,6 +54,15 @@ export class ResumePlugin implements IPlugin {
   // 配置选项
   private options: Required<ResumeOptions>;
   private isInitialized = false;
+
+  private unloadHandler: (e: BeforeUnloadEvent) => void;
+  private visibilityChangeHandler: () => void;
+
+  // 状态一致性检查器
+  private consistencyChecker: UploadConsistencyChecker;
+
+  // 定时检查器
+  private consistencyCheckInterval: NodeJS.Timeout | null = null;
 
   /**
    * 构造函数
@@ -122,6 +132,9 @@ export class ResumePlugin implements IPlugin {
       autoSaveOnUnload: this.options.autoSaveOnUnload,
       checkpointInterval: this.options.checkpointInterval,
     });
+
+    // 初始化一致性检查器
+    this.consistencyChecker = new UploadConsistencyChecker(this.eventBus);
   }
 
   /**
@@ -148,6 +161,12 @@ export class ResumePlugin implements IPlugin {
     // 注册事件处理器
     this.registerEventHandlers();
 
+    // 注册页面关闭事件处理
+    this.registerPageUnloadHandlers();
+
+    // 启动定期状态一致性检查
+    this.startConsistencyChecks();
+
     this.logger.info('断点续传插件已安装');
   }
 
@@ -169,6 +188,12 @@ export class ResumePlugin implements IPlugin {
 
     // 销毁会话管理器
     this.sessionManager.destroy();
+
+    // 移除页面关闭事件监听
+    this.unregisterPageUnloadHandlers();
+
+    // 停止定期状态一致性检查
+    this.stopConsistencyChecks();
 
     this.core = null;
     this.isInitialized = false;
@@ -198,6 +223,12 @@ export class ResumePlugin implements IPlugin {
       await this.fileRecordManager.cleanupExpiredRecords(
         this.options.expirationTime
       );
+
+      // 尝试从ServiceWorker恢复状态
+      await this.recoverStatesFromServiceWorker();
+
+      // 恢复紧急保存的状态
+      await this.recoverEmergencySavedStates();
 
       this.isInitialized = true;
       this.logger.debug('断点续传插件初始化成功');
@@ -264,6 +295,16 @@ export class ResumePlugin implements IPlugin {
     // 注册内部事件处理
     this.eventBus.on('resume:saveState', this.handleSaveStateEvent.bind(this));
 
+    // 注册ServiceWorker事件处理
+    if (this.core.getServiceWorkerManager()) {
+      this.core
+        .getServiceWorkerManager()
+        ?.on(
+          'serviceWorker:checkPendingUploads',
+          this.handleServiceWorkerStateCheck.bind(this)
+        );
+    }
+
     this.logger.debug('断点续传插件已注册事件处理器');
   }
 
@@ -287,6 +328,16 @@ export class ResumePlugin implements IPlugin {
 
     // 注销内部事件
     this.eventBus.off('resume:saveState', this.handleSaveStateEvent.bind(this));
+
+    // 注销ServiceWorker事件处理
+    if (this.core.getServiceWorkerManager()) {
+      this.core
+        .getServiceWorkerManager()
+        ?.off(
+          'serviceWorker:checkPendingUploads',
+          this.handleServiceWorkerStateCheck.bind(this)
+        );
+    }
 
     this.logger.debug('断点续传插件已注销事件处理器');
   }
@@ -519,9 +570,15 @@ export class ResumePlugin implements IPlugin {
       await this.sessionManager.saveState(fileId, resumeData);
       await this.fileRecordManager.updateFileRecord(resumeData);
 
+      // 确保从ServiceWorker中删除状态
+      const swManager = this.core?.getServiceWorkerManager();
+      if (swManager?.isReady()) {
+        await swManager.removeUploadState(fileId);
+      }
+
       this.logger.debug('文件上传完成，保存最终状态', { fileId });
     } catch (error) {
-      this.logger.error('处理文件上传成功失败', { fileId, error });
+      this.logger.error('处理文件上传完成失败', { fileId, error });
     }
   }
 
@@ -922,6 +979,368 @@ export class ResumePlugin implements IPlugin {
    */
   public async generateFileId(file: File): Promise<string> {
     return this.sessionManager.createFileId(file);
+  }
+
+  /**
+   * 注册页面关闭事件处理
+   * 确保在页面关闭/刷新前保存所有上传状态
+   */
+  private registerPageUnloadHandlers(): void {
+    if (typeof window !== 'undefined') {
+      // 创建beforeunload事件处理函数
+      this.unloadHandler = async (e: BeforeUnloadEvent) => {
+        // 发送同步事件，立即保存状态
+        this.eventBus.emit('resume:saveStateImmediate', {});
+
+        // 保存当前会话的所有上传状态
+        await this.saveAllState();
+
+        // 标准写法，让浏览器显示确认对话框
+        const confirmationMessage = '上传任务尚未完成，确定离开页面吗？';
+
+        // 部分浏览器需要返回值
+        e.returnValue = confirmationMessage;
+        return confirmationMessage;
+      };
+
+      // 创建页面可见性变化处理函数
+      this.visibilityChangeHandler = () => {
+        if (document.visibilityState === 'hidden') {
+          // 页面切换到后台时，也保存状态
+          this.saveAllStateSync();
+        }
+      };
+
+      // 注册事件监听
+      window.addEventListener('beforeunload', this.unloadHandler);
+      document.addEventListener(
+        'visibilitychange',
+        this.visibilityChangeHandler
+      );
+    }
+  }
+
+  /**
+   * 移除页面关闭事件处理
+   */
+  private unregisterPageUnloadHandlers(): void {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('beforeunload', this.unloadHandler);
+      document.removeEventListener(
+        'visibilitychange',
+        this.visibilityChangeHandler
+      );
+    }
+  }
+
+  /**
+   * 同步保存所有状态（用于页面关闭时的紧急保存）
+   */
+  private saveAllStateSync(): void {
+    try {
+      // 获取所有需要保存的状态
+      const states = Array.from(this.stateManager.getAllResumeData()).map(
+        ([_, resumeData]) => resumeData
+      );
+
+      // 使用同步存储方法保存（如localStorage）
+      if (states.length > 0) {
+        const stateData = JSON.stringify(states);
+        localStorage.setItem('fileChunkPro_emergency_states', stateData);
+
+        this.logger.debug('已同步保存所有上传状态（紧急保存）');
+      }
+    } catch (error) {
+      this.logger.error('同步保存状态失败', { error });
+    }
+  }
+
+  /**
+   * 初始化时恢复紧急保存的状态
+   */
+  private async recoverEmergencySavedStates(): Promise<void> {
+    if (typeof window === 'undefined' || !localStorage) return;
+
+    try {
+      const emergencyData = localStorage.getItem(
+        'fileChunkPro_emergency_states'
+      );
+      if (emergencyData) {
+        const states = JSON.parse(emergencyData);
+        let recoveredCount = 0;
+
+        for (const state of states) {
+          await this.sessionManager.saveState(state.fileId, state);
+          recoveredCount++;
+        }
+
+        if (recoveredCount > 0) {
+          this.logger.info(`已恢复${recoveredCount}个紧急保存的上传状态`);
+          this.eventBus.emit('resume:emergencyRecovered', {
+            count: recoveredCount,
+          });
+        }
+
+        // 清除紧急保存数据
+        localStorage.removeItem('fileChunkPro_emergency_states');
+      }
+    } catch (error) {
+      this.logger.error('恢复紧急保存状态失败', { error });
+    }
+  }
+
+  /**
+   * 处理 ServiceWorker 状态检查请求
+   */
+  private async handleServiceWorkerStateCheck(): Promise<void> {
+    try {
+      const swManager = this.core?.getServiceWorkerManager();
+      if (!swManager) return;
+
+      // 获取所有活跃上传的状态
+      const activeStates = Array.from(
+        this.stateManager.getAllResumeData()
+      ).filter(
+        ([_, state]) =>
+          state.status === 'uploading' ||
+          state.status === 'paused' ||
+          state.status === 'pending'
+      );
+
+      // 备份到 ServiceWorker
+      for (const [fileId, state] of activeStates) {
+        await swManager.backupUploadState(fileId, state);
+      }
+    } catch (error) {
+      this.logger.error('处理ServiceWorker状态检查请求失败', { error });
+    }
+  }
+
+  /**
+   * 从ServiceWorker恢复状态
+   */
+  private async recoverStatesFromServiceWorker(): Promise<void> {
+    try {
+      const swManager = this.core?.getServiceWorkerManager();
+      if (!swManager || !swManager.isReady()) return;
+
+      // 从ServiceWorker恢复状态
+      const states = await swManager.recoverUploadState();
+
+      if (states.length > 0) {
+        let recoveredCount = 0;
+
+        for (const state of states) {
+          // 检查状态是否已经存在
+          const existingState = this.stateManager.getResumeData(state.fileId);
+          if (!existingState) {
+            // 导入状态
+            this.stateManager.importResumeData(state);
+            await this.sessionManager.saveState(state.fileId, state);
+            recoveredCount++;
+          }
+        }
+
+        if (recoveredCount > 0) {
+          this.logger.info(`已从ServiceWorker恢复${recoveredCount}个上传状态`);
+          this.eventBus.emit('resume:serviceWorkerRecovered', {
+            count: recoveredCount,
+          });
+        }
+
+        // 清除ServiceWorker中的状态，因为已经恢复到常规存储中
+        await swManager.clearAllUploadStates();
+      }
+    } catch (error) {
+      this.logger.error('从ServiceWorker恢复状态失败', { error });
+    }
+  }
+
+  /**
+   * 启动定期状态一致性检查
+   */
+  private startConsistencyChecks(): void {
+    // 避免重复启动
+    this.stopConsistencyChecks();
+
+    // 每30秒检查一次状态一致性
+    this.consistencyCheckInterval = setInterval(() => {
+      this.checkAllStatesConsistency();
+    }, 30000); // 30秒
+
+    this.logger.debug('已启动状态一致性定期检查');
+  }
+
+  /**
+   * 停止定期状态一致性检查
+   */
+  private stopConsistencyChecks(): void {
+    if (this.consistencyCheckInterval) {
+      clearInterval(this.consistencyCheckInterval);
+      this.consistencyCheckInterval = null;
+      this.logger.debug('已停止状态一致性定期检查');
+    }
+  }
+
+  /**
+   * 检查所有上传状态的一致性
+   */
+  private async checkAllStatesConsistency(): Promise<void> {
+    try {
+      if (!this.core) return;
+
+      // 获取任务调度器中的任务状态
+      const taskScheduler = this.core.getTaskScheduler();
+      const taskStates = taskScheduler.getAllTaskStates?.() || [];
+
+      // 获取活动上传集合
+      const activeUploads = new Set<string>();
+      const coreActiveUploads = this.core.getActiveUploads?.() || [];
+      coreActiveUploads.forEach(upload => activeUploads.add(upload.fileId));
+
+      let fixedCount = 0;
+
+      // 检查所有断点续传数据
+      for (const [fileId, resumeData] of this.stateManager.getAllResumeData()) {
+        // 忽略已完成或已取消的上传
+        if (
+          resumeData.status === 'completed' ||
+          resumeData.status === 'cancelled'
+        ) {
+          continue;
+        }
+
+        // 执行一致性检查
+        const result = this.consistencyChecker.checkConsistency(
+          fileId,
+          resumeData,
+          taskStates,
+          activeUploads,
+          true // 自动修复
+        );
+
+        if (result.fixed) {
+          fixedCount++;
+
+          // 保存修复后的状态
+          await this.sessionManager.saveState(fileId, resumeData);
+
+          // 通知状态已修复
+          this.eventBus.emit('resume:stateFixed', {
+            fileId,
+            issues: result.issues,
+          });
+        }
+      }
+
+      if (fixedCount > 0) {
+        this.logger.info(`状态一致性检查修复了${fixedCount}个问题`);
+      }
+    } catch (error) {
+      this.logger.error('执行状态一致性检查失败', { error });
+    }
+  }
+
+  /**
+   * 检查单个文件状态一致性
+   * @param fileId 文件ID
+   * @param autoFix 是否自动修复
+   * @returns 一致性检查结果
+   */
+  public async checkStateConsistency(
+    fileId: string,
+    autoFix = false
+  ): Promise<any> {
+    try {
+      if (!this.core)
+        return {
+          isConsistent: false,
+          issues: [{ description: '插件未初始化' }],
+        };
+
+      // 获取断点续传数据
+      const resumeData = this.stateManager.getResumeData(fileId);
+      if (!resumeData) {
+        return {
+          isConsistent: false,
+          issues: [{ description: '找不到断点续传数据' }],
+        };
+      }
+
+      // 获取任务调度器中的任务状态
+      const taskScheduler = this.core.getTaskScheduler();
+      const taskStates = taskScheduler.getAllTaskStates?.() || [];
+
+      // 获取活动上传集合
+      const activeUploads = new Set<string>();
+      const coreActiveUploads = this.core.getActiveUploads?.() || [];
+      coreActiveUploads.forEach(upload => activeUploads.add(upload.fileId));
+
+      // 执行一致性检查
+      const result = this.consistencyChecker.checkConsistency(
+        fileId,
+        resumeData,
+        taskStates,
+        activeUploads,
+        autoFix
+      );
+
+      // 如果自动修复成功，保存状态
+      if (autoFix && result.fixed) {
+        await this.sessionManager.saveState(fileId, resumeData);
+
+        // 通知状态已修复
+        this.eventBus.emit('resume:stateFixed', {
+          fileId,
+          issues: result.issues,
+        });
+      }
+
+      return result;
+    } catch (error) {
+      this.logger.error('检查文件状态一致性失败', { fileId, error });
+      return { isConsistent: false, issues: [{ description: '检查过程出错' }] };
+    }
+  }
+
+  /**
+   * 获取文件状态
+   * @param fileId 文件ID
+   * @returns 文件状态
+   */
+  public getFileStatus(fileId: string): string | null {
+    const resumeData = this.stateManager.getResumeData(fileId);
+    return resumeData ? resumeData.status : null;
+  }
+
+  /**
+   * 获取文件剩余分片数
+   * @param fileId 文件ID
+   * @returns 剩余分片数
+   */
+  public getRemainingChunks(fileId: string): number {
+    const resumeData = this.stateManager.getResumeData(fileId);
+    if (!resumeData || !resumeData.uploadedChunks) return 0;
+
+    return (
+      resumeData.totalChunks -
+      resumeData.uploadedChunks.filter(chunk => chunk.status === 'uploaded')
+        .length
+    );
+  }
+
+  /**
+   * 获取文件已上传分片数
+   * @param fileId 文件ID
+   * @returns 已上传分片数
+   */
+  public getUploadedChunks(fileId: string): number {
+    const resumeData = this.stateManager.getResumeData(fileId);
+    if (!resumeData || !resumeData.uploadedChunks) return 0;
+
+    return resumeData.uploadedChunks.filter(
+      chunk => chunk.status === 'uploaded'
+    ).length;
   }
 }
 

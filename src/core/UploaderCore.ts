@@ -317,20 +317,126 @@ export class UploaderCore {
 
   /**
    * 取消上传
+   * @param fileId 可选的特定文件ID，如果不提供则取消当前上传
    */
-  public cancel(): void {
+  public cancel(fileId?: string): void {
     this.isCancelled = true;
 
-    // 检查scheduler是否有clear方法，如果没有则使用abort
-    if (this.scheduler) {
-      if (typeof this.scheduler.clear === 'function') {
-        this.scheduler.clear();
-      } else if (typeof this.scheduler.abort === 'function') {
-        this.scheduler.abort();
+    if (fileId) {
+      // 取消特定文件
+      this.cancelSpecificFile(fileId);
+    } else {
+      // 取消当前所有上传
+      // 通过调度器清除任务
+      if (this.scheduler) {
+        if (typeof this.scheduler.clear === 'function') {
+          this.scheduler.clear();
+        } else if (typeof this.scheduler.abort === 'function') {
+          this.scheduler.abort();
+        }
       }
+
+      this.emit('cancel', { fileId: this.currentFileId });
     }
 
-    this.emit('cancel', { fileId: this.currentFileId });
+    // 清理被取消上传的资源
+    this.cleanupCancelledUpload(fileId);
+  }
+
+  /**
+   * 取消特定文件的上传
+   * @param fileId 文件ID
+   */
+  private cancelSpecificFile(fileId: string): void {
+    // 从活动上传中移除
+    if (this.activeUploads.has(fileId)) {
+      this.activeUploads.delete(fileId);
+
+      // 取消相关任务
+      if (this.scheduler && typeof this.scheduler.cancelTask === 'function') {
+        this.scheduler.cancelTasksWithMetadata({ fileId });
+      }
+
+      // 触发特定文件取消事件
+      this.emit('fileCancel', { fileId });
+    }
+  }
+
+  /**
+   * 清理被取消上传的资源
+   * @param fileId 可选的特定文件ID
+   */
+  private cleanupCancelledUpload(fileId?: string): void {
+    try {
+      // 1. 清理内存中的文件分片
+      if (fileId) {
+        // 清理特定文件的分片
+        this.fileManager.releaseFileChunks(fileId);
+      } else {
+        // 清理所有活动文件的分片
+        for (const id of this.activeUploads) {
+          this.fileManager.releaseFileChunks(id);
+        }
+
+        // 清空活动上传集合
+        this.activeUploads.clear();
+      }
+
+      // 2. 终止相关的Worker任务
+      if (this.options.useWorker) {
+        const workerManager = this.container.tryResolve<any>('workerManager');
+        if (workerManager) {
+          if (fileId) {
+            workerManager.terminateTasksByFileId(fileId);
+          } else {
+            workerManager.terminateAllTasks();
+          }
+        }
+      }
+
+      // 3. 清理上传性能统计
+      if (fileId) {
+        delete this.uploadPerformance[fileId];
+        delete this.uploadStartTime[fileId];
+      }
+
+      // 4. 清理失败分片计数
+      if (fileId) {
+        this.failedChunks.delete(fileId);
+      } else {
+        this.failedChunks.clear();
+      }
+
+      // 5. 强制垃圾回收
+      if (typeof global !== 'undefined' && global.gc) {
+        this.logger.debug('触发垃圾回收');
+        global.gc();
+      } else {
+        // 浏览器环境无法直接调用GC，使用其他方式尝试释放内存
+        this.scheduleMemoryCleanup();
+      }
+    } catch (error) {
+      this.logger.error('清理资源失败', { fileId, error });
+    }
+  }
+
+  /**
+   * 调度内存清理
+   */
+  private scheduleMemoryCleanup(): void {
+    // 创建大数组然后释放，可能帮助触发浏览器的垃圾回收
+    setTimeout(() => {
+      try {
+        const largeArray = new Array(10000000);
+        for (let i = 0; i < 10000000; i++) {
+          largeArray[i] = i;
+        }
+        // 释放引用
+        largeArray.length = 0;
+      } catch (e) {
+        // 忽略错误，只是尝试触发GC
+      }
+    }, 100);
   }
 
   /**
@@ -364,13 +470,19 @@ export class UploaderCore {
     // 清空策略
     this.uploadStrategies.clear();
 
-    // 清空集合
-    this.activeUploads.clear();
-    this.failedChunks.clear();
+    // 清空所有引用
+    this._currentStorageAdapter = null;
+    this._defaultStorageAdapter = null;
+    this._additionalStorageAdapters.clear();
+
+    // 释放文件管理器资源
+    this.fileManager.dispose();
 
     // 重置状态
     this.currentFileId = null;
     this.isCancelled = false;
+
+    this.logger.debug('UploaderCore已完全销毁');
   }
 
   /**
@@ -1001,5 +1113,237 @@ export class UploaderCore {
     }
 
     return this.uploadStrategies.get('default')!;
+  }
+
+  /**
+   * 暂停指定文件的上传
+   * @param fileId 文件ID
+   * @returns 是否成功暂停
+   */
+  public async pauseFile(fileId: string): Promise<boolean> {
+    if (!this.activeUploads.has(fileId)) {
+      this.logger.warn('尝试暂停不存在的上传', { fileId });
+      return false;
+    }
+
+    try {
+      // 暂停与该文件相关的任务
+      let tasksPaused = false;
+      if (
+        this.scheduler &&
+        typeof this.scheduler.pauseTasksWithMetadata === 'function'
+      ) {
+        tasksPaused = await this.scheduler.pauseTasksWithMetadata({ fileId });
+      }
+
+      // 触发文件暂停事件
+      this.emit('filePause', { fileId, timestamp: Date.now() });
+
+      this.logger.debug('文件上传已暂停', { fileId });
+
+      return tasksPaused;
+    } catch (error) {
+      this.logger.error('暂停文件上传失败', { fileId, error });
+      return false;
+    }
+  }
+
+  /**
+   * 恢复指定文件的上传
+   * @param fileId 文件ID
+   * @returns 是否成功恢复
+   */
+  public async resumeFile(fileId: string): Promise<boolean> {
+    try {
+      let tasksResumed = false;
+
+      // 恢复与该文件相关的任务
+      if (
+        this.scheduler &&
+        typeof this.scheduler.resumeTasksWithMetadata === 'function'
+      ) {
+        tasksResumed = await this.scheduler.resumeTasksWithMetadata({ fileId });
+      }
+
+      if (tasksResumed) {
+        // 如果文件不在活动上传列表中，添加回来
+        if (!this.activeUploads.has(fileId)) {
+          this.activeUploads.add(fileId);
+        }
+
+        // 触发文件恢复事件
+        this.emit('fileResume', { fileId, timestamp: Date.now() });
+
+        this.logger.debug('文件上传已恢复', { fileId });
+      }
+
+      return tasksResumed;
+    } catch (error) {
+      this.logger.error('恢复文件上传失败', { fileId, error });
+      return false;
+    }
+  }
+
+  /**
+   * 获取文件上传状态信息
+   * @param fileId 文件ID
+   * @returns 文件状态信息
+   */
+  public getFileStatus(fileId: string): {
+    active: boolean;
+    progress: number;
+    remainingChunks: number;
+    uploadedChunks: number;
+    state: string;
+    uploadSpeed: number;
+    timeRemaining: number;
+  } | null {
+    // 检查是否是活动上传
+    const isActive = this.activeUploads.has(fileId);
+
+    // 尝试从插件获取详细信息
+    const resumePlugin = this.pluginManager.getPlugin('ResumePlugin');
+    if (resumePlugin && typeof resumePlugin.getFileProgress === 'function') {
+      // 获取文件进度
+      const fileProgress = resumePlugin.getFileProgress(fileId);
+      if (fileProgress !== null) {
+        // 计算剩余时间
+        const timeRemaining = this.estimateRemainingTime(fileId, fileProgress);
+
+        // 计算上传速度
+        const uploadSpeed = this.calculateUploadSpeed(fileId);
+
+        // 获取文件状态
+        const status = resumePlugin.getFileStatus
+          ? resumePlugin.getFileStatus(fileId)
+          : 'unknown';
+
+        return {
+          active: isActive,
+          progress: fileProgress,
+          remainingChunks: resumePlugin.getRemainingChunks
+            ? resumePlugin.getRemainingChunks(fileId)
+            : 0,
+          uploadedChunks: resumePlugin.getUploadedChunks
+            ? resumePlugin.getUploadedChunks(fileId)
+            : 0,
+          state: status,
+          uploadSpeed,
+          timeRemaining,
+        };
+      }
+    }
+
+    // 如果没有获得详细信息，返回基本状态
+    return isActive
+      ? {
+          active: true,
+          progress: 0,
+          remainingChunks: 0,
+          uploadedChunks: 0,
+          state: 'uploading',
+          uploadSpeed: 0,
+          timeRemaining: 0,
+        }
+      : null;
+  }
+
+  /**
+   * 注册上传操作回调
+   * @param operation 操作类型
+   * @param callback 回调函数
+   */
+  public onOperation(
+    operation: 'pause' | 'resume' | 'cancel',
+    callback: (data: any) => void
+  ): void {
+    const eventMap = {
+      pause: 'filePause',
+      resume: 'fileResume',
+      cancel: 'fileCancel',
+    };
+
+    this.events.on(eventMap[operation], callback);
+  }
+
+  /**
+   * 取消注册上传操作回调
+   * @param operation 操作类型
+   * @param callback 回调函数
+   */
+  public offOperation(
+    operation: 'pause' | 'resume' | 'cancel',
+    callback?: (data: any) => void
+  ): void {
+    const eventMap = {
+      pause: 'filePause',
+      resume: 'fileResume',
+      cancel: 'fileCancel',
+    };
+
+    this.events.off(eventMap[operation], callback);
+  }
+
+  /**
+   * 获取所有活动上传的信息
+   * @returns 活动上传信息列表
+   */
+  public getActiveUploads(): Array<{
+    fileId: string;
+    progress: number;
+    state: string;
+    speed: number;
+  }> {
+    const result = [];
+
+    for (const fileId of this.activeUploads) {
+      const status = this.getFileStatus(fileId);
+      if (status) {
+        result.push({
+          fileId,
+          progress: status.progress,
+          state: status.state,
+          speed: status.uploadSpeed,
+        });
+      }
+    }
+
+    return result;
+  }
+
+  /**
+   * 计算指定文件的上传速度（字节/秒）
+   */
+  private calculateUploadSpeed(fileId: string): number {
+    const performance = this.uploadPerformance[fileId];
+    if (!performance) return 0;
+
+    const now = Date.now();
+    const startTime = this.uploadStartTime[fileId] || now;
+    const elapsedSeconds = (now - startTime) / 1000;
+
+    if (elapsedSeconds <= 0) return 0;
+
+    return Math.round(performance.bytesUploaded / elapsedSeconds);
+  }
+
+  /**
+   * 估算上传剩余时间（秒）
+   */
+  private estimateRemainingTime(fileId: string, progress: number): number {
+    const performance = this.uploadPerformance[fileId];
+    if (!performance || progress >= 1) return 0;
+
+    const now = Date.now();
+    const startTime = this.uploadStartTime[fileId] || now;
+    const elapsedSeconds = (now - startTime) / 1000;
+
+    if (elapsedSeconds <= 0 || progress <= 0) return 0;
+
+    // 根据已完成的进度和耗时估算
+    const totalTime = elapsedSeconds / progress;
+    const remainingTime = totalTime - elapsedSeconds;
+
+    return Math.round(remainingTime);
   }
 }

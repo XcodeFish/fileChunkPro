@@ -1152,6 +1152,264 @@ export class TaskScheduler {
       current: this.options,
     });
   }
+
+  /**
+   * 基于元数据暂停任务
+   * @param metadata 任务元数据
+   * @returns 是否成功暂停任务
+   */
+  public pauseTasksWithMetadata(metadata: TaskMetadata): boolean {
+    if (!metadata) return false;
+
+    let paused = false;
+
+    // 暂停队列中的任务
+    this.taskQueue.forEach(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        taskItem.state = TaskState.PAUSED;
+        paused = true;
+      }
+    });
+
+    // 暂停正在运行的任务
+    this.runningTasks.forEach(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        taskItem.state = TaskState.PAUSED;
+        // 添加到队列中以便稍后恢复
+        this.taskQueue.push({
+          ...taskItem,
+          currentAttempt: 0,
+        });
+
+        // 取消当前正在运行的任务
+        if (taskItem.aborted !== true) {
+          taskItem.aborted = true;
+          this.runningTasks.delete(taskItem.id);
+          paused = true;
+        }
+      }
+    });
+
+    if (paused) {
+      this.eventBus.emit('tasksPaused', {
+        metadata,
+        count: this.countTasksByMetadata(metadata),
+        timestamp: Date.now(),
+      });
+    }
+
+    return paused;
+  }
+
+  /**
+   * 基于元数据恢复任务
+   * @param metadata 任务元数据
+   * @returns 是否成功恢复任务
+   */
+  public resumeTasksWithMetadata(metadata: TaskMetadata): boolean {
+    if (!metadata) return false;
+
+    let resumed = false;
+
+    // 恢复队列中的任务
+    this.taskQueue.forEach(taskItem => {
+      if (
+        this.matchesMetadata(taskItem.metadata, metadata) &&
+        taskItem.state === TaskState.PAUSED
+      ) {
+        taskItem.state = TaskState.PENDING;
+        resumed = true;
+      }
+    });
+
+    if (resumed) {
+      this.eventBus.emit('tasksResumed', {
+        metadata,
+        count: this.countTasksByMetadata(metadata),
+        timestamp: Date.now(),
+      });
+
+      // 如果调度器当前是暂停状态，则启动处理
+      if (!this.paused && !this.aborted) {
+        this.processNextTask();
+      }
+    }
+
+    return resumed;
+  }
+
+  /**
+   * 取消带有特定元数据的任务
+   * @param metadata 任务元数据
+   * @returns 是否成功取消任务
+   */
+  public cancelTasksWithMetadata(metadata: TaskMetadata): boolean {
+    if (!metadata) return false;
+
+    let cancelled = false;
+    const cancelledTasks = [];
+
+    // 取消队列中的任务
+    this.taskQueue = this.taskQueue.filter(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        taskItem.state = TaskState.CANCELLED;
+        taskItem.aborted = true;
+
+        // 添加到已完成任务中（为了状态查询）
+        cancelledTasks.push({ ...taskItem });
+        cancelled = true;
+        return false;
+      }
+      return true;
+    });
+
+    // 取消正在运行的任务
+    this.runningTasks.forEach(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        taskItem.state = TaskState.CANCELLED;
+        taskItem.aborted = true;
+
+        // 添加到已完成任务中（为了状态查询）
+        cancelledTasks.push({ ...taskItem });
+        this.runningTasks.delete(taskItem.id);
+        cancelled = true;
+      }
+    });
+
+    if (cancelled) {
+      // 将取消的任务添加到已完成任务列表
+      this.completedTasks.push(...cancelledTasks);
+
+      // 更新统计
+      this.abortedTaskCount += cancelledTasks.length;
+      this.taskStats.aborted += cancelledTasks.length;
+
+      // 发送事件
+      this.eventBus.emit('tasksCancelled', {
+        metadata,
+        count: cancelledTasks.length,
+        timestamp: Date.now(),
+      });
+
+      // 处理下一个任务
+      this.processNextTask();
+    }
+
+    return cancelled;
+  }
+
+  /**
+   * 计算具有特定元数据的任务数量
+   * @param metadata 任务元数据
+   * @returns 任务数量
+   */
+  public countTasksByMetadata(metadata: TaskMetadata): number {
+    let count = 0;
+
+    // 计算队列中的任务
+    this.taskQueue.forEach(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        count++;
+      }
+    });
+
+    // 计算正在运行的任务
+    this.runningTasks.forEach(taskItem => {
+      if (this.matchesMetadata(taskItem.metadata, metadata)) {
+        count++;
+      }
+    });
+
+    return count;
+  }
+
+  /**
+   * 判断任务元数据是否匹配
+   * @param taskMeta 任务元数据
+   * @param searchMeta 搜索元数据
+   * @returns 是否匹配
+   */
+  private matchesMetadata(
+    taskMeta?: TaskMetadata,
+    searchMeta?: TaskMetadata
+  ): boolean {
+    if (!taskMeta || !searchMeta) return false;
+
+    // 遍历搜索元数据的每个字段
+    for (const key in searchMeta) {
+      if (Object.prototype.hasOwnProperty.call(searchMeta, key)) {
+        // 如果任务元数据中没有该字段或值不匹配，返回false
+        if (
+          !Object.prototype.hasOwnProperty.call(taskMeta, key) ||
+          taskMeta[key] !== searchMeta[key]
+        ) {
+          return false;
+        }
+      }
+    }
+
+    // 所有字段都匹配
+    return true;
+  }
+
+  /**
+   * 获取所有任务的状态
+   * @returns 所有任务状态的数组
+   */
+  public getAllTaskStates(): Array<{
+    id: number;
+    state: TaskState;
+    metadata?: TaskMetadata;
+    retryCount: number;
+    priority: TaskPriority;
+    completed: boolean;
+    aborted?: boolean;
+  }> {
+    const result: Array<any> = [];
+
+    // 收集运行中的任务
+    this.runningTasks.forEach(task => {
+      result.push({
+        id: task.id,
+        state: task.state,
+        metadata: task.metadata,
+        retryCount: task.retryCount,
+        priority: task.priority,
+        completed: task.completed,
+        aborted: task.aborted,
+      });
+    });
+
+    // 收集队列中的任务
+    this.taskQueue.forEach(task => {
+      result.push({
+        id: task.id,
+        state: task.state,
+        metadata: task.metadata,
+        retryCount: task.retryCount,
+        priority: task.priority,
+        completed: task.completed,
+        aborted: task.aborted,
+      });
+    });
+
+    // 收集最近完成的任务（限制数量）
+    const recentCompletedTasks = this.completedTasks
+      .slice(-100) // 最多返回100个最近完成的任务
+      .map(task => ({
+        id: task.id,
+        state: task.state,
+        metadata: task.metadata,
+        retryCount: task.retryCount,
+        priority: task.priority,
+        completed: task.completed,
+        aborted: task.aborted,
+      }));
+
+    result.push(...recentCompletedTasks);
+
+    return result;
+  }
 }
 
 export default TaskScheduler;

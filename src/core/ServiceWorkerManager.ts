@@ -6,6 +6,7 @@
 import { EventBus } from './EventBus';
 import { UploadError, UploadErrorType } from './ErrorCenter';
 import { IServiceWorkerManager, ServiceWorkerOptions } from '../types/services';
+import { ResumeData } from '../types/resume';
 
 export class ServiceWorkerManager implements IServiceWorkerManager {
   private swRegistration: ServiceWorkerRegistration | null = null;
@@ -339,20 +340,28 @@ export class ServiceWorkerManager implements IServiceWorkerManager {
   }
 
   /**
-   * 处理来自ServiceWorker的消息
+   * 处理消息
    */
   private handleMessage = (event: MessageEvent): void => {
     const data = event.data;
     if (!data || !data.type) return;
 
+    const { type, payload } = data;
+
+    // 如果是ServiceWorker询问是否有上传状态需要备份
+    if (type === 'CHECK_PENDING_UPLOADS') {
+      // 触发事件，让ResumePlugin处理
+      this.events.emit('serviceWorker:checkPendingUploads', {});
+    }
+
     // 触发消息事件
     this.events.emit('message', data);
 
     // 根据消息类型触发特定事件
-    this.events.emit(data.type.toLowerCase(), data.payload);
+    this.events.emit(type.toLowerCase(), payload);
 
     // 处理特殊消息类型
-    switch (data.type) {
+    switch (type) {
       case 'SW_READY':
         this._ready = true;
         this.events.emit('ready');
@@ -405,5 +414,120 @@ export class ServiceWorkerManager implements IServiceWorkerManager {
 
     // 回退：生成临时ID
     return `temp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+  }
+
+  /**
+   * 备份上传状态到Service Worker
+   * 作为第二备份机制，在页面意外关闭时由ServiceWorker保留状态
+   * @param fileId 文件ID
+   * @param state 上传状态数据
+   */
+  public async backupUploadState(
+    fileId: string,
+    state: ResumeData
+  ): Promise<boolean> {
+    if (!this.isRegistered || !this._ready) {
+      return false;
+    }
+
+    return new Promise<boolean>(resolve => {
+      this.once('message', data => {
+        if (data.type === 'UPLOAD_STATE_BACKUP_RESULT') {
+          resolve(data.payload.success === true);
+        } else {
+          resolve(false);
+        }
+      });
+
+      // 发送状态到ServiceWorker
+      this.sendMessage('BACKUP_UPLOAD_STATE', {
+        fileId,
+        state,
+        timestamp: Date.now(),
+      });
+
+      // 3秒超时
+      setTimeout(() => resolve(false), 3000);
+    });
+  }
+
+  /**
+   * 从Service Worker恢复上传状态
+   * @param fileId 文件ID，如果不提供则恢复所有状态
+   */
+  public async recoverUploadState(fileId?: string): Promise<ResumeData[]> {
+    if (!this.isRegistered || !this._ready) {
+      return [];
+    }
+
+    return new Promise<ResumeData[]>(resolve => {
+      this.once('message', data => {
+        if (
+          data.type === 'UPLOAD_STATE_RECOVERY_RESULT' &&
+          Array.isArray(data.payload)
+        ) {
+          resolve(data.payload);
+        } else {
+          resolve([]);
+        }
+      });
+
+      // 请求恢复状态
+      this.sendMessage('RECOVER_UPLOAD_STATE', { fileId });
+
+      // 5秒超时
+      setTimeout(() => resolve([]), 5000);
+    });
+  }
+
+  /**
+   * 删除Service Worker中的上传状态
+   * @param fileId 文件ID
+   */
+  public async removeUploadState(fileId: string): Promise<boolean> {
+    if (!this.isRegistered || !this._ready) {
+      return false;
+    }
+
+    return new Promise<boolean>(resolve => {
+      this.once('message', data => {
+        if (data.type === 'UPLOAD_STATE_REMOVED') {
+          resolve(data.payload.success === true);
+        } else {
+          resolve(false);
+        }
+      });
+
+      // 发送删除状态请求
+      this.sendMessage('REMOVE_UPLOAD_STATE', { fileId });
+
+      // 3秒超时
+      setTimeout(() => resolve(false), 3000);
+    });
+  }
+
+  /**
+   * 清除所有上传状态
+   */
+  public async clearAllUploadStates(): Promise<boolean> {
+    if (!this.isRegistered || !this._ready) {
+      return false;
+    }
+
+    return new Promise<boolean>(resolve => {
+      this.once('message', data => {
+        if (data.type === 'ALL_UPLOAD_STATES_CLEARED') {
+          resolve(data.payload.success === true);
+        } else {
+          resolve(false);
+        }
+      });
+
+      // 发送清除所有状态请求
+      this.sendMessage('CLEAR_ALL_UPLOAD_STATES');
+
+      // 3秒超时
+      setTimeout(() => resolve(false), 3000);
+    });
   }
 }
