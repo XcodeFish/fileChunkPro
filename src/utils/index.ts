@@ -18,6 +18,13 @@ export {
   FingerprintResult,
 } from './HashUtils';
 
+// 环境检测相关工具导出
+export { default as WebViewDetector } from './WebViewDetector';
+export { default as DeviceCapabilityDetector } from './DeviceCapabilityDetector';
+export { default as EnvironmentFeatureDatabase } from './EnvironmentFeatureDatabase';
+export { default as EnvironmentDetector } from './EnvironmentDetector';
+export { default as EnvironmentDetectionSystem } from './EnvironmentDetectionSystem';
+
 // 安全相关工具导出
 export { default as SecurityError } from './SecurityError';
 export { default as FileContentDetector } from './FileContentDetector';
@@ -53,6 +60,28 @@ export type {
   IntegrityCheckResult,
   IntegrityCheckStatus,
 } from './IntegrityCheck';
+
+// WebView检测相关类型导出
+export type {
+  WebViewInfo,
+  WebViewType,
+  WebViewEngine,
+  WebViewLimitation,
+} from './WebViewDetector';
+
+// 设备能力检测相关类型导出
+export type {
+  DeviceMemoryInfo,
+  ProcessorInfo,
+  DeviceProfile,
+} from './DeviceCapabilityDetector';
+
+// 环境特性数据库相关类型导出
+export type {
+  EnvironmentFeatureData,
+  FeatureSupportInfo,
+  VersionFeatureData,
+} from './EnvironmentFeatureDatabase';
 
 // Web标准相关类型导出
 export type {
