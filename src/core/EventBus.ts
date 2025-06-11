@@ -3,6 +3,10 @@
  * 提供类型安全的事件发布订阅机制
  */
 
+import { CallbackWrapper } from '../utils/CallbackWrapper';
+import { ErrorUtils } from '../utils/ErrorUtils';
+import { Logger } from '../utils/Logger';
+
 /**
  * 事件处理器类型
  */
@@ -249,7 +253,7 @@ export class EventBus implements IEventBus {
   private debug = false;
 
   /**
-   * 最大事件历史记录数量
+   * 事件历史记录最大数量
    */
   private readonly MAX_HISTORY_SIZE = 100;
 
@@ -263,8 +267,13 @@ export class EventBus implements IEventBus {
   }> = [];
 
   /**
-   * 创建事件总线
-   * @param options 配置选项
+   * 日志记录器
+   */
+  private logger: Logger;
+
+  /**
+   * 构造函数
+   * @param options 选项
    */
   constructor(options?: {
     debug?: boolean;
@@ -274,10 +283,11 @@ export class EventBus implements IEventBus {
     this.debug = options?.debug || false;
     this.namespaceName = options?.namespaceName || '';
     this.parent = options?.parent || null;
+    this.logger = new Logger('EventBus');
 
     if (this.debug) {
-      console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 初始化`
+      this.logger.info(
+        `创建事件总线${this.namespaceName ? ': ' + this.namespaceName : ''}`
       );
     }
   }
@@ -326,34 +336,41 @@ export class EventBus implements IEventBus {
     handler: EventHandler<T>,
     options: SubscriptionOptions = {}
   ): () => void {
-    if (typeof handler !== 'function') {
-      throw new Error('事件处理器必须是一个函数');
-    }
+    // 使用CallbackWrapper包装事件处理器，确保统一的错误处理
+    const safeHandler = CallbackWrapper.wrap1<T, void>(handler);
+
+    const fullEventName = this.getFullEventName(eventName);
+    const subs = this.getSubscriptions<T>(fullEventName, true);
 
     const subscription: Subscription<T> = {
-      handler,
+      handler: safeHandler as EventHandler<T>, // 使用安全处理器替换原始处理器
       once: options.once || false,
       priority: options.priority || 0,
       tag: options.tag,
     };
 
-    const subs = this.getSubscriptions<T>(eventName, true);
-    subs.push(subscription);
-
-    // 按优先级排序，优先级高的先执行
-    subs.sort((a, b) => b.priority - a.priority);
-
-    const fullEventName = this.getFullEventName(eventName);
-    this.subscriptions.set(fullEventName, subs as Array<Subscription>);
-
-    if (this.debug) {
-      console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 订阅事件: ${eventName}${subscription.once ? ' (一次性)' : ''}${subscription.tag ? ` [${subscription.tag}]` : ''}`
-      );
+    // 按优先级插入
+    let inserted = false;
+    for (let i = 0; i < subs.length; i++) {
+      if (subs[i].priority < subscription.priority) {
+        subs.splice(i, 0, subscription);
+        inserted = true;
+        break;
+      }
     }
 
-    // 返回取消订阅的函数
-    return () => this.off(eventName, handler);
+    if (!inserted) {
+      subs.push(subscription);
+    }
+
+    if (this.debug) {
+      this.logger.debug(`添加事件订阅: ${fullEventName}`);
+    }
+
+    // 返回取消订阅函数
+    return () => {
+      this.off(eventName, handler);
+    };
   }
 
   /**
@@ -378,97 +395,116 @@ export class EventBus implements IEventBus {
    * @returns 是否有监听器处理了事件
    */
   emit<T = any>(eventName: string, data?: T): boolean {
-    const fullEventName = this.getFullEventName(eventName);
+    // 使用ErrorUtils.safeExecute来确保emit方法的错误被正确处理
+    return (
+      ErrorUtils.safeExecute(() => {
+        const fullEventName = this.getFullEventName(eventName);
+        const subs = this.getSubscriptions<T>(fullEventName);
 
-    // 记录事件历史
-    if (this.debug) {
-      this.eventHistory.push({
-        name: eventName,
-        data,
-        timestamp: Date.now(),
-      });
-
-      // 保持历史记录在最大数量以内
-      if (this.eventHistory.length > this.MAX_HISTORY_SIZE) {
-        this.eventHistory.shift();
-      }
-    }
-
-    const subs = this.getSubscriptions<T>(eventName);
-
-    if (subs.length === 0) {
-      if (this.debug) {
-        console.debug(
-          `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 事件无订阅者: ${eventName}`
-        );
-      }
-      return false;
-    }
-
-    if (this.debug) {
-      console.debug(
-        `[EventBus${this.namespaceName ? `:${this.namespaceName}` : ''}] 发布事件: ${eventName}`,
-        data
-      );
-    }
-
-    // 收集需要移除的一次性订阅
-    const onceSubs: Subscription<T>[] = [];
-
-    // 调用所有订阅者的处理函数
-    for (const sub of subs) {
-      try {
-        sub.handler(data as T);
-
-        if (sub.once) {
-          onceSubs.push(sub);
+        if (subs.length === 0) {
+          if (this.debug) {
+            this.logger.debug(`没有订阅者处理事件: ${fullEventName}`);
+          }
+          return false;
         }
-      } catch (error) {
-        console.error(`[EventBus] 事件处理器错误:`, error);
-      }
-    }
 
-    // 移除一次性订阅
-    if (onceSubs.length > 0) {
-      const filteredSubs = subs.filter(sub => !onceSubs.includes(sub));
-      if (filteredSubs.length === 0) {
-        this.subscriptions.delete(fullEventName);
-      } else {
-        this.subscriptions.set(
-          fullEventName,
-          filteredSubs as Array<Subscription>
-        );
-      }
-    }
+        if (this.debug) {
+          this.logger.debug(
+            `触发事件: ${fullEventName}, 订阅者数量: ${subs.length}`
+          );
+        }
 
-    return true;
+        // 记录事件历史
+        if (this.debug) {
+          this.recordEventHistory(fullEventName, data);
+        }
+
+        // 创建要执行的订阅副本，以防在遍历过程中有修改
+        const subsToExecute = [...subs];
+
+        // 跟踪需要删除的一次性订阅
+        const onceSubs = subsToExecute.filter(sub => sub.once);
+
+        // 执行所有处理器
+        for (const sub of subsToExecute) {
+          try {
+            sub.handler(data as T);
+          } catch (error) {
+            // 错误已经被CallbackWrapper处理，这里只是记录日志
+            this.logger.error(
+              `事件处理器执行错误: ${fullEventName}, 错误: ${error instanceof Error ? error.message : String(error)}`
+            );
+          }
+        }
+
+        // 移除一次性订阅
+        if (onceSubs.length > 0) {
+          const subsArray = this.subscriptions.get(fullEventName);
+          if (subsArray) {
+            onceSubs.forEach(onceSub => {
+              const index = subsArray.findIndex(
+                sub => sub.handler === onceSub.handler
+              );
+              if (index !== -1) {
+                subsArray.splice(index, 1);
+              }
+            });
+
+            // 如果没有更多订阅，删除整个事件条目
+            if (subsArray.length === 0) {
+              this.subscriptions.delete(fullEventName);
+            }
+          }
+        }
+
+        return true;
+      }) || false
+    ); // 如果出错，假定没有处理器被调用
   }
 
   /**
-   * 通过流水线处理事件数据
+   * 生成安全的事件流水线
    * @param eventName 事件名称
    * @param data 初始数据
    * @returns 事件流水线
    */
   pipe<T = any>(eventName: string, data: T): EventPipeline<T> {
-    const subs = this.getSubscriptions<T>(eventName);
+    return (
+      ErrorUtils.safeExecute(() => {
+        const fullEventName = this.getFullEventName(eventName);
+        const subs = this.getSubscriptions(fullEventName);
 
-    if (subs.length === 0) {
-      return new EventPipelineImpl<T>(data);
-    }
+        if (subs.length === 0) {
+          if (this.debug) {
+            this.logger.debug(`没有订阅者处理流水线: ${fullEventName}`);
+          }
+          return new EventPipelineImpl<T>(data);
+        }
 
-    // 创建初始流水线
-    let pipeline = new EventPipelineImpl<T>(data);
+        let pipeline = new EventPipelineImpl<T>(data);
 
-    // 应用每个处理器
-    for (const sub of subs) {
-      pipeline = pipeline.pipe(value => {
-        sub.handler(value);
-        return value;
-      }) as EventPipelineImpl<T>;
-    }
+        for (const sub of subs) {
+          pipeline = pipeline.pipe(value => {
+            let result = value;
+            try {
+              result = sub.handler(value) || value;
+            } catch (error) {
+              ErrorUtils.handleError(error);
+              this.logger.error(
+                `流水线处理器错误: ${fullEventName}, 错误: ${error instanceof Error ? error.message : String(error)}`
+              );
+            }
+            return result;
+          }) as EventPipelineImpl<T>;
 
-    return pipeline;
+          if (sub.once) {
+            this.off(eventName, sub.handler);
+          }
+        }
+
+        return pipeline;
+      }) || new EventPipelineImpl<T>(data)
+    );
   }
 
   /**
@@ -656,6 +692,24 @@ export class EventBus implements IEventBus {
    */
   disableDebug(): void {
     this.debug = false;
+  }
+
+  /**
+   * 记录事件历史
+   * @param eventName 事件名称
+   * @param data 事件数据
+   */
+  private recordEventHistory(eventName: string, data: any): void {
+    this.eventHistory.push({
+      name: eventName,
+      data,
+      timestamp: Date.now(),
+    });
+
+    // 限制历史记录大小
+    if (this.eventHistory.length > this.MAX_HISTORY_SIZE) {
+      this.eventHistory.shift();
+    }
   }
 }
 

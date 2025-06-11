@@ -9,8 +9,86 @@
  */
 
 import { ErrorType } from '../types/network';
+import { ErrorCenter } from '../core/error/ErrorCenter';
 
 export class ErrorUtils {
+  private static errorCenter: ErrorCenter | null = null;
+
+  /**
+   * 设置错误中心实例
+   * @param errorCenter 错误中心实例
+   */
+  public static setErrorCenter(errorCenter: ErrorCenter): void {
+    ErrorUtils.errorCenter = errorCenter;
+  }
+
+  /**
+   * 安全执行异步函数
+   * @param fn 异步函数
+   * @param fallback 出错时的回退值
+   * @returns 函数执行结果或回退值
+   */
+  public static async safeExecuteAsync<T>(
+    fn: () => Promise<T>,
+    fallback?: T
+  ): Promise<T | undefined> {
+    try {
+      return await fn();
+    } catch (error) {
+      ErrorUtils.handleError(error);
+      return fallback;
+    }
+  }
+
+  /**
+   * 安全执行同步函数
+   * @param fn 同步函数
+   * @param fallback 出错时的回退值
+   * @returns 函数执行结果或回退值
+   */
+  public static safeExecute<T>(fn: () => T, fallback?: T): T | undefined {
+    try {
+      return fn();
+    } catch (error) {
+      ErrorUtils.handleError(error);
+      return fallback;
+    }
+  }
+
+  /**
+   * 处理错误
+   * @param error 错误对象
+   */
+  public static handleError(error: any): void {
+    // 首先尝试使用错误中心处理
+    if (ErrorUtils.errorCenter) {
+      ErrorUtils.errorCenter.handleError(error);
+    } else {
+      // 错误中心不可用时的备用处理
+      console.error('[ErrorUtils] 未配置错误中心，错误详情:', error);
+
+      // 触发全局错误事件
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(
+          new CustomEvent('fileChunkPro:error', { detail: error })
+        );
+      }
+    }
+  }
+
+  /**
+   * 创建Promise错误处理包装器
+   * 自动为Promise添加错误处理
+   * @param promise 原始Promise
+   * @returns 带错误处理的Promise
+   */
+  public static wrapPromise<T>(promise: Promise<T>): Promise<T> {
+    return promise.catch(error => {
+      ErrorUtils.handleError(error);
+      throw error; // 重新抛出以保持Promise拒绝状态
+    });
+  }
+
   /**
    * 根据错误对象获取错误类型
    * @param error 错误对象

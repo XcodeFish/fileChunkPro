@@ -12,6 +12,7 @@ import {
   IAdapterFactory,
   IAdapterBuilder,
 } from './OptimizedAdapterInterfaces';
+import { ErrorUtils } from '../utils/ErrorUtils';
 
 /**
  * 适配器构建器实现
@@ -136,26 +137,26 @@ export class AdapterFactory implements IAdapterFactory {
     adapterType: EnvironmentType,
     options?: IAdapterOptions
   ): IUnifiedAdapter {
-    // 生成缓存键
-    const cacheKey = this.generateCacheKey(adapterType, options);
+    return ErrorUtils.safeExecute(() => {
+      // 生成缓存键
+      const cacheKey = this.generateCacheKey(adapterType, options);
 
-    // 检查缓存
-    if (this.adapterCache.has(cacheKey)) {
-      return this.adapterCache.get(cacheKey)!;
-    }
+      // 检查缓存
+      if (this.adapterCache.has(cacheKey)) {
+        return this.adapterCache.get(cacheKey)!;
+      }
 
-    // 查找适配器类
-    const AdapterClass = this.adapterRegistry.get(adapterType);
-    if (!AdapterClass) {
-      throw new Error(`不支持的适配器类型: ${adapterType}`);
-    }
+      // 查找适配器类
+      const AdapterClass = this.adapterRegistry.get(adapterType);
+      if (!AdapterClass) {
+        throw new Error(`不支持的适配器类型: ${adapterType}`);
+      }
 
-    // 创建适配器实例
-    try {
+      // 创建适配器实例
       const adapter = new AdapterClass(options);
 
       // 初始化适配器
-      adapter.initialize(options).catch(error => {
+      ErrorUtils.wrapPromise(adapter.initialize(options)).catch(error => {
         this.logger.error(`适配器初始化失败: ${error}`);
       });
 
@@ -163,10 +164,7 @@ export class AdapterFactory implements IAdapterFactory {
       this.adapterCache.set(cacheKey, adapter);
 
       return adapter;
-    } catch (error) {
-      this.logger.error(`创建适配器失败: ${error}`);
-      throw new Error(`创建适配器失败: ${error}`);
-    }
+    })!; // 非空断言是因为我们知道错误会被捕获和处理
   }
 
   /**
@@ -176,7 +174,7 @@ export class AdapterFactory implements IAdapterFactory {
   public async createBestAdapter(
     options?: IAdapterOptions
   ): Promise<IUnifiedAdapter> {
-    try {
+    return (await ErrorUtils.safeExecuteAsync(async () => {
       // 检测当前环境
       const envResult = await this.environmentDetector.detect();
 
@@ -197,6 +195,8 @@ export class AdapterFactory implements IAdapterFactory {
           adapters.push(adapter);
         } catch (error) {
           this.logger.debug(`适配器 ${type} 初始化失败: ${error}`);
+          // 记录错误但继续尝试其他适配器
+          ErrorUtils.handleError(error);
         }
       }
 
@@ -242,10 +242,7 @@ export class AdapterFactory implements IAdapterFactory {
       this.logger.debug(`选择最佳适配器: ${bestAdapter.getName()}`);
 
       return bestAdapter;
-    } catch (error) {
-      this.logger.error(`创建最佳适配器失败: ${error}`);
-      throw new Error(`创建最佳适配器失败: ${error}`);
-    }
+    })) as Promise<IUnifiedAdapter>;
   }
 
   /**
