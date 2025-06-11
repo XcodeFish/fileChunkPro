@@ -11,7 +11,6 @@ import {
   UploadResult,
   ChunkInfo,
   UploadErrorType,
-  TaskPriority,
   NetworkQuality,
   UploadStrategy,
   Environment,
@@ -45,6 +44,10 @@ interface AnyFile {
 /**
  * UploaderCore - 上传器核心类
  * 作为高级协调器，负责组织各个专业模块的协同工作
+ *
+ * @remarks
+ * UploaderCore是fileChunkPro的中央控制器，协调各专业组件完成文件上传。
+ * 它管理文件分片、上传任务调度、重试策略、进度跟踪等核心功能。
  */
 export class UploaderCore {
   private options: UploaderOptions;
@@ -91,8 +94,25 @@ export class UploaderCore {
 
   /**
    * 创建UploaderCore实例
-   * @param container 依赖容器
-   * @param options 上传选项
+   *
+   * @param container - 依赖容器，提供核心组件和服务
+   * @param options - 上传器配置选项
+   *
+   * @throws {UploadError} 当缺少必要参数或初始化失败时抛出错误
+   *
+   * @example
+   * ```typescript
+   * const uploader = new UploaderCore(container, {
+   *   endpoint: 'https://api.example.com/upload',
+   *   chunk: {
+   *     size: 2 * 1024 * 1024, // 2MB固定分片大小
+   *   },
+   *   network: {
+   *     concurrency: 3, // 3个并发上传
+   *     timeout: 30000 // 30秒超时
+   *   }
+   * });
+   * ```
    */
   constructor(
     private container: DependencyContainer,
@@ -128,37 +148,117 @@ export class UploaderCore {
     // 初始化性能监控器
     this.performanceMonitor = new PerformanceMonitor();
 
-    this.options = {
-      ...options,
-      concurrency: options.concurrency || this.getOptimalConcurrency(),
-      timeout: options.timeout || 30000,
-      retryCount: options.retryCount || 3,
-      retryDelay: options.retryDelay || 1000,
-      chunkSize: options.chunkSize || 'auto',
-      headers: options.headers || {},
-      useWorker: options.useWorker !== false && EnvUtils.isWorkerSupported(),
-      // 新增默认设置
-      enableAdaptiveUploads: options.enableAdaptiveUploads !== false,
-      maxMemoryUsage: options.maxMemoryUsage || 0.9,
-      smartRetry: options.smartRetry !== false,
-      autoResume: options.autoResume !== false,
-      adaptiveStrategies: {
-        ...this.adaptiveStrategies,
-        ...(options.adaptiveStrategies || {}),
+    // 处理新旧配置格式兼容，优先使用新格式
+    // 初始化默认配置
+    const defaultOptions: UploaderOptions = {
+      endpoint: options.endpoint,
+      network: {
+        concurrency: 3,
+        timeout: 30000,
+        adaptive: true,
+        headers: {},
+        withCredentials: false,
       },
-      enablePerformanceMonitoring:
-        options.enablePerformanceMonitoring !== false,
-      performanceCheckInterval: options.performanceCheckInterval || 5000,
-      maxFileSize: options.maxFileSize || EnvUtils.getMaxFileSizeSupport(),
+      retry: {
+        count: 3,
+        delay: 1000,
+        smart: true,
+        exponentialBackoff: true,
+        retryableStatusCodes: [408, 429, 500, 502, 503, 504],
+      },
+      chunk: {
+        size: 'auto',
+        sizeRange: {
+          min: this.adaptiveStrategies.minChunkSize,
+          max: this.adaptiveStrategies.maxChunkSize,
+        },
+        optimizeFirstChunk: false,
+      },
+      features: {
+        autoStart: true,
+        resumable: true,
+        skipDuplicate: true,
+        autoResume: true,
+      },
+      performance: {
+        useWorker: EnvUtils.isWorkerSupported(),
+        maxMemoryUsage: 0.9,
+        enableMonitoring: true,
+        checkInterval: 5000,
+      },
+      validation: {
+        maxFileSize: EnvUtils.getMaxFileSizeSupport(),
+        allowEmptyFiles: false,
+      },
+      security: {
+        level: 'standard',
+        validateResponse: true,
+        contentTypeValidation: true,
+      },
+      debug: {
+        enabled: false,
+        logLevel: 'error',
+        errorTracking: true,
+      },
     };
+
+    // 处理向后兼容性 - 从旧格式到新格式的映射
+    if (options.concurrency !== undefined) {
+      options.network = options.network || {};
+      options.network.concurrency = options.concurrency;
+    }
+
+    if (options.timeout !== undefined) {
+      options.network = options.network || {};
+      options.network.timeout = options.timeout;
+    }
+
+    if (options.headers !== undefined) {
+      options.network = options.network || {};
+      options.network.headers = options.headers;
+    }
+
+    if (options.retryCount !== undefined) {
+      options.retry = options.retry || {};
+      options.retry.count = options.retryCount;
+    }
+
+    if (options.retryDelay !== undefined) {
+      options.retry = options.retry || {};
+      options.retry.delay = options.retryDelay;
+    }
+
+    if (options.chunkSize !== undefined) {
+      options.chunk = options.chunk || {};
+      options.chunk.size = options.chunkSize;
+    }
+
+    if (options.useWorker !== undefined) {
+      options.performance = options.performance || {};
+      options.performance.useWorker = options.useWorker;
+    }
+
+    if (options.autoStart !== undefined) {
+      options.features = options.features || {};
+      options.features.autoStart = options.autoStart;
+    }
+
+    // 深度合并配置
+    this.options = this.mergeOptions(defaultOptions, options);
+
+    // 从新配置结构中提取常用选项
+    const concurrency = this.options.network?.concurrency || 3;
+    const retryCount = this.options.retry?.count || 3;
+    const retryDelay = this.options.retry?.delay || 1000;
+    const timeout = this.options.network?.timeout || 30000;
 
     // 初始化任务调度器
     this.scheduler = new TaskScheduler(
       {
-        concurrency: this.options.concurrency as number,
-        retryCount: this.options.retryCount as number,
-        retryDelay: this.options.retryDelay as number,
-        timeout: this.options.timeout as number,
+        concurrency,
+        retryCount,
+        retryDelay,
+        timeout,
       },
       this.events
     );
@@ -169,7 +269,7 @@ export class UploaderCore {
     });
 
     // 设置内存阈值
-    this.memoryThreshold = this.options.maxMemoryUsage || 0.8;
+    this.memoryThreshold = this.options.performance?.maxMemoryUsage || 0.9;
 
     // 初始化上传策略
     this.initializeUploadStrategies();
@@ -179,12 +279,47 @@ export class UploaderCore {
       this.container.tryResolve<NetworkDetector>('networkDetector');
   }
 
+  /**
+   * 深度合并配置对象
+   *
+   * @private
+   * @param target - 目标对象
+   * @param source - 源对象
+   * @returns 合并后的对象
+   */
+  private mergeOptions<T>(target: T, source: Partial<T>): T {
+    const result: any = { ...target };
+
+    for (const key in source) {
+      if (source[key] === undefined) continue;
+
+      if (
+        source[key] !== null &&
+        typeof source[key] === 'object' &&
+        !Array.isArray(source[key])
+      ) {
+        if (!(key in target)) {
+          Object.assign(result, { [key]: source[key] });
+        } else {
+          result[key] = this.mergeOptions(result[key], source[key]);
+        }
+      } else {
+        Object.assign(result, { [key]: source[key] });
+      }
+    }
+
+    return result;
+  }
+
   //===========================
   // 公共 API 方法
   //===========================
 
   /**
    * 发布事件
+   *
+   * @param event - 事件名称
+   * @param data - 事件数据
    */
   public emit(event: string, data?: any): void {
     this.events.emit(event, data);
@@ -192,180 +327,414 @@ export class UploaderCore {
 
   /**
    * 上传文件
-   * @param file 要上传的文件
-   * @param options 上传选项
-   * @returns 上传结果
+   *
+   * @param file - 要上传的文件对象
+   * @param options - 上传选项
+   * @returns 包含上传结果的Promise
+   *
+   * @throws {UploadError} 当上传过程中出现无法恢复的错误时
+   *
+   * @example
+   * ```typescript
+   * try {
+   *   const result = await uploader.upload(file);
+   *   console.log(`上传成功: ${result.fileInfo.name}`);
+   *   console.log(`服务器返回:`, result.response);
+   * } catch (error) {
+   *   if (error instanceof UploadError) {
+   *     console.error(`上传失败: ${error.message}, 错误类型: ${error.type}`);
+   *   } else {
+   *     console.error(`未知错误: ${error.message}`);
+   *   }
+   * }
+   * ```
    */
   public async upload(
     file: AnyFile,
     options?: { storageKey?: string }
   ): Promise<UploadResult> {
-    return ErrorUtils.safeExecuteAsync(async () => {
+    try {
       if (this.isCancelled) {
         this.isCancelled = false; // 重置取消状态以允许新的上传
       }
 
-      try {
-        // 验证文件
-        const validationResult = await this.fileManager.validateFile(
-          file as File
-        );
-        if (!validationResult.valid) {
-          throw new UploadError(
-            UploadErrorType.VALIDATION_ERROR,
-            `文件验证失败: ${validationResult.errors.join(', ')}`
-          );
-        }
-
-        // 选择最佳上传策略
-        const strategy = await this.selectUploadStrategy(file);
-
-        // 根据策略确定分片大小
-        let chunkSize = strategy.chunkSize;
-        if (chunkSize === 'auto') {
-          const networkQuality = this.networkDetector
-            ? this.networkDetector.getNetworkQuality()
-            : NetworkQuality.NORMAL;
-          chunkSize = this.getDynamicChunkSize(file.size, networkQuality);
-        }
-
-        // 生成文件ID
-        const fileId = await this.fileManager.generateFileId(file as File);
-        this.currentFileId = fileId;
-
-        // 创建分片
-        const chunks = await this.fileManager.createChunks(
-          file as File,
-          chunkSize as number
+      // 验证文件
+      const validationResult = await this.fileManager.validateFile(
+        file as File
+      );
+      if (!validationResult.valid) {
+        const error = new UploadError(
+          UploadErrorType.VALIDATION_ERROR,
+          `文件验证失败: ${validationResult.errors.join(', ')}`
         );
 
-        // 记录活动上传
-        this.activeUploads.add(fileId);
-
-        // 初始化上传
-        await this.initializeUpload(file, fileId, chunks.length);
-
-        // 开始性能追踪
-        this.startPerformanceTracking(fileId, file.size);
-
-        // 配置存储适配器
-        if (options?.storageKey) {
-          this._currentStorageAdapter = this.getStorageAdapter(
-            options.storageKey
-          );
-        }
-
-        // 上传所有分片
-        const promises = chunks.map((chunk, i) => {
-          return this.scheduler.schedule(
-            () => this.uploadChunk(chunk, i, fileId),
-            {
-              priority: TaskPriority.NORMAL,
-              retryCount: this.options.retryCount as number,
-              retryDelay: this.options.retryDelay as number,
-              timeout: this.options.timeout as number,
-              metadata: {
-                fileId,
-                chunkIndex: i,
-                fileName: file.name,
-                fileSize: file.size,
-                chunkSize: chunk.blob.size,
-              },
-            }
-          );
+        // 统一错误事件
+        this.events.emit('error', {
+          error,
+          file,
+          phase: 'validation',
         });
 
-        await Promise.all(promises);
+        throw error;
+      }
 
-        // 合并分片
+      // 选择最佳上传策略
+      const strategy = await this.selectUploadStrategy(file);
+
+      // 根据策略确定分片大小
+      let chunkSize = strategy.chunkSize;
+      if (chunkSize === 'auto') {
+        const networkQuality = this.networkDetector
+          ? this.networkDetector.getNetworkQuality()
+          : NetworkQuality.NORMAL;
+        chunkSize = this.getDynamicChunkSize(file.size, networkQuality);
+      }
+
+      // 生成文件ID
+      const fileId = await this.fileManager.generateFileId(file as File);
+      this.currentFileId = fileId;
+
+      // 创建分片
+      const chunks = await this.fileManager.createChunks(
+        file as File,
+        chunkSize as number
+      );
+
+      // 记录活动上传
+      this.activeUploads.add(fileId);
+
+      // 初始化上传
+      await this.initializeUpload(file, fileId, chunks.length);
+
+      // 开始性能追踪
+      this.startPerformanceTracking(fileId, file.size);
+
+      // 配置存储适配器 (如果指定)
+      if (options?.storageKey) {
+        this._currentStorageAdapter = this.getStorageAdapter(
+          options.storageKey
+        );
+      }
+
+      try {
+        // 尝试执行预检查（秒传）
+        if (this.options.features?.skipDuplicate) {
+          const precheckResult = await this.runPluginHook('beforeUpload', {
+            file,
+            fileId,
+            options: this.options,
+          });
+
+          if (precheckResult && precheckResult.skipUpload) {
+            this.logger.info('文件已存在，跳过上传');
+
+            // 结束性能追踪
+            this.finishPerformanceTracking(fileId, true);
+
+            // 从活动上传中移除
+            this.activeUploads.delete(fileId);
+
+            // 构建上传结果
+            return {
+              success: true,
+              skipped: true, // 标记为跳过上传
+              fileInfo: {
+                name: file.name,
+                size: file.size,
+                type: file.type || '',
+                uid: fileId,
+              },
+              metadata: precheckResult.metadata || {
+                fileId,
+                created: Date.now(),
+                extension: file.name.split('.').pop() || '',
+              },
+              response: precheckResult.response || {
+                message: '文件已存在，跳过上传',
+              },
+              stats: {
+                averageSpeed: 0,
+                peakSpeed: 0,
+                totalBytes: file.size,
+                duration: 0,
+                retries: 0,
+                failedChunks: 0,
+                successfulChunks: chunks.length,
+              },
+            };
+          }
+        }
+
+        // 执行实际上传
+        this.events.emit('uploadStart', {
+          fileId,
+          fileName: file.name,
+          size: file.size,
+        });
+
+        // 并行上传所有分片
+        const uploadPromises = chunks.map((chunk, index) =>
+          this.uploadChunk(chunk, index, fileId)
+        );
+
+        try {
+          await Promise.all(uploadPromises);
+        } catch (error) {
+          // 如果上传被取消，抛出相应错误
+          if (this.isCancelled) {
+            throw new UploadError(UploadErrorType.CANCELLED, '上传已被取消');
+          }
+
+          // 抛出分片上传错误
+          throw error;
+        }
+
+        // 执行合并操作
         const result = await this.mergeChunks(fileId, file.name, chunks.length);
 
         // 结束性能追踪
         this.finishPerformanceTracking(fileId, true);
 
-        // 移除活动上传
+        // 从活动上传中移除
         this.activeUploads.delete(fileId);
+
+        // 通知上传完成
+        this.events.emit('uploadComplete', {
+          fileId,
+          fileName: file.name,
+          result,
+        });
 
         return result;
       } catch (error) {
-        this.logger.error(`上传失败: ${error.message}`);
+        // 结束性能追踪（标记为失败）
+        this.finishPerformanceTracking(fileId, false);
 
-        // 如果存在fileId，结束性能追踪并移除活动上传
-        if (this.currentFileId) {
-          this.finishPerformanceTracking(this.currentFileId, false);
-          this.activeUploads.delete(this.currentFileId);
-        }
+        // 从活动上传中移除
+        this.activeUploads.delete(fileId);
 
-        throw this.errorCenter.normalizeError(
-          error,
-          UploadErrorType.UPLOAD_ERROR,
-          '上传失败'
-        );
+        // 转换错误类型
+        const uploadError =
+          error instanceof UploadError
+            ? error
+            : new UploadError(
+                UploadErrorType.UPLOAD_FAILED,
+                `上传失败: ${error.message || '未知错误'}`,
+                { originalError: error }
+              );
+
+        // 触发错误事件
+        this.events.emit('uploadError', {
+          fileId,
+          fileName: file.name,
+          error: uploadError,
+        });
+
+        throw uploadError;
       } finally {
+        // 清理资源
         this.cleanup();
       }
-    }) as Promise<UploadResult>;
+    } catch (error) {
+      // 确保所有错误都是UploadError类型
+      const uploadError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.UNKNOWN_ERROR,
+              `上传过程中发生未知错误: ${error.message || '无错误信息'}`,
+              { originalError: error }
+            );
+
+      // 触发错误事件（如果尚未触发）
+      if (!(error instanceof UploadError)) {
+        this.events.emit('error', { error: uploadError, file });
+      }
+
+      throw uploadError;
+    }
   }
 
   /**
-   * 公开的文件准备方法，委托给FileManager
-   * @param file 要准备的文件
-   * @returns 分片信息
+   * 准备文件上传，但不立即开始上传
+   *
+   * @param file - 要准备的文件
+   * @returns 文件分片信息数组的Promise
+   *
+   * @throws {UploadError} 文件验证失败或准备过程中出错
+   *
+   * @example
+   * ```typescript
+   * // 准备文件但不立即上传
+   * try {
+   *   const chunks = await uploader.prepareFile(file);
+   *   console.log(`文件已准备好上传，共${chunks.length}个分片`);
+   *
+   *   // 稍后可以调用upload方法开始上传
+   *   const result = await uploader.upload(file);
+   * } catch (error) {
+   *   console.error('准备文件失败:', error.message);
+   * }
+   * ```
    */
   public async prepareFile(file: AnyFile): Promise<ChunkInfo[]> {
-    // 确定分片大小
-    const chunkSize =
-      typeof this.options.chunkSize === 'number'
-        ? this.options.chunkSize
-        : await this.fileManager.getOptimalChunkSize(file.size);
+    try {
+      // 验证文件
+      const validationResult = await this.fileManager.validateFile(
+        file as File
+      );
 
-    return this.fileManager.createChunks(file as File, chunkSize);
+      if (!validationResult.valid) {
+        const error = new UploadError(
+          UploadErrorType.VALIDATION_ERROR,
+          `文件验证失败: ${validationResult.errors.join(', ')}`
+        );
+
+        this.events.emit('error', {
+          error,
+          file,
+          phase: 'validation',
+        });
+
+        throw error;
+      }
+
+      // 选择最佳上传策略
+      const strategy = await this.selectUploadStrategy(file);
+
+      // 确定分片大小
+      let chunkSize = strategy.chunkSize;
+      if (chunkSize === 'auto') {
+        const networkQuality = this.networkDetector
+          ? this.networkDetector.getNetworkQuality()
+          : NetworkQuality.NORMAL;
+        chunkSize = this.getDynamicChunkSize(file.size, networkQuality);
+      }
+
+      // 创建分片
+      const chunks = await this.fileManager.createChunks(
+        file as File,
+        chunkSize as number
+      );
+
+      // 触发文件准备完成事件
+      this.events.emit('filePrepared', {
+        file,
+        chunks: chunks.length,
+        chunkSize,
+      });
+
+      return chunks;
+    } catch (error) {
+      // 确保所有错误都是UploadError类型
+      const prepareError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.PREPARATION_ERROR,
+              `准备文件失败: ${error.message || '未知错误'}`,
+              { originalError: error }
+            );
+
+      // 触发错误事件（如果尚未触发）
+      if (!(error instanceof UploadError)) {
+        this.events.emit('error', {
+          error: prepareError,
+          file,
+          phase: 'preparation',
+        });
+      }
+
+      throw prepareError;
+    }
   }
 
   /**
    * 取消上传
-   * @param fileId 可选的特定文件ID，如果不提供则取消当前上传
+   *
+   * @param fileId - 可选的文件ID，如果不提供则取消所有上传
+   *
+   * @example
+   * ```typescript
+   * // 取消所有上传
+   * uploader.cancel();
+   *
+   * // 取消特定文件的上传
+   * uploader.cancel('file-123');
+   * ```
    */
   public cancel(fileId?: string): void {
-    this.isCancelled = true;
+    try {
+      if (fileId) {
+        // 如果指定了文件ID，则只取消该文件的上传
+        this.cancelSpecificFile(fileId);
+      } else {
+        // 否则取消所有上传
+        this.isCancelled = true;
+        this.scheduler.abort();
 
-    if (fileId) {
-      // 取消特定文件
-      this.cancelSpecificFile(fileId);
-    } else {
-      // 取消当前所有上传
-      // 通过调度器清除任务
-      if (this.scheduler) {
-        if (typeof this.scheduler.clear === 'function') {
-          this.scheduler.clear();
-        } else if (typeof this.scheduler.abort === 'function') {
-          this.scheduler.abort();
-        }
+        // 取消所有活动上传
+        this.activeUploads.forEach(id => {
+          this.cancelSpecificFile(id);
+        });
+
+        // 发布全局取消事件
+        this.events.emit('cancelAll', { timestamp: Date.now() });
       }
+    } catch (error) {
+      // 统一错误处理
+      const cancelError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.OPERATION_ERROR,
+              `取消上传失败: ${error.message || '未知错误'}`,
+              { originalError: error }
+            );
 
-      this.emit('cancel', { fileId: this.currentFileId });
+      // 触发错误事件
+      this.events.emit('error', {
+        error: cancelError,
+        phase: 'cancel',
+        fileId,
+      });
+
+      this.logger.error(`取消上传失败: ${cancelError.message}`);
     }
-
-    // 清理被取消上传的资源
-    this.cleanupCancelledUpload(fileId);
   }
 
   /**
-   * 取消特定文件的上传
-   * @param fileId 文件ID
+   * 取消指定文件的上传
+   *
+   * @private
+   * @param fileId - 要取消的文件ID
    */
   private cancelSpecificFile(fileId: string): void {
-    // 从活动上传中移除
-    if (this.activeUploads.has(fileId)) {
-      this.activeUploads.delete(fileId);
-
-      // 取消相关任务
-      if (this.scheduler && typeof this.scheduler.cancelTask === 'function') {
-        this.scheduler.cancelTasksWithMetadata({ fileId });
+    try {
+      // 如果文件不在活动上传列表中，直接返回
+      if (!this.activeUploads.has(fileId)) {
+        return;
       }
 
-      // 触发特定文件取消事件
-      this.emit('fileCancel', { fileId });
+      // 结束性能追踪
+      this.finishPerformanceTracking(fileId, false);
+
+      // 从活动上传列表中移除
+      this.activeUploads.delete(fileId);
+
+      // 清理已取消的上传
+      this.cleanupCancelledUpload(fileId);
+
+      // 触发取消事件
+      this.events.emit('cancel', { fileId, timestamp: Date.now() });
+
+      this.logger.info(`已取消文件上传: ${fileId}`);
+    } catch (error) {
+      throw new UploadError(
+        UploadErrorType.OPERATION_ERROR,
+        `取消文件上传失败: ${error.message}`,
+        { originalError: error, fileId }
+      );
     }
   }
 
@@ -814,48 +1183,81 @@ export class UploaderCore {
     fileName: string,
     chunkCount: number
   ): Promise<UploadResult> {
-    // 发送合并请求
     try {
-      const mergeUrl = `${this.options.endpoint}`;
-      const result = await this.networkManager.request(mergeUrl, {
-        method: 'POST',
-        headers: {
-          ...this.options.headers,
-          'X-File-ID': fileId,
-          'X-File-Name': encodeURIComponent(fileName),
-          'X-Total-Chunks': String(chunkCount),
-          'Content-Type': 'application/json',
-        },
-        data: {
-          action: 'merge',
-          fileId,
-          fileName,
-          chunkCount,
-        },
-        responseType: 'json',
-      });
+      this.logger.info(`合并分片: ${fileName}, ${chunkCount}个分片`);
 
-      // 运行插件钩子
-      await this.runPluginHook('afterMergeChunks', {
+      // 获取上传统计数据
+      const stats = this.getUploadPerformanceStats(
+        fileId
+      ) as UploadPerformanceStats;
+
+      // 构建文件元数据
+      const metadata = {
+        fileId,
+        created: Date.now(),
+        extension: fileName.split('.').pop() || '',
+      };
+
+      // 调用网络管理器执行合并请求
+      const response = await this.networkManager.mergeChunks({
         fileId,
         fileName,
         chunkCount,
-        result: result.data,
+        metadata,
       });
 
-      // 返回结果
-      return {
-        fileId,
-        url: result.data?.url || '',
+      // 如果响应不成功，抛出错误
+      if (!response || !response.success) {
+        throw new UploadError(
+          UploadErrorType.MERGE_ERROR,
+          `合并分片失败: ${response?.message || '服务器未返回成功状态'}`,
+          { response }
+        );
+      }
+
+      // 构造统一的上传结果对象
+      const result: UploadResult = {
         success: true,
+        fileInfo: {
+          name: fileName,
+          size: stats.totalBytes,
+          type: response.fileType || '',
+          uid: fileId,
+        },
+        metadata: {
+          ...metadata,
+          ...response.metadata,
+        },
+        response: response,
+        stats: {
+          averageSpeed: stats.averageSpeed,
+          peakSpeed: stats.peakSpeed,
+          totalBytes: stats.totalBytes,
+          duration: stats.duration,
+          retries: stats.retries,
+          failedChunks: stats.failedChunks,
+          successfulChunks: chunkCount - stats.failedChunks,
+        },
       };
+
+      // 运行插件钩子
+      await this.runPluginHook('afterUpload', result);
+
+      return result;
     } catch (error) {
-      this.logger.error(`合并分片失败: ${error.message}`);
-      throw this.errorCenter.normalizeError(
-        error,
-        UploadErrorType.MERGE_ERROR,
-        '合并分片失败'
-      );
+      const mergeError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.MERGE_ERROR,
+              `合并分片时发生错误: ${error.message || '未知错误'}`,
+              { originalError: error }
+            );
+
+      // 确保清理
+      this.cleanup();
+
+      throw mergeError;
     }
   }
 
@@ -1127,70 +1529,207 @@ export class UploaderCore {
 
   /**
    * 暂停指定文件的上传
-   * @param fileId 文件ID
-   * @returns 是否成功暂停
+   *
+   * @param fileId - 要暂停上传的文件ID
+   * @returns 是否成功暂停的Promise
+   *
+   * @throws {UploadError} 当暂停操作失败时
+   *
+   * @example
+   * ```typescript
+   * try {
+   *   const success = await uploader.pauseFile('file-123');
+   *   if (success) {
+   *     console.log('文件上传已暂停');
+   *   } else {
+   *     console.log('无法暂停文件上传');
+   *   }
+   * } catch (error) {
+   *   console.error('暂停上传失败:', error.message);
+   * }
+   * ```
    */
   public async pauseFile(fileId: string): Promise<boolean> {
-    if (!this.activeUploads.has(fileId)) {
-      this.logger.warn('尝试暂停不存在的上传', { fileId });
-      return false;
-    }
-
     try {
-      // 暂停与该文件相关的任务
-      let tasksPaused = false;
-      if (
-        this.scheduler &&
-        typeof this.scheduler.pauseTasksWithMetadata === 'function'
-      ) {
-        tasksPaused = await this.scheduler.pauseTasksWithMetadata({ fileId });
+      // 检查文件是否正在上传
+      if (!this.activeUploads.has(fileId)) {
+        this.logger.warn(`尝试暂停不存在的上传: ${fileId}`);
+        return false;
       }
 
-      // 触发文件暂停事件
-      this.emit('filePause', { fileId, timestamp: Date.now() });
+      this.logger.info(`暂停文件上传: ${fileId}`);
 
-      this.logger.debug('文件上传已暂停', { fileId });
+      // 获取上传状态
+      const status = this.getFileStatus(fileId);
+      if (!status) {
+        return false;
+      }
 
-      return tasksPaused;
+      // 通过插件系统执行暂停
+      const pauseResult = await this.runPluginHook('pauseUpload', {
+        fileId,
+        status,
+      });
+
+      // 如果插件处理了暂停，使用插件的结果
+      if (pauseResult?.handled) {
+        // 触发暂停事件
+        this.events.emit('pause', {
+          fileId,
+          timestamp: Date.now(),
+          status: pauseResult.status || 'paused',
+        });
+
+        return true;
+      }
+
+      // 否则，使用内置暂停逻辑
+
+      // 暂停调度器中与此文件相关的任务
+      this.scheduler.pauseTasksWithMetadata({ fileId });
+
+      // 保存当前上传状态
+      const storageAdapter =
+        this._currentStorageAdapter || this._defaultStorageAdapter;
+      if (storageAdapter) {
+        await storageAdapter.saveUploadState(fileId, {
+          paused: true,
+          timestamp: Date.now(),
+          progress: status.progress,
+          uploadedChunks: status.uploadedChunks,
+        });
+      }
+
+      // 触发暂停事件
+      this.events.emit('pause', {
+        fileId,
+        timestamp: Date.now(),
+        status: 'paused',
+      });
+
+      return true;
     } catch (error) {
-      this.logger.error('暂停文件上传失败', { fileId, error });
-      return false;
+      // 统一错误处理
+      const pauseError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.OPERATION_ERROR,
+              `暂停上传失败: ${error.message || '未知错误'}`,
+              { originalError: error, fileId }
+            );
+
+      // 触发错误事件
+      this.events.emit('error', {
+        error: pauseError,
+        phase: 'pause',
+        fileId,
+      });
+
+      throw pauseError;
     }
   }
 
   /**
    * 恢复指定文件的上传
-   * @param fileId 文件ID
-   * @returns 是否成功恢复
+   *
+   * @param fileId - 要恢复上传的文件ID
+   * @returns 是否成功恢复的Promise
+   *
+   * @throws {UploadError} 当恢复操作失败时
+   *
+   * @example
+   * ```typescript
+   * try {
+   *   const success = await uploader.resumeFile('file-123');
+   *   if (success) {
+   *     console.log('文件上传已恢复');
+   *   } else {
+   *     console.log('无法恢复文件上传');
+   *   }
+   * } catch (error) {
+   *   console.error('恢复上传失败:', error.message);
+   * }
+   * ```
    */
   public async resumeFile(fileId: string): Promise<boolean> {
     try {
-      let tasksResumed = false;
+      this.logger.info(`恢复文件上传: ${fileId}`);
 
-      // 恢复与该文件相关的任务
-      if (
-        this.scheduler &&
-        typeof this.scheduler.resumeTasksWithMetadata === 'function'
-      ) {
-        tasksResumed = await this.scheduler.resumeTasksWithMetadata({ fileId });
+      // 通过插件系统执行恢复
+      const resumeResult = await this.runPluginHook('resumeUpload', {
+        fileId,
+      });
+
+      // 如果插件处理了恢复，使用插件的结果
+      if (resumeResult?.handled) {
+        // 触发恢复事件
+        this.events.emit('resume', {
+          fileId,
+          timestamp: Date.now(),
+          status: resumeResult.status || 'uploading',
+        });
+
+        return true;
       }
 
-      if (tasksResumed) {
-        // 如果文件不在活动上传列表中，添加回来
-        if (!this.activeUploads.has(fileId)) {
-          this.activeUploads.add(fileId);
-        }
+      // 否则，使用内置恢复逻辑
 
-        // 触发文件恢复事件
-        this.emit('fileResume', { fileId, timestamp: Date.now() });
-
-        this.logger.debug('文件上传已恢复', { fileId });
+      // 尝试从存储中加载上传状态
+      const storageAdapter =
+        this._currentStorageAdapter || this._defaultStorageAdapter;
+      if (!storageAdapter) {
+        this.logger.warn('无法恢复上传：未配置存储适配器');
+        return false;
       }
 
-      return tasksResumed;
+      const savedState = await storageAdapter.getUploadState(fileId);
+      if (!savedState) {
+        this.logger.warn(`未找到可恢复的上传状态: ${fileId}`);
+        return false;
+      }
+
+      // 恢复上传状态
+      this.activeUploads.add(fileId);
+
+      // 解除调度器中与此文件相关任务的暂停
+      this.scheduler.resumeTasksWithMetadata({ fileId });
+
+      // 更新存储状态
+      await storageAdapter.saveUploadState(fileId, {
+        ...savedState,
+        paused: false,
+        timestamp: Date.now(),
+      });
+
+      // 触发恢复事件
+      this.events.emit('resume', {
+        fileId,
+        timestamp: Date.now(),
+        progress: savedState.progress,
+        status: 'uploading',
+      });
+
+      return true;
     } catch (error) {
-      this.logger.error('恢复文件上传失败', { fileId, error });
-      return false;
+      // 统一错误处理
+      const resumeError =
+        error instanceof UploadError
+          ? error
+          : new UploadError(
+              UploadErrorType.OPERATION_ERROR,
+              `恢复上传失败: ${error.message || '未知错误'}`,
+              { originalError: error, fileId }
+            );
+
+      // 触发错误事件
+      this.events.emit('error', {
+        error: resumeError,
+        phase: 'resume',
+        fileId,
+      });
+
+      throw resumeError;
     }
   }
 

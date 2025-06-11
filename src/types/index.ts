@@ -433,130 +433,74 @@ export interface EnvironmentInfo {
 
 /**
  * 上传器选项接口
+ * 
+ * @remarks
+ * UploaderOptions定义了fileChunkPro上传器的所有可配置选项。
+ * 配置项按功能领域分组，方便使用和维护。
  */
 export interface UploaderOptions {
   /**
-   * 最大并发任务数
-   * @default 3
+   * 上传端点URL（必填）
    */
-  maxConcurrentTasks?: number;
+  endpoint: string;
 
   /**
-   * 最大重试次数
-   * @default 3
+   * 分片管理配置
    */
-  maxRetries?: number;
+  chunk?: {
+    /**
+     * 分片大小策略
+     * - 数字: 固定分片大小（字节）
+     * - 'auto': 根据文件大小和网络状况自动调整
+     * @default 'auto'
+     */
+    size?: number | 'auto';
+
+    /**
+     * 分片大小范围（仅当size为'auto'时生效）
+     */
+    sizeRange?: {
+      /**
+       * 最小分片大小（字节）
+       * @default 256 * 1024 (256KB)
+       */
+      min?: number;
+
+      /**
+       * 最大分片大小（字节）
+       * @default 10 * 1024 * 1024 (10MB)
+       */
+      max?: number;
+    };
+
+    /**
+     * 是否对第一个分片使用更小的大小（有助于快速预览）
+     * @default false
+     */
+    optimizeFirstChunk?: boolean;
+  };
 
   /**
-   * 分片大小（字节）
-   * @default 2097152 (2MB)
+   * 并发与重试配置
    */
-  chunkSize?: number;
+  network?: {
+    /**
+     * 最大并发上传数
+     * @default 3（自动根据设备能力调整）
+     */
+    concurrency?: number;
 
-  /**
-   * 最小分片大小（字节）
-   * @default 524288 (512KB)
-   */
-  minChunkSize?: number;
-
-  /**
-   * 最大分片大小（字节）
-   * @default 52428800 (50MB)
-   */
-  maxChunkSize?: number;
-
-  /**
-   * 允许的最大文件大小（字节）
-   * @default 1073741824 (1GB)
-   */
-  maxFileSize?: number;
-
-  /**
-   * 允许上传的文件类型列表
-   * 例如：['image/jpeg', 'image/png', '.pdf', '*.docx']
-   */
-  allowedFileTypes?: string[];
-
-  /**
-   * 不允许上传的文件类型列表
-   */
-  disallowedFileTypes?: string[];
-
-  /**
-   * 自动开始上传
-   * @default true
-   */
-  autoStart?: boolean;
-
-  /**
-   * 启用断点续传
-   * @default true
-   */
-  resumable?: boolean;
-
-  /**
-   * 启用秒传功能
-   * @default true
-   */
-  skipDuplicate?: boolean;
-
-  /**
-   * 启用自动重试
-   * @default true
-   */
-  autoRetry?: boolean;
-
-  /**
-   * 启用调试模式
-   * @default false
-   */
-  debug?: boolean;
-
-  /**
-   * 启用错误追踪
-   * @default true
-   */
-  enableErrorTracking?: boolean;
-
-  /**
-   * 错误报告级别
-   * @default 'error'
-   */
-  errorReportingLevel?: 'debug' | 'info' | 'warn' | 'error' | 'fatal';
-
-  /**
-   * 启用内存管理
-   * @default true
-   */
-  enableMemoryManager?: boolean;
-
-  /**
-   * 低内存阈值
-   * @default 0.1 (10%)
-   */
-  lowMemoryThreshold?: number;
-
-  /**
-   * 严重内存阈值
-   * @default 0.05 (5%)
-   */
-  criticalMemoryThreshold?: number;
-
-  /**
-   * 安全级别
-   * @default 'standard'
-   */
-  securityLevel?: 'basic' | 'standard' | 'advanced';
-
-  /**
-   * 请求选项
-   */
-  requestOptions?: {
     /**
      * 请求超时时间（毫秒）
      * @default 30000
      */
     timeout?: number;
+
+    /**
+     * 是否使用自适应网络策略
+     * @default true
+     */
+    adaptive?: boolean;
 
     /**
      * 请求头
@@ -568,28 +512,29 @@ export interface UploaderOptions {
      * @default false
      */
     withCredentials?: boolean;
-
-    /**
-     * 其他自定义选项
-     */
-    [key: string]: any;
   };
 
   /**
-   * 重试策略
+   * 重试策略配置
    */
-  retryStrategy?: {
+  retry?: {
     /**
      * 最大重试次数
      * @default 3
      */
-    maxRetries?: number;
+    count?: number;
 
     /**
      * 重试延迟（毫秒）
      * @default 1000
      */
-    retryDelay?: number;
+    delay?: number;
+
+    /**
+     * 是否使用智能重试策略（根据错误类型和网络状况调整）
+     * @default true
+     */
+    smart?: boolean;
 
     /**
      * 是否使用指数退避算法
@@ -599,9 +544,147 @@ export interface UploaderOptions {
 
     /**
      * 可重试的状态码
+     * @default [408, 429, 500, 502, 503, 504]
      */
     retryableStatusCodes?: number[];
   };
+
+  /**
+   * 文件验证配置
+   */
+  validation?: {
+    /**
+     * 允许的最大文件大小（字节）
+     * @default 1073741824 (1GB)
+     */
+    maxFileSize?: number;
+
+    /**
+     * 允许上传的文件类型列表
+     * 例如：['image/jpeg', 'image/png', '.pdf', '*.docx']
+     */
+    allowedFileTypes?: string[];
+
+    /**
+     * 不允许上传的文件类型列表
+     */
+    disallowedFileTypes?: string[];
+
+    /**
+     * 是否允许上传空文件
+     * @default false
+     */
+    allowEmptyFiles?: boolean;
+  };
+
+  /**
+   * 性能与资源管理配置
+   */
+  performance?: {
+    /**
+     * 是否使用Web Worker处理计算密集型任务
+     * @default true (如环境支持)
+     */
+    useWorker?: boolean;
+
+    /**
+     * 最大内存使用率阈值（0-1）
+     * @default 0.9
+     */
+    maxMemoryUsage?: number;
+
+    /**
+     * 是否启用性能监控
+     * @default true
+     */
+    enableMonitoring?: boolean;
+
+    /**
+     * 性能检查间隔（毫秒）
+     * @default 5000
+     */
+    checkInterval?: number;
+  };
+
+  /**
+   * 功能开关配置
+   */
+  features?: {
+    /**
+     * 是否启用自动开始上传
+     * @default true
+     */
+    autoStart?: boolean;
+
+    /**
+     * 是否启用断点续传
+     * @default true
+     */
+    resumable?: boolean;
+
+    /**
+     * 是否启用秒传功能（通过文件指纹识别）
+     * @default true
+     */
+    skipDuplicate?: boolean;
+
+    /**
+     * 是否启用断线自动重新连接
+     * @default true
+     */
+    autoResume?: boolean;
+  };
+
+  /**
+   * 安全配置
+   */
+  security?: {
+    /**
+     * 安全级别
+     * @default 'standard'
+     */
+    level?: 'basic' | 'standard' | 'advanced';
+
+    /**
+     * 是否验证响应数据完整性
+     * @default true
+     */
+    validateResponse?: boolean;
+
+    /**
+     * 是否进行内容类型校验
+     * @default true
+     */
+    contentTypeValidation?: boolean;
+  };
+
+  /**
+   * 调试配置
+   */
+  debug?: {
+    /**
+     * 是否启用调试模式
+     * @default false
+     */
+    enabled?: boolean;
+
+    /**
+     * 日志级别
+     * @default 'error'
+     */
+    logLevel?: 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+
+    /**
+     * 是否启用错误追踪
+     * @default true
+     */
+    errorTracking?: boolean;
+  };
+
+  /**
+   * 插件配置
+   */
+  plugins?: Array<any>;
 
   /**
    * 自定义存储引擎
@@ -609,29 +692,60 @@ export interface UploaderOptions {
   storageEngine?: any;
 
   /**
-   * 优先级级别数
-   * @default 3
+   * 自定义上传策略
    */
-  priorityLevels?: number;
+  strategies?: Record<string, UploadStrategy>;
 
   /**
-   * 默认任务超时（毫秒）
-   * @default 60000
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 network.concurrency 替代
    */
-  defaultTaskTimeout?: number;
+  concurrency?: number;
 
   /**
-   * 环境类型（自动检测）
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 retry.count 替代
    */
-  environment?: 'browser' | 'node' | 'miniprogram' | 'worker' | string;
+  retryCount?: number;
 
   /**
-   * 插件列表
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 retry.delay 替代
    */
-  plugins?: any[];
+  retryDelay?: number;
 
   /**
-   * 其他选项
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 chunk.size 替代
+   */
+  chunkSize?: number | 'auto';
+
+  /**
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 network.timeout 替代
+   */
+  timeout?: number;
+
+  /**
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 network.headers 替代
+   */
+  headers?: Record<string, string>;
+
+  /**
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 performance.useWorker 替代 
+   */
+  useWorker?: boolean;
+
+  /**
+   * 废弃: 请使用新的分组配置
+   * @deprecated 使用 features.autoStart 替代
+   */
+  autoStart?: boolean;
+
+  /**
+   * 其他自定义配置
    */
   [key: string]: any;
 }
