@@ -24,6 +24,9 @@ export { default as DeviceCapabilityDetector } from './DeviceCapabilityDetector'
 export { default as EnvironmentFeatureDatabase } from './EnvironmentFeatureDatabase';
 export { default as EnvironmentDetector } from './EnvironmentDetector';
 export { default as EnvironmentDetectionSystem } from './EnvironmentDetectionSystem';
+export { default as AdaptiveConfigManager } from './AdaptiveConfigManager';
+export { default as FallbackStrategyManager } from './FallbackStrategyManager';
+export { default as MiniProgramOptimizer } from './MiniProgramOptimizer';
 
 // 安全相关工具导出
 export { default as SecurityError } from './SecurityError';
@@ -82,6 +85,24 @@ export type {
   FeatureSupportInfo,
   VersionFeatureData,
 } from './EnvironmentFeatureDatabase';
+
+// 自适应配置类型导出
+export type {
+  FeatureType,
+  DegradationLevel,
+  DegradationReason,
+  FallbackState,
+  FallbackStrategyConfig,
+  FallbackResult,
+} from './FallbackStrategyManager';
+
+// 小程序优化器类型导出
+export type {
+  MiniProgramPlatform,
+  ApiCompatMap,
+  MiniProgramLimitation,
+  MiniProgramRecommendation,
+} from './MiniProgramOptimizer';
 
 // Web标准相关类型导出
 export type {

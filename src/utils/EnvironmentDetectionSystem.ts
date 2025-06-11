@@ -4,1046 +4,742 @@
  * 全面的环境检测系统，检测当前运行环境的特性和能力
  */
 
-import { DeviceCapability } from '../types';
 import {
   Environment,
   BrowserFeature,
   MiniProgramFeature,
-  ReactNativeFeature,
-  NodeFeature,
-  FeatureSupport,
-  CapabilityLevel,
-  FallbackStrategy,
-  EnvironmentDetectionResult,
-  EnvironmentCapabilityScore,
 } from '../types/environment';
+import { EnvironmentType, IAdapter } from '../adapters/interfaces';
+import { Logger } from './Logger';
+import { EnvironmentDetector } from './EnvironmentDetector';
+import { EnvUtils } from './EnvUtils';
+import WebViewDetector, {
+  WebViewInfo,
+  WebViewLimitation,
+} from './WebViewDetector';
+import DeviceCapabilityDetector, {
+  DeviceProfile,
+} from './DeviceCapabilityDetector';
+import EnvironmentFeatureDatabase, {
+  EnvironmentFeatureData,
+} from './EnvironmentFeatureDatabase';
 
 /**
- * 环境检测系统 - 负责检测当前运行环境的特性和能力
- * 提供详细的环境信息、特性支持情况和设备能力评估
+ * 环境检测结果
+ */
+export interface EnvDetectionResult {
+  environment: Environment;
+  environmentType: EnvironmentType;
+  runtime?: string;
+  version?: string;
+  osInfo?: {
+    name: string;
+    version?: string;
+    platform?: string;
+  };
+  browser?: {
+    name: string;
+    version?: string;
+    engine?: string;
+    engineVersion?: string;
+  };
+  capabilities: Record<string, boolean>;
+  features: Record<string, boolean>;
+  limitations: Array<{
+    type: string;
+    description: string;
+    value?: number | string;
+    workaround?: string;
+    criticalityLevel: 'low' | 'medium' | 'high';
+  }>;
+  deviceProfile?: DeviceProfile;
+  webViewInfo?: WebViewInfo;
+  recommendedSettings: Record<string, any>;
+  environmentData?: EnvironmentFeatureData;
+}
+
+/**
+ * 环境检测系统 - 增强版
+ * 提供全面的环境检测、能力评估和最佳实践推荐
  */
 export class EnvironmentDetectionSystem {
-  // 缓存检测结果，避免重复检测
-  private cachedEnvironment: Environment | null = null;
-  private cachedFeatures: FeatureSupport | null = null;
-  private cachedCapabilities: DeviceCapability | null = null;
-  private cachedDetectionResult: EnvironmentDetectionResult | null = null;
-  private cachedCapabilityScore: EnvironmentCapabilityScore | null = null;
+  private static instance: EnvironmentDetectionSystem;
+  private logger: Logger;
+  private envDetector: EnvironmentDetector;
+  private webViewDetector: WebViewDetector;
+  private deviceCapabilityDetector: DeviceCapabilityDetector;
+  private environmentFeatureDatabase: EnvironmentFeatureDatabase;
+
+  // 缓存检测结果
+  private cachedDetectionResult: EnvDetectionResult | null = null;
 
   /**
-   * 构造函数
+   * 获取单例实例
    */
-  constructor() {
-    // 初始化时不立即执行检测，延迟到需要时再执行
+  public static getInstance(): EnvironmentDetectionSystem {
+    if (!EnvironmentDetectionSystem.instance) {
+      EnvironmentDetectionSystem.instance = new EnvironmentDetectionSystem();
+    }
+    return EnvironmentDetectionSystem.instance;
   }
 
   /**
-   * 获取当前运行环境
-   * @returns 当前环境类型枚举值
+   * 私有构造函数
    */
-  public getEnvironment(): Environment {
-    if (this.cachedEnvironment !== null) {
-      return this.cachedEnvironment;
-    }
+  private constructor() {
+    this.logger = new Logger('EnvironmentDetectionSystem');
+    this.envDetector = EnvironmentDetector.getInstance();
+    this.webViewDetector = WebViewDetector.getInstance();
+    this.deviceCapabilityDetector = DeviceCapabilityDetector.getInstance();
+    this.environmentFeatureDatabase = EnvironmentFeatureDatabase.getInstance();
 
-    // 浏览器环境
-    if (typeof window !== 'undefined' && typeof document !== 'undefined') {
-      // 检查React Native环境
-      if (
-        typeof navigator !== 'undefined' &&
-        navigator.product === 'ReactNative'
-      ) {
-        this.cachedEnvironment = Environment.ReactNative;
-        return Environment.ReactNative;
-      }
-
-      // 检查微信小程序环境
-      if (typeof window.wx !== 'undefined') {
-        this.cachedEnvironment = Environment.WechatMP;
-        return Environment.WechatMP;
-      }
-
-      // 检查支付宝小程序环境
-      if (typeof window.my !== 'undefined') {
-        this.cachedEnvironment = Environment.AlipayMP;
-        return Environment.AlipayMP;
-      }
-
-      // 检查字节跳动小程序环境
-      if (typeof window.tt !== 'undefined') {
-        this.cachedEnvironment = Environment.BytedanceMP;
-        return Environment.BytedanceMP;
-      }
-
-      // 检查百度小程序环境
-      if (typeof window.swan !== 'undefined') {
-        this.cachedEnvironment = Environment.BaiduMP;
-        return Environment.BaiduMP;
-      }
-
-      // 检查uni-app环境
-      if (typeof window.uni !== 'undefined') {
-        this.cachedEnvironment = Environment.UniAppMP;
-        return Environment.UniAppMP;
-      }
-
-      // 标准浏览器环境
-      this.cachedEnvironment = Environment.Browser;
-      return Environment.Browser;
-    }
-
-    // Node.js环境
-    if (
-      typeof process !== 'undefined' &&
-      process.versions &&
-      process.versions.node
-    ) {
-      this.cachedEnvironment = Environment.NodeJS;
-      return Environment.NodeJS;
-    }
-
-    // 未知环境
-    this.cachedEnvironment = Environment.Unknown;
-    return Environment.Unknown;
+    this.logger.debug('环境检测系统初始化完成');
   }
 
   /**
-   * 获取环境名称
-   * @returns 环境名称字符串
+   * 执行全面环境检测
    */
-  public getEnvironmentName(): string {
-    const env = this.getEnvironment();
-    switch (env) {
-      case Environment.Browser:
-        return '浏览器';
-      case Environment.ReactNative:
-        return 'React Native';
-      case Environment.WechatMP:
-        return '微信小程序';
-      case Environment.AlipayMP:
-        return '支付宝小程序';
-      case Environment.BytedanceMP:
-        return '字节跳动小程序';
-      case Environment.BaiduMP:
-        return '百度小程序';
-      case Environment.TaroMP:
-        return 'Taro';
-      case Environment.UniAppMP:
-        return 'uni-app';
-      case Environment.NodeJS:
-        return 'Node.js';
-      default:
-        return '未知环境';
-    }
-  }
-
-  /**
-   * 检测当前环境中所有相关特性的支持情况
-   * @returns 特性支持情况映射
-   */
-  public detectAllFeatures(): FeatureSupport {
-    if (this.cachedFeatures !== null) {
-      return this.cachedFeatures;
-    }
-
-    const env = this.getEnvironment();
-    let features: FeatureSupport = {};
-
-    switch (env) {
-      case Environment.Browser:
-        features = this.detectBrowserFeatures();
-        break;
-      case Environment.ReactNative:
-        features = this.detectReactNativeFeatures();
-        break;
-      case Environment.WechatMP:
-      case Environment.AlipayMP:
-      case Environment.BytedanceMP:
-      case Environment.BaiduMP:
-      case Environment.TaroMP:
-      case Environment.UniAppMP:
-        features = this.detectMiniProgramFeatures();
-        break;
-      case Environment.NodeJS:
-        features = this.detectNodeFeatures();
-        break;
-      default:
-        features = {}; // 未知环境，特性支持情况未知
-    }
-
-    this.cachedFeatures = features;
-    return features;
-  }
-
-  /**
-   * 检测浏览器环境特性
-   * @returns 浏览器特性支持情况
-   */
-  private detectBrowserFeatures(): FeatureSupport {
-    const features: FeatureSupport = {};
-
-    // Web Worker 支持情况
-    features[BrowserFeature.WEB_WORKER] = typeof Worker !== 'undefined';
-
-    // Service Worker 支持情况
-    features[BrowserFeature.SERVICE_WORKER] = 'serviceWorker' in navigator;
-
-    // WebSocket 支持情况
-    features[BrowserFeature.WEBSOCKET] = typeof WebSocket !== 'undefined';
-
-    // IndexedDB 支持情况
-    features[BrowserFeature.INDEXED_DB] = typeof indexedDB !== 'undefined';
-
-    // File API 支持情况
-    features[BrowserFeature.FILE_API] =
-      typeof File !== 'undefined' && typeof FileReader !== 'undefined';
-
-    // Streams API 支持情况
-    features[BrowserFeature.STREAMS_API] =
-      typeof ReadableStream !== 'undefined';
-
-    // SharedArrayBuffer 支持情况
-    features[BrowserFeature.SHARED_ARRAY_BUFFER] =
-      typeof SharedArrayBuffer !== 'undefined';
-
-    // Network Information API 支持情况
-    features[BrowserFeature.NETWORK_INFORMATION_API] =
-      'connection' in navigator;
-
-    // Web Crypto API 支持情况
-    features[BrowserFeature.WEB_CRYPTO] =
-      typeof crypto !== 'undefined' && 'subtle' in crypto;
-
-    // Performance API 支持情况
-    features[BrowserFeature.PERFORMANCE_API] =
-      typeof performance !== 'undefined';
-
-    // Memory API 支持情况
-    features[BrowserFeature.MEMORY_API] =
-      typeof performance !== 'undefined' && 'memory' in performance;
-
-    // Battery API 支持情况
-    features[BrowserFeature.BATTERY_API] = 'getBattery' in navigator;
-
-    // 硬件并发支持情况
-    features[BrowserFeature.HARDWARE_CONCURRENCY] =
-      'hardwareConcurrency' in navigator;
-
-    // 设备内存 API 支持情况
-    features[BrowserFeature.DEVICE_MEMORY_API] = 'deviceMemory' in navigator;
-
-    // Fetch API 支持情况
-    features[BrowserFeature.FETCH_API] = typeof fetch !== 'undefined';
-
-    // Promise 支持情况
-    features[BrowserFeature.PROMISE] = typeof Promise !== 'undefined';
-
-    // Async/Await 支持情况
-    features[BrowserFeature.ASYNC_AWAIT] = (() => {
-      try {
-        new Function('async () => {}');
-        return true;
-      } catch (e) {
-        return false;
-      }
-    })();
-
-    // WebAssembly 支持情况
-    features[BrowserFeature.WEB_ASSEMBLY] = typeof WebAssembly !== 'undefined';
-
-    return features;
-  }
-
-  /**
-   * 检测小程序环境特性
-   * @returns 小程序特性支持情况
-   */
-  private detectMiniProgramFeatures(): FeatureSupport {
-    const features: FeatureSupport = {};
-    const env = this.getEnvironment();
-
-    // 根据不同小程序环境进行特性检测
-    switch (env) {
-      case Environment.WechatMP:
-        if (typeof window !== 'undefined' && window.wx) {
-          // 文件系统 API 支持情况
-          features[MiniProgramFeature.FILE_SYSTEM] =
-            typeof window.wx.getFileSystemManager === 'function';
-
-          // 上传文件 API 支持情况
-          features[MiniProgramFeature.UPLOAD_FILE] =
-            typeof window.wx.uploadFile === 'function';
-
-          // 下载文件 API 支持情况
-          features[MiniProgramFeature.DOWNLOAD_FILE] =
-            typeof window.wx.downloadFile === 'function';
-
-          // WebSocket 支持情况
-          features[MiniProgramFeature.SOCKET] =
-            typeof window.wx.connectSocket === 'function';
-
-          // Worker 支持情况
-          features[MiniProgramFeature.WORKER] =
-            typeof window.wx.createWorker === 'function';
-        }
-        break;
-
-      case Environment.AlipayMP:
-        if (typeof window !== 'undefined' && window.my) {
-          // 支付宝小程序的特性检测
-          features[MiniProgramFeature.FILE_SYSTEM] =
-            typeof window.my.getFileSystemManager === 'function';
-
-          features[MiniProgramFeature.UPLOAD_FILE] =
-            typeof window.my.uploadFile === 'function';
-
-          features[MiniProgramFeature.DOWNLOAD_FILE] =
-            typeof window.my.downloadFile === 'function';
-
-          features[MiniProgramFeature.SOCKET] =
-            typeof window.my.connectSocket === 'function';
-        }
-        break;
-
-      // 其他小程序环境类似检测...
-      case Environment.BytedanceMP:
-      case Environment.BaiduMP:
-      case Environment.UniAppMP:
-      case Environment.TaroMP:
-        // 这里可以添加其他小程序环境的特性检测逻辑
-        break;
-    }
-
-    return features;
-  }
-
-  /**
-   * 检测React Native环境特性
-   * @returns React Native特性支持情况
-   */
-  private detectReactNativeFeatures(): FeatureSupport {
-    const features: FeatureSupport = {};
-
-    // Fetch API 支持情况
-    features[ReactNativeFeature.FETCH] = typeof fetch !== 'undefined';
-
-    // XMLHttpRequest 支持情况
-    features[ReactNativeFeature.XMLHTTPREQUEST] =
-      typeof XMLHttpRequest !== 'undefined';
-
-    // WebSocket 支持情况
-    features[ReactNativeFeature.WEBSOCKET] = typeof WebSocket !== 'undefined';
-
-    // 文件系统 API 支持情况 - 需要额外检测React Native特定API
-    features[ReactNativeFeature.FILE_SYSTEM] = false;
-
-    try {
-      // 尝试动态加载 react-native-fs 模块
-      // 注意: 这里只是检测，实际使用需要正确配置
-      import('react-native-fs')
-        .then(_RNFS => {
-          features[ReactNativeFeature.FILE_SYSTEM] = true;
-        })
-        .catch(() => {
-          features[ReactNativeFeature.FILE_SYSTEM] = false;
-        });
-    } catch (e) {
-      // 模块不可用
-    }
-
-    return features;
-  }
-
-  /**
-   * 检测Node.js环境特性
-   * @returns Node.js特性支持情况
-   */
-  private detectNodeFeatures(): FeatureSupport {
-    const features: FeatureSupport = {};
-
-    try {
-      // 检测fs模块
-      import('fs')
-        .then(_fs => {
-          features[NodeFeature.FS] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.FS] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.FS] = false;
-    }
-
-    try {
-      // 检测http模块
-      import('http')
-        .then(_http => {
-          features[NodeFeature.HTTP] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.HTTP] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.HTTP] = false;
-    }
-
-    try {
-      // 检测https模块
-      import('https')
-        .then(_https => {
-          features[NodeFeature.HTTPS] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.HTTPS] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.HTTPS] = false;
-    }
-
-    try {
-      // 检测stream模块
-      import('stream')
-        .then(_stream => {
-          features[NodeFeature.STREAM] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.STREAM] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.STREAM] = false;
-    }
-
-    try {
-      // 检测worker_threads模块
-      import('worker_threads')
-        .then(_worker => {
-          features[NodeFeature.WORKER_THREADS] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.WORKER_THREADS] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.WORKER_THREADS] = false;
-    }
-
-    try {
-      // 检测crypto模块
-      import('crypto')
-        .then(_crypto => {
-          features[NodeFeature.CRYPTO] = true;
-        })
-        .catch(() => {
-          features[NodeFeature.CRYPTO] = false;
-        });
-    } catch (e) {
-      features[NodeFeature.CRYPTO] = false;
-    }
-
-    return features;
-  }
-
-  /**
-   * 检查当前环境是否支持特定特性
-   * @param feature 特性名称
-   * @returns 是否支持该特性
-   */
-  public hasFeature(feature: string): boolean {
-    const allFeatures = this.detectAllFeatures();
-    return !!allFeatures[feature];
-  }
-
-  /**
-   * 评估设备能力
-   * 包括内存、处理器、网络、存储和电池状态评估
-   * @returns 设备能力评级
-   */
-  public getDeviceCapabilities(): DeviceCapability {
-    if (this.cachedCapabilities !== null) {
-      return this.cachedCapabilities;
-    }
-
-    const env = this.getEnvironment();
-    const capabilities: DeviceCapability = {
-      memory: 'normal',
-      processor: 'normal',
-      network: 'normal',
-      storage: 'normal',
-      battery: 'normal',
-    };
-
-    // 浏览器环境下进行详细评估
-    if (env === Environment.Browser) {
-      // 内存能力评估
-      capabilities.memory = this.evaluateMemoryCapability();
-
-      // 处理器能力评估
-      capabilities.processor = this.evaluateProcessorCapability();
-
-      // 网络能力评估
-      capabilities.network = this.evaluateNetworkCapability();
-
-      // 存储能力评估
-      capabilities.storage = this.evaluateStorageCapability();
-
-      // 电池状态评估
-      capabilities.battery = this.evaluateBatteryStatus();
-    }
-    // 小程序环境下的能力评估
-    else if (
-      env === Environment.WechatMP ||
-      env === Environment.AlipayMP ||
-      env === Environment.BytedanceMP ||
-      env === Environment.BaiduMP
-    ) {
-      // 小程序环境能力评估相对保守
-      capabilities.memory = 'low';
-      capabilities.processor = 'low';
-      capabilities.network = 'normal';
-      capabilities.storage = 'low';
-      capabilities.battery = 'normal';
-    }
-    // React Native环境下的能力评估
-    else if (env === Environment.ReactNative) {
-      // React Native环境能力评估
-      capabilities.memory = 'normal';
-      capabilities.processor = 'normal';
-      capabilities.network = 'normal';
-      capabilities.storage = 'normal';
-      capabilities.battery = 'normal';
-    }
-    // Node.js环境下的能力评估
-    else if (env === Environment.NodeJS) {
-      // Node.js环境通常有较好的资源
-      capabilities.memory = 'high';
-      capabilities.processor = 'high';
-      capabilities.network = 'high';
-      capabilities.storage = 'high';
-      capabilities.battery = 'high'; // 服务器通常有稳定电源
-    }
-
-    this.cachedCapabilities = capabilities;
-    return capabilities;
-  }
-
-  /**
-   * 评估内存能力
-   * @returns 内存能力级别
-   */
-  private evaluateMemoryCapability(): CapabilityLevel {
-    // 检查deviceMemory API
-    if (
-      navigator &&
-      'deviceMemory' in navigator &&
-      typeof (navigator as any).deviceMemory === 'number'
-    ) {
-      const memory = (navigator as any).deviceMemory;
-      if (memory <= 1) return 'low';
-      if (memory <= 4) return 'normal';
-      return 'high';
-    }
-
-    // 检查performance.memory API
-    if (
-      performance &&
-      'memory' in performance &&
-      (performance as any).memory &&
-      typeof (performance as any).memory.jsHeapSizeLimit === 'number'
-    ) {
-      const maxMemory = (performance as any).memory.jsHeapSizeLimit;
-      // 小于512MB视为低内存
-      if (maxMemory < 512 * 1024 * 1024) return 'low';
-      // 小于2GB视为普通内存
-      if (maxMemory < 2 * 1024 * 1024 * 1024) return 'normal';
-      // 大于2GB视为高内存
-      return 'high';
-    }
-
-    // 无法准确检测时，返回默认值
-    return 'normal';
-  }
-
-  /**
-   * 评估处理器能力
-   * @returns 处理器能力级别
-   */
-  private evaluateProcessorCapability(): CapabilityLevel {
-    // 检查硬件并发数
-    if (navigator && 'hardwareConcurrency' in navigator) {
-      const cores = navigator.hardwareConcurrency;
-      if (cores <= 2) return 'low';
-      if (cores <= 6) return 'normal';
-      return 'high';
-    }
-
-    // 使用简单性能测试评估
-    const startTime = Date.now();
-    for (let i = 0; i < 1000000; i++) {
-      // 执行一些简单计算以测试 CPU 性能
-    }
-    const duration = Date.now() - startTime;
-
-    // 根据测试耗时判断处理器能力
-    if (duration > 100) return 'low';
-    if (duration > 30) return 'normal';
-    return 'high';
-  }
-
-  /**
-   * 评估网络能力
-   * @returns 网络能力级别
-   */
-  private evaluateNetworkCapability(): CapabilityLevel {
-    // 检查Network Information API
-    if (navigator && 'connection' in navigator) {
-      const connection = (navigator as any).connection;
-
-      if (connection) {
-        // 检查网络类型
-        if (connection.saveData) {
-          return 'low'; // 节省数据模式
-        }
-
-        // 检查有效网络类型
-        if (connection.effectiveType) {
-          switch (connection.effectiveType) {
-            case 'slow-2g':
-            case '2g':
-              return 'low';
-            case '3g':
-              return 'normal';
-            case '4g':
-              return 'high';
-            default:
-              return 'normal';
-          }
-        }
-
-        // 检查下载速度
-        if (typeof connection.downlink === 'number') {
-          if (connection.downlink < 1) return 'low';
-          if (connection.downlink < 5) return 'normal';
-          return 'high';
-        }
-      }
-    }
-
-    // 无法准确检测时，返回默认值
-    return 'normal';
-  }
-
-  /**
-   * 评估存储能力
-   * @returns 存储能力级别
-   */
-  private evaluateStorageCapability(): CapabilityLevel {
-    // 检查IndexedDB支持
-    const hasIndexedDB = this.hasFeature(BrowserFeature.INDEXED_DB);
-
-    // 检查存储估计API
-    if (
-      navigator &&
-      'storage' in navigator &&
-      'estimate' in navigator.storage
-    ) {
-      // 尝试获取存储配额信息
-      navigator.storage
-        .estimate()
-        .then(estimate => {
-          if (estimate.quota) {
-            if (estimate.quota < 100 * 1024 * 1024) return 'low'; // 小于100MB
-            if (estimate.quota < 1024 * 1024 * 1024) return 'normal'; // 小于1GB
-            return 'high'; // 大于1GB
-          }
-        })
-        .catch(() => {
-          // 发生错误，无法获取存储估计
-        });
-    }
-
-    // 如果支持IndexedDB，至少为普通存储能力
-    if (hasIndexedDB) {
-      return 'normal';
-    }
-
-    // 默认为低存储能力
-    return 'low';
-  }
-
-  /**
-   * 评估电池状态
-   * @returns 电池状态级别
-   */
-  private evaluateBatteryStatus(): CapabilityLevel {
-    // 检查Battery API
-    if (navigator && 'getBattery' in navigator) {
-      navigator
-        .getBattery()
-        .then(battery => {
-          // 充电状态
-          if (battery.charging) {
-            return 'high';
-          }
-
-          // 电量水平
-          const level = battery.level;
-          if (level < 0.2) return 'low';
-          if (level < 0.5) return 'normal';
-          return 'high';
-        })
-        .catch(() => {
-          // 发生错误，无法获取电池信息
-        });
-    }
-
-    // 无法检测时，假设为普通电池状态
-    return 'normal';
-  }
-
-  /**
-   * 获取当前环境的降级策略
-   * 在关键特性不支持时提供替代方案
-   * @returns 降级策略列表
-   */
-  public getFallbackStrategies(): FallbackStrategy[] {
-    const features = this.detectAllFeatures();
-    const strategies: FallbackStrategy[] = [];
-
-    // Worker 降级策略
-    if (!features[BrowserFeature.WEB_WORKER]) {
-      strategies.push({
-        feature: BrowserFeature.WEB_WORKER,
-        fallbackMethod: 'main_thread_processing',
-        performance: 'low',
-        limitations: ['可能导致UI阻塞', '处理大文件时性能下降'],
-        enabled: true,
-      });
-    }
-
-    // IndexedDB 降级策略
-    if (!features[BrowserFeature.INDEXED_DB]) {
-      strategies.push({
-        feature: BrowserFeature.INDEXED_DB,
-        fallbackMethod: 'memory_storage',
-        performance: 'medium',
-        limitations: ['断点续传功能受限', '无法处理超大文件'],
-        enabled: true,
-      });
-    }
-
-    // Streams API 降级策略
-    if (!features[BrowserFeature.STREAMS_API]) {
-      strategies.push({
-        feature: BrowserFeature.STREAMS_API,
-        fallbackMethod: 'array_buffer_processing',
-        performance: 'medium',
-        limitations: ['内存使用量增加', '处理大文件时可能内存不足'],
-        enabled: true,
-      });
-    }
-
-    // WebCrypto API 降级策略
-    if (!features[BrowserFeature.WEB_CRYPTO]) {
-      strategies.push({
-        feature: BrowserFeature.WEB_CRYPTO,
-        fallbackMethod: 'js_crypto_implementation',
-        performance: 'low',
-        limitations: ['哈希计算速度变慢', '可能影响上传性能'],
-        enabled: true,
-      });
-    }
-
-    return strategies;
-  }
-
-  /**
-   * 获取环境能力评分
-   * 综合评估环境对文件上传的支持能力
-   * @returns 环境能力评分（0-100）
-   */
-  public getCapabilityScore(): EnvironmentCapabilityScore {
-    if (this.cachedCapabilityScore !== null) {
-      return this.cachedCapabilityScore;
-    }
-
-    const features = this.detectAllFeatures();
-    const capabilities = this.getDeviceCapabilities();
-
-    // 文件处理能力评分
-    const fileProcessingScore = this.calculateFileProcessingScore(
-      features,
-      capabilities
-    );
-
-    // 网络能力评分
-    const networkingScore = this.calculateNetworkingScore(
-      features,
-      capabilities
-    );
-
-    // 并发处理能力评分
-    const concurrencyScore = this.calculateConcurrencyScore(
-      features,
-      capabilities
-    );
-
-    // 存储能力评分
-    const storageScore = this.calculateStorageScore(features, capabilities);
-
-    // 可靠性评分
-    const reliabilityScore = this.calculateReliabilityScore(features);
-
-    // 计算总体评分 (各部分权重可调整)
-    const overallScore = Math.round(
-      fileProcessingScore * 0.25 +
-        networkingScore * 0.25 +
-        concurrencyScore * 0.2 +
-        storageScore * 0.15 +
-        reliabilityScore * 0.15
-    );
-
-    const score: EnvironmentCapabilityScore = {
-      overall: overallScore,
-      fileProcessing: fileProcessingScore,
-      networking: networkingScore,
-      concurrency: concurrencyScore,
-      storage: storageScore,
-      reliability: reliabilityScore,
-    };
-
-    this.cachedCapabilityScore = score;
-    return score;
-  }
-
-  /**
-   * 计算文件处理能力评分
-   */
-  private calculateFileProcessingScore(
-    features: FeatureSupport,
-    capabilities: DeviceCapability
-  ): number {
-    let score = 50; // 基础分
-
-    // 文件API支持
-    if (features[BrowserFeature.FILE_API]) score += 20;
-
-    // Streams API支持
-    if (features[BrowserFeature.STREAMS_API]) score += 15;
-
-    // WebCrypto支持
-    if (features[BrowserFeature.WEB_CRYPTO]) score += 10;
-
-    // 处理器能力
-    if (capabilities.processor === 'high') score += 5;
-    if (capabilities.processor === 'low') score -= 5;
-
-    // 内存能力
-    if (capabilities.memory === 'high') score += 5;
-    if (capabilities.memory === 'low') score -= 10;
-
-    // 确保分数在0-100范围内
-    return Math.max(0, Math.min(100, score));
-  }
-
-  /**
-   * 计算网络能力评分
-   */
-  private calculateNetworkingScore(
-    features: FeatureSupport,
-    capabilities: DeviceCapability
-  ): number {
-    let score = 50; // 基础分
-
-    // Fetch API支持
-    if (features[BrowserFeature.FETCH_API]) score += 15;
-
-    // Network Information API支持
-    if (features[BrowserFeature.NETWORK_INFORMATION_API]) score += 10;
-
-    // WebSocket支持
-    if (features[BrowserFeature.WEBSOCKET]) score += 10;
-
-    // 网络能力
-    if (capabilities.network === 'high') score += 15;
-    if (capabilities.network === 'normal') score += 5;
-    if (capabilities.network === 'low') score -= 10;
-
-    // 确保分数在0-100范围内
-    return Math.max(0, Math.min(100, score));
-  }
-
-  /**
-   * 计算并发处理能力评分
-   */
-  private calculateConcurrencyScore(
-    features: FeatureSupport,
-    capabilities: DeviceCapability
-  ): number {
-    let score = 50; // 基础分
-
-    // Web Worker支持
-    if (features[BrowserFeature.WEB_WORKER]) score += 20;
-
-    // 硬件并发支持
-    if (features[BrowserFeature.HARDWARE_CONCURRENCY]) score += 10;
-
-    // SharedArrayBuffer支持
-    if (features[BrowserFeature.SHARED_ARRAY_BUFFER]) score += 15;
-
-    // 处理器能力
-    if (capabilities.processor === 'high') score += 10;
-    if (capabilities.processor === 'low') score -= 15;
-
-    // 确保分数在0-100范围内
-    return Math.max(0, Math.min(100, score));
-  }
-
-  /**
-   * 计算存储能力评分
-   */
-  private calculateStorageScore(
-    features: FeatureSupport,
-    capabilities: DeviceCapability
-  ): number {
-    let score = 50; // 基础分
-
-    // IndexedDB支持
-    if (features[BrowserFeature.INDEXED_DB]) score += 25;
-
-    // 存储能力
-    if (capabilities.storage === 'high') score += 15;
-    if (capabilities.storage === 'normal') score += 5;
-    if (capabilities.storage === 'low') score -= 10;
-
-    // 确保分数在0-100范围内
-    return Math.max(0, Math.min(100, score));
-  }
-
-  /**
-   * 计算可靠性评分
-   */
-  private calculateReliabilityScore(features: FeatureSupport): number {
-    let score = 50; // 基础分
-
-    // Promise支持
-    if (features[BrowserFeature.PROMISE]) score += 15;
-
-    // Async/Await支持
-    if (features[BrowserFeature.ASYNC_AWAIT]) score += 15;
-
-    // Performance API支持
-    if (features[BrowserFeature.PERFORMANCE_API]) score += 10;
-
-    // Service Worker支持(离线能力)
-    if (features[BrowserFeature.SERVICE_WORKER]) score += 10;
-
-    // 确保分数在0-100范围内
-    return Math.max(0, Math.min(100, score));
-  }
-
-  /**
-   * 获取完整的环境检测结果
-   * @returns 完整的环境检测结果对象
-   */
-  public getDetectionResult(): EnvironmentDetectionResult {
-    if (this.cachedDetectionResult !== null) {
+  public async detectEnvironment(): Promise<EnvDetectionResult> {
+    // 使用缓存结果，避免重复检测
+    if (this.cachedDetectionResult) {
       return this.cachedDetectionResult;
     }
 
-    const env = this.getEnvironmentName();
-    const features = this.detectAllFeatures();
-    const capabilities = this.getDeviceCapabilities();
-    const scores = this.getCapabilityScore();
-    const fallbacks = this.getFallbackStrategies();
+    this.logger.debug('开始执行全面环境检测');
 
-    // 收集警告信息
-    const warnings: string[] = [];
+    // 基础环境检测
+    const environment = this.envDetector.getEnvironment();
+    const environmentType = this.envDetector.getEnvironmentType();
 
-    // 收集限制信息
-    const limitations: string[] = [];
-
-    // 添加主要限制和警告
-    if (capabilities.memory === 'low') {
-      warnings.push('设备内存较低，可能影响大文件处理');
-    }
-
-    if (capabilities.network === 'low') {
-      warnings.push('网络条件较差，上传可能较慢');
-    }
-
-    if (!features[BrowserFeature.WEB_WORKER]) {
-      limitations.push('不支持Web Worker，无法使用后台线程处理');
-    }
-
-    if (!features[BrowserFeature.INDEXED_DB]) {
-      limitations.push('不支持IndexedDB，断点续传功能受限');
-    }
-
-    // 生成推荐配置
-    // 这里只是一个示例，实际推荐配置会由ConfigurationEngine负责生成
-    const recommendations = {
-      chunkSize: capabilities.memory === 'low' ? 1048576 : 4194304, // 1MB 或 4MB
-      concurrency: capabilities.processor === 'low' ? 2 : 4,
-      useWorker: features[BrowserFeature.WEB_WORKER],
-      storageType: features[BrowserFeature.INDEXED_DB] ? 'indexeddb' : 'memory',
-      retryStrategy: {
-        maxRetries: capabilities.network === 'low' ? 5 : 3,
-        initialDelay: 1000,
-        maxDelay: 30000,
-      },
-      timeout: capabilities.network === 'low' ? 60000 : 30000,
-      processingMode: features[BrowserFeature.STREAMS_API]
-        ? 'stream'
-        : 'buffer',
-      memoryManagement: {
-        maxUsage: capabilities.memory === 'low' ? 0.5 : 0.8,
-        cleanupInterval: 10000,
-      },
-      monitoringFrequency: capabilities.processor === 'low' ? 2000 : 1000,
-      optimizations: [],
+    // 初始化检测结果
+    const result: EnvDetectionResult = {
+      environment,
+      environmentType,
+      capabilities: {},
+      features: {},
+      limitations: [],
+      recommendedSettings: {},
     };
 
-    // 根据特性和能力添加推荐的优化项
-    if (features[BrowserFeature.WEB_WORKER]) {
-      recommendations.optimizations.push('worker_processing');
+    try {
+      // 填充基础环境信息
+      this.fillBasicEnvironmentInfo(result);
+
+      // WebView环境检测
+      this.detectWebViewEnvironment(result);
+
+      // 设备能力检测
+      await this.detectDeviceCapabilities(result);
+
+      // 从环境特性数据库获取特性和限制信息
+      this.applyEnvironmentFeatureData(result);
+
+      // 生成综合推荐设置
+      this.generateRecommendedSettings(result);
+
+      this.logger.debug('环境检测完成', {
+        env: environment,
+        type: environmentType,
+      });
+    } catch (error) {
+      this.logger.error('环境检测过程发生错误', error);
     }
 
-    if (features[BrowserFeature.STREAMS_API]) {
-      recommendations.optimizations.push('stream_processing');
-    }
-
-    if (capabilities.network === 'high') {
-      recommendations.optimizations.push('aggressive_concurrency');
-    }
-
-    if (capabilities.memory === 'high') {
-      recommendations.optimizations.push('large_chunks');
-    }
-
-    const result: EnvironmentDetectionResult = {
-      environment: env,
-      features,
-      capabilities,
-      scores,
-      recommendations,
-      fallbacks,
-      warnings,
-      limitations,
-    };
-
+    // 缓存检测结果
     this.cachedDetectionResult = result;
     return result;
   }
 
   /**
-   * 重置缓存的检测结果
-   * 用于强制重新检测环境
+   * 填充基础环境信息
+   */
+  private fillBasicEnvironmentInfo(result: EnvDetectionResult): void {
+    // 运行时信息
+    result.runtime = this.envDetector.getRuntime();
+    result.version = this.envDetector.getRuntimeVersion();
+
+    // 操作系统信息
+    result.osInfo = {
+      name: EnvUtils.getOSName(),
+      version: EnvUtils.getOSVersion(),
+      platform: EnvUtils.getPlatform(),
+    };
+
+    // 浏览器信息(如果在浏览器环境中)
+    if (result.environment === Environment.Browser) {
+      result.browser = {
+        name: EnvUtils.getBrowserName(),
+        version: EnvUtils.getBrowserVersion(),
+        engine: EnvUtils.getBrowserEngine(),
+        engineVersion: EnvUtils.getBrowserEngineVersion(),
+      };
+    }
+
+    // 基础能力检测
+    result.capabilities = {
+      localStorage: EnvUtils.hasLocalStorage(),
+      sessionStorage: EnvUtils.hasSessionStorage(),
+      indexedDB: EnvUtils.hasIndexedDB(),
+      webWorker: EnvUtils.hasWebWorker(),
+      serviceWorker: EnvUtils.hasServiceWorker(),
+      webSocket: EnvUtils.hasWebSocket(),
+      fetch: EnvUtils.hasFetch(),
+      fileSystem: EnvUtils.hasFileSystem(),
+      camera: EnvUtils.hasCamera(),
+      geolocation: EnvUtils.hasGeolocation(),
+      pushNotification: EnvUtils.hasPushNotification(),
+    };
+
+    // 特性检测
+    this.detectFeatures(result);
+  }
+
+  /**
+   * 检测特定环境的特性
+   */
+  private detectFeatures(result: EnvDetectionResult): void {
+    // 浏览器环境特性检测
+    if (result.environment === Environment.Browser) {
+      result.features = {
+        [BrowserFeature.FILE_API]: EnvUtils.hasFeature(BrowserFeature.FILE_API),
+        [BrowserFeature.BLOB]: EnvUtils.hasFeature(BrowserFeature.BLOB),
+        [BrowserFeature.TYPED_ARRAY]: EnvUtils.hasFeature(
+          BrowserFeature.TYPED_ARRAY
+        ),
+        [BrowserFeature.PROMISE]: EnvUtils.hasFeature(BrowserFeature.PROMISE),
+        [BrowserFeature.WEB_WORKER]: EnvUtils.hasFeature(
+          BrowserFeature.WEB_WORKER
+        ),
+        [BrowserFeature.SERVICE_WORKER]: EnvUtils.hasFeature(
+          BrowserFeature.SERVICE_WORKER
+        ),
+        [BrowserFeature.INDEXED_DB]: EnvUtils.hasFeature(
+          BrowserFeature.INDEXED_DB
+        ),
+        [BrowserFeature.WEB_CRYPTO]: EnvUtils.hasFeature(
+          BrowserFeature.WEB_CRYPTO
+        ),
+        [BrowserFeature.WEB_SOCKET]: EnvUtils.hasFeature(
+          BrowserFeature.WEB_SOCKET
+        ),
+        [BrowserFeature.FETCH_API]: EnvUtils.hasFeature(
+          BrowserFeature.FETCH_API
+        ),
+        [BrowserFeature.STREAMS_API]: EnvUtils.hasFeature(
+          BrowserFeature.STREAMS_API
+        ),
+        [BrowserFeature.SHARED_ARRAY_BUFFER]: EnvUtils.hasFeature(
+          BrowserFeature.SHARED_ARRAY_BUFFER
+        ),
+      };
+    }
+    // 小程序环境特性检测
+    else if (this.isMiniProgramEnvironment(result.environment)) {
+      result.features = {
+        [MiniProgramFeature.UPLOAD_FILE]: this.envDetector.supportsFeature(
+          MiniProgramFeature.UPLOAD_FILE
+        ),
+        [MiniProgramFeature.DOWNLOAD_FILE]: this.envDetector.supportsFeature(
+          MiniProgramFeature.DOWNLOAD_FILE
+        ),
+        [MiniProgramFeature.SOCKET]: this.envDetector.supportsFeature(
+          MiniProgramFeature.SOCKET
+        ),
+        [MiniProgramFeature.FILE_SYSTEM]: this.envDetector.supportsFeature(
+          MiniProgramFeature.FILE_SYSTEM
+        ),
+        [MiniProgramFeature.STORAGE]: this.envDetector.supportsFeature(
+          MiniProgramFeature.STORAGE
+        ),
+        [MiniProgramFeature.WORKER]: this.envDetector.supportsFeature(
+          MiniProgramFeature.WORKER
+        ),
+      };
+    }
+  }
+
+  /**
+   * 检测WebView环境
+   */
+  private detectWebViewEnvironment(result: EnvDetectionResult): void {
+    const webViewInfo = this.webViewDetector.detectWebView();
+
+    if (webViewInfo.isWebView) {
+      result.webViewInfo = webViewInfo;
+
+      // 添加WebView特有限制
+      webViewInfo.limitations.forEach(limitation => {
+        this.addLimitation(
+          result,
+          String(limitation),
+          this.getWebViewLimitationDescription(limitation)
+        );
+      });
+
+      // 应用WebView推荐设置
+      const webViewSettings = this.webViewDetector.getRecommendedConfig();
+      Object.assign(result.recommendedSettings, webViewSettings);
+    }
+  }
+
+  /**
+   * 获取WebView限制的描述
+   */
+  private getWebViewLimitationDescription(
+    limitation: WebViewLimitation
+  ): string {
+    const descriptions: Record<WebViewLimitation, string> = {
+      [WebViewLimitation.FILE_SIZE_LIMIT]: 'WebView环境对文件大小有限制',
+      [WebViewLimitation.NO_SERVICE_WORKER]: '不支持Service Worker',
+      [WebViewLimitation.NO_INDEXEDDB]: '不支持或限制IndexedDB',
+      [WebViewLimitation.LIMITED_STORAGE]: '存储空间严格限制',
+      [WebViewLimitation.FILE_UPLOAD_ISSUES]: '文件上传功能受限',
+      [WebViewLimitation.NO_BACKGROUND_PROCESSING]: '不支持后台处理',
+      [WebViewLimitation.NO_SHARED_WORKER]: '不支持Shared Worker',
+      [WebViewLimitation.COOKIE_LIMITATIONS]: 'Cookie使用受限',
+      [WebViewLimitation.CACHING_ISSUES]: '缓存机制受限',
+    };
+
+    return descriptions[limitation] || '未知WebView限制';
+  }
+
+  /**
+   * 检测设备能力
+   */
+  private async detectDeviceCapabilities(
+    result: EnvDetectionResult
+  ): Promise<void> {
+    try {
+      // 获取设备能力配置
+      const deviceProfile =
+        await this.deviceCapabilityDetector.detectDeviceProfile();
+      result.deviceProfile = deviceProfile;
+
+      // 添加设备相关限制
+      if (deviceProfile.lowEndDevice) {
+        this.addLimitation(
+          result,
+          'low_end_device',
+          '低端设备，性能和资源受限',
+          'high'
+        );
+      }
+
+      if (deviceProfile.memory.isLowMemoryDevice) {
+        this.addLimitation(
+          result,
+          'low_memory_device',
+          '设备内存不足，限制大文件处理',
+          'high'
+        );
+      }
+
+      if (deviceProfile.processor.isLowPowerDevice) {
+        this.addLimitation(
+          result,
+          'low_power_device',
+          '低性能处理器，限制计算密集操作',
+          'medium'
+        );
+      }
+
+      // 应用设备能力推荐设置
+      Object.assign(
+        result.recommendedSettings,
+        deviceProfile.recommendedSettings
+      );
+    } catch (error) {
+      this.logger.warn('设备能力检测失败', error);
+    }
+  }
+
+  /**
+   * 应用环境特性数据库信息
+   */
+  private applyEnvironmentFeatureData(result: EnvDetectionResult): void {
+    try {
+      // 获取环境数据
+      let envData: EnvironmentFeatureData | null = null;
+
+      // 尝试通过浏览器名称获取
+      if (result.browser?.name) {
+        envData = this.environmentFeatureDatabase.getEnvironmentData(
+          result.browser.name.toLowerCase()
+        );
+      }
+
+      // 如果未找到，尝试通过环境类型获取
+      if (!envData) {
+        envData = this.environmentFeatureDatabase.getEnvironmentData(
+          result.environment
+        );
+      }
+
+      // 如果是WebView，尝试获取WebView特定数据
+      if (result.webViewInfo?.isWebView) {
+        const type = result.webViewInfo.type.toString().toLowerCase();
+        const webViewEnvData =
+          this.environmentFeatureDatabase.getEnvironmentData(type);
+        if (webViewEnvData) {
+          envData = webViewEnvData;
+        }
+      }
+
+      if (envData) {
+        result.environmentData = envData;
+
+        // 添加数据库中的限制信息
+        envData.limitations.forEach(limitation => {
+          this.addLimitation(
+            result,
+            limitation.type,
+            limitation.description,
+            limitation.criticalityLevel,
+            limitation.value,
+            limitation.workaround
+          );
+        });
+
+        // 应用数据库中的推荐设置
+        const dbRecommendedSettings =
+          this.environmentFeatureDatabase.getOptimizedConfig(envData.type);
+        Object.assign(result.recommendedSettings, dbRecommendedSettings);
+      }
+    } catch (error) {
+      this.logger.warn('应用环境特性数据失败', error);
+    }
+  }
+
+  /**
+   * 生成综合推荐设置
+   */
+  private generateRecommendedSettings(result: EnvDetectionResult): void {
+    // 基础设置（如果尚未设置）
+    if (!result.recommendedSettings.chunkSize) {
+      result.recommendedSettings.chunkSize = 2 * 1024 * 1024; // 默认2MB分片
+    }
+
+    if (!result.recommendedSettings.maxConcurrentTasks) {
+      result.recommendedSettings.maxConcurrentTasks = 3; // 默认最大3个并发任务
+    }
+
+    if (result.recommendedSettings.useWorker === undefined) {
+      // 默认使用Worker，除非检测到明确不应该使用
+      result.recommendedSettings.useWorker =
+        result.capabilities.webWorker !== false;
+    }
+
+    if (result.recommendedSettings.useServiceWorker === undefined) {
+      // 默认不使用ServiceWorker，除非检测到明确支持并且不在WebView中
+      const isWebView = result.webViewInfo?.isWebView === true;
+      result.recommendedSettings.useServiceWorker =
+        result.capabilities.serviceWorker === true && !isWebView;
+    }
+
+    // 根据检测到的限制进行设置调整
+    this.adjustSettingsBasedOnLimitations(result);
+  }
+
+  /**
+   * 根据限制调整设置
+   */
+  private adjustSettingsBasedOnLimitations(result: EnvDetectionResult): void {
+    // 遍历所有限制并相应调整设置
+    for (const limitation of result.limitations) {
+      switch (limitation.type) {
+        case 'low_memory_device':
+        case 'LIMITED_STORAGE':
+          // 低内存设备使用较小的分片和较少的并发
+          result.recommendedSettings.chunkSize = Math.min(
+            result.recommendedSettings.chunkSize,
+            1 * 1024 * 1024
+          );
+          result.recommendedSettings.maxConcurrentTasks = Math.min(
+            result.recommendedSettings.maxConcurrentTasks,
+            2
+          );
+          result.recommendedSettings.useMemoryOptimization = true;
+          break;
+
+        case 'low_power_device':
+          // 低性能设备减少并发和禁用部分功能
+          result.recommendedSettings.maxConcurrentTasks = Math.min(
+            result.recommendedSettings.maxConcurrentTasks,
+            2
+          );
+          result.recommendedSettings.useHashVerification = false; // 禁用哈希验证以节省CPU
+          break;
+
+        case 'max_file_size':
+          // 有文件大小限制时，设置最大文件大小
+          if (typeof limitation.value === 'number') {
+            result.recommendedSettings.maxFileSize = limitation.value;
+          }
+          break;
+
+        case 'max_connections':
+          // 有连接数限制时，调整并发数
+          if (typeof limitation.value === 'number') {
+            result.recommendedSettings.maxConcurrentTasks = Math.min(
+              result.recommendedSettings.maxConcurrentTasks,
+              limitation.value - 1 // 留出一个连接给其他请求
+            );
+          }
+          break;
+      }
+    }
+
+    // 确保设置合理，避免极端值
+    result.recommendedSettings.maxConcurrentTasks = Math.max(
+      1,
+      Math.min(result.recommendedSettings.maxConcurrentTasks, 10)
+    );
+    result.recommendedSettings.chunkSize = Math.max(
+      256 * 1024,
+      Math.min(result.recommendedSettings.chunkSize, 10 * 1024 * 1024)
+    );
+  }
+
+  /**
+   * 添加环境限制
+   */
+  private addLimitation(
+    result: EnvDetectionResult,
+    type: string,
+    description: string,
+    criticalityLevel: 'low' | 'medium' | 'high' = 'medium',
+    value?: number | string,
+    workaround?: string
+  ): void {
+    // 避免重复添加同类型限制
+    const existing = result.limitations.find(limit => limit.type === type);
+    if (!existing) {
+      result.limitations.push({
+        type,
+        description,
+        criticalityLevel,
+        value,
+        workaround,
+      });
+    }
+  }
+
+  /**
+   * 检查是否为小程序环境
+   */
+  private isMiniProgramEnvironment(env: Environment): boolean {
+    return [
+      Environment.WechatMP,
+      Environment.AlipayMP,
+      Environment.BytedanceMP,
+      Environment.BaiduMP,
+      Environment.UniApp,
+      Environment.Taro,
+    ].includes(env);
+  }
+
+  /**
+   * 获取指定环境下的最佳适配器
+   * @param adapters 可选的适配器列表
+   * @returns 最佳适配器
+   */
+  public async getBestAdapter<T extends IAdapter>(
+    adapters: T[]
+  ): Promise<T | null> {
+    const envResult = await this.detectEnvironment();
+
+    // 首先按照直接匹配环境来找
+    for (const adapter of adapters) {
+      if (adapter.supportedEnvironments.includes(envResult.environment)) {
+        this.logger.debug('找到直接匹配的适配器', {
+          adapter: adapter.name,
+          env: envResult.environment,
+        });
+        return adapter;
+      }
+    }
+
+    // 如果没有直接匹配，尝试通过环境类型匹配
+    for (const adapter of adapters) {
+      if (
+        adapter.supportedEnvironmentTypes.includes(envResult.environmentType)
+      ) {
+        this.logger.debug('找到匹配环境类型的适配器', {
+          adapter: adapter.name,
+          envType: envResult.environmentType,
+        });
+        return adapter;
+      }
+    }
+
+    // 如果还没有匹配，尝试通过特性检测找到兼容的适配器
+    const compatibleAdapters = adapters.filter(adapter => {
+      // 检查所有必需特性是否支持
+      return adapter.requiredFeatures.every(
+        feature =>
+          envResult.features[feature] === true ||
+          envResult.capabilities[feature] === true
+      );
+    });
+
+    if (compatibleAdapters.length > 0) {
+      // 返回优先级最高的兼容适配器
+      compatibleAdapters.sort((a, b) => b.priority - a.priority);
+      this.logger.debug('找到兼容的适配器', {
+        adapter: compatibleAdapters[0].name,
+      });
+      return compatibleAdapters[0];
+    }
+
+    this.logger.warn('未找到合适的适配器', {
+      env: envResult.environment,
+      envType: envResult.environmentType,
+    });
+    return null;
+  }
+
+  /**
+   * 检查当前环境是否满足指定要求
+   * @param requirements 环境要求
+   * @returns 是否满足要求
+   */
+  public async checkEnvironmentRequirements(requirements: {
+    environment?: Environment | Environment[];
+    environmentType?: EnvironmentType | EnvironmentType[];
+    features?: string[];
+    capabilities?: string[];
+    minMemory?: number; // MB
+    minCpu?: number; // 核心数
+  }): Promise<{
+    satisfied: boolean;
+    missing: string[];
+    recommendations: string[];
+  }> {
+    const envResult = await this.detectEnvironment();
+    const missing: string[] = [];
+    const recommendations: string[] = [];
+
+    // 检查环境类型
+    if (requirements.environment) {
+      const envs = Array.isArray(requirements.environment)
+        ? requirements.environment
+        : [requirements.environment];
+      if (!envs.includes(envResult.environment)) {
+        missing.push(
+          `环境类型: 需要 ${envs.join(' 或 ')}, 当前是 ${envResult.environment}`
+        );
+      }
+    }
+
+    // 检查环境子类型
+    if (requirements.environmentType) {
+      const envTypes = Array.isArray(requirements.environmentType)
+        ? requirements.environmentType
+        : [requirements.environmentType];
+      if (!envTypes.includes(envResult.environmentType)) {
+        missing.push(
+          `环境子类型: 需要 ${envTypes.join(' 或 ')}, 当前是 ${envResult.environmentType}`
+        );
+      }
+    }
+
+    // 检查特性
+    if (requirements.features && requirements.features.length > 0) {
+      const missingFeatures = requirements.features.filter(
+        feature => !envResult.features[feature]
+      );
+      if (missingFeatures.length > 0) {
+        missing.push(`缺少必需特性: ${missingFeatures.join(', ')}`);
+
+        // 添加特性缺失的建议
+        missingFeatures.forEach(feature => {
+          const recommendation = this.getFeatureMissingRecommendation(feature);
+          if (recommendation) {
+            recommendations.push(recommendation);
+          }
+        });
+      }
+    }
+
+    // 检查能力
+    if (requirements.capabilities && requirements.capabilities.length > 0) {
+      const missingCapabilities = requirements.capabilities.filter(
+        capability => !envResult.capabilities[capability]
+      );
+      if (missingCapabilities.length > 0) {
+        missing.push(`缺少必需能力: ${missingCapabilities.join(', ')}`);
+      }
+    }
+
+    // 检查内存要求
+    if (
+      requirements.minMemory &&
+      envResult.deviceProfile?.memory.deviceMemory
+    ) {
+      const memoryGB = envResult.deviceProfile.memory.deviceMemory;
+      const memoryMB = memoryGB * 1024;
+      if (memoryMB < requirements.minMemory) {
+        missing.push(
+          `内存不足: 需要 ${requirements.minMemory}MB, 当前约 ${memoryMB.toFixed(0)}MB`
+        );
+        recommendations.push(
+          '在低内存设备上使用更小的分片大小和更少的并发任务'
+        );
+      }
+    }
+
+    // 检查CPU要求
+    if (
+      requirements.minCpu &&
+      envResult.deviceProfile?.processor.hardwareConcurrency
+    ) {
+      if (
+        envResult.deviceProfile.processor.hardwareConcurrency <
+        requirements.minCpu
+      ) {
+        missing.push(
+          `CPU核心不足: 需要 ${requirements.minCpu}核, 当前 ${envResult.deviceProfile.processor.hardwareConcurrency}核`
+        );
+        recommendations.push(
+          '在低性能设备上减少对计算密集型功能的使用，如实时加密和哈希计算'
+        );
+      }
+    }
+
+    return {
+      satisfied: missing.length === 0,
+      missing,
+      recommendations: [...new Set(recommendations)], // 去重
+    };
+  }
+
+  /**
+   * 获取特性缺失的建议
+   */
+  private getFeatureMissingRecommendation(feature: string): string | null {
+    const recommendations: Record<string, string> = {
+      [BrowserFeature.WEB_WORKER]: '考虑提供非Worker处理方案作为降级策略',
+      [BrowserFeature.SERVICE_WORKER]:
+        '考虑使用IndexedDB或localStorage作为替代方案处理缓存',
+      [BrowserFeature.INDEXED_DB]: '使用localStorage作为存储降级方案',
+      [BrowserFeature.STREAMS_API]: '考虑使用传统的分块上传方法作为替代',
+      [BrowserFeature.SHARED_ARRAY_BUFFER]: '使用标准Blob或ArrayBuffer作为替代',
+      [BrowserFeature.WEB_CRYPTO]: '考虑使用JS实现的加密库作为降级方案',
+      [MiniProgramFeature.WORKER]: '在主线程中处理计算任务，但需注意避免UI阻塞',
+    };
+
+    return recommendations[feature] || null;
+  }
+
+  /**
+   * 重置环境检测缓存
+   * 当环境可能变化时调用（如切换到不同域名或从App内WebView跳转到系统浏览器）
    */
   public resetCache(): void {
-    this.cachedEnvironment = null;
-    this.cachedFeatures = null;
-    this.cachedCapabilities = null;
     this.cachedDetectionResult = null;
-    this.cachedCapabilityScore = null;
+    this.webViewDetector.resetCache(); // 重置WebView检测缓存
+    this.deviceCapabilityDetector.resetCache(); // 重置设备能力检测缓存
+    this.logger.debug('环境检测缓存已重置');
   }
 }
 
