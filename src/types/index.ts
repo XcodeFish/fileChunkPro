@@ -42,6 +42,9 @@ export * from './storage';
 // 导出环境相关类型
 export * from './environment';
 
+// 导出错误相关类型
+export * from './errors';
+
 /**
  * 文件信息
  */
