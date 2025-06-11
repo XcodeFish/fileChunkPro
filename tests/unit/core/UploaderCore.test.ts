@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 
-import { UploadError } from '../../../src/core/ErrorCenter';
+import { UploadError } from '../../../src/core/error';
 import { UploaderCore } from '../../../src/core/UploaderCore';
 
 // 模拟文件对象

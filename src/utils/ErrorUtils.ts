@@ -8,7 +8,7 @@
  * 4. 提取资源标识
  */
 
-import { ErrorType } from '../types/network';
+import { UploadErrorType } from '../core/error';
 import { ErrorCenter } from '../core/error/ErrorCenter';
 
 export class ErrorUtils {
@@ -94,9 +94,13 @@ export class ErrorUtils {
    * @param error 错误对象
    * @returns 错误类型枚举值
    */
-  public static getErrorType(error: any): ErrorType {
+  public static getErrorType(error: any): UploadErrorType {
     // 如果错误对象已经有类型，直接返回
-    if (error && error.type && Object.values(ErrorType).includes(error.type)) {
+    if (
+      error &&
+      error.type &&
+      Object.values(UploadErrorType).includes(error.type)
+    ) {
       return error.type;
     }
 
@@ -108,16 +112,16 @@ export class ErrorUtils {
         error.message?.includes('timeout') ||
         error.name === 'TimeoutError')
     ) {
-      return ErrorType.TIMEOUT;
+      return UploadErrorType.TIMEOUT;
     }
 
     // HTTP错误
     if (error && error.status) {
       const status = error.status;
       if (status >= 500) {
-        return ErrorType.SERVER_ERROR;
+        return UploadErrorType.SERVER_ERROR;
       } else if (status >= 400) {
-        return ErrorType.CLIENT_ERROR;
+        return UploadErrorType.CLIENT_ERROR;
       }
     }
 
@@ -129,7 +133,7 @@ export class ErrorUtils {
         error.message?.includes('network') ||
         error.name === 'NetworkError')
     ) {
-      return ErrorType.NETWORK_ERROR;
+      return UploadErrorType.NETWORK_ERROR;
     }
 
     // 安全错误
@@ -140,10 +144,10 @@ export class ErrorUtils {
         error.message?.includes('security') ||
         error.message?.includes('certificate'))
     ) {
-      return ErrorType.SECURITY_ERROR;
+      return UploadErrorType.SECURITY_ERROR;
     }
 
-    return ErrorType.UNKNOWN;
+    return UploadErrorType.UNKNOWN;
   }
 
   /**
@@ -233,7 +237,7 @@ export class ErrorUtils {
    * @returns 格式化的错误对象
    */
   public static formatError(error: any): {
-    type: ErrorType;
+    type: UploadErrorType;
     message: string;
     code?: string;
     status?: number;

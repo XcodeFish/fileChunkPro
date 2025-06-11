@@ -3,7 +3,7 @@
  * 实现浏览器环境下的文件读取与上传功能
  */
 
-import { UploadError } from '../core/ErrorCenter';
+import { UploadError } from '../core/error';
 import { UploadErrorType, NetworkQuality, EnvironmentType } from '../types';
 import { Logger } from '../utils/Logger';
 

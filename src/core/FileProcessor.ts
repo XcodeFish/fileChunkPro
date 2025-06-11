@@ -16,11 +16,11 @@ import {
   FileProcessorOptions,
   FileHashResult,
 } from '../types';
-import { UploadError } from './ErrorCenter';
+import { UploadError } from './error';
 import EnvUtils from '../utils/EnvUtils';
 import MemoryManager from '../utils/MemoryManager';
 import { EventBus } from './EventBus';
-import { ErrorCenter } from './ErrorCenter';
+import { ErrorCenter } from './error';
 import WorkerManager from './WorkerManager';
 import dependencyContainer from './DependencyContainer';
 import { BrowserCompatibilityTester } from '../utils/BrowserCompatibilityTester';

@@ -3,7 +3,7 @@
  * 安全相关错误的统一处理类
  */
 
-import { UploadError, ErrorType as UploadErrorType } from '../core/ErrorCenter';
+import { UploadError, UploadErrorType } from '../core/error';
 import { ErrorContextData, ErrorSeverity } from '../types';
 
 /**

@@ -10,7 +10,7 @@ import {
 } from '../../../src/plugins/QueuePlugin';
 import { TaskPriority } from '../../../src/types';
 import UploaderCore from '../../../src/core/UploaderCore';
-import { UploadError } from '../../../src/core/ErrorCenter';
+import { UploadError } from '../../../src/core/error';
 
 // 模拟UploaderCore
 vi.mock('../../../src/core/UploaderCore', () => {

@@ -10,7 +10,7 @@ import {
   FileMetadata,
   FileValidationResult,
 } from '../types';
-import { UploadError } from './ErrorCenter';
+import { UploadError } from './error';
 import MemoryManager from '../utils/MemoryManager';
 import { EventBus } from './EventBus';
 import { DependencyContainer } from './DependencyContainer';

@@ -1,47 +1,27 @@
 /**
- * 核心模块导出文件
+ * 微内核核心模块导出
  */
 
-// 核心类导出
-export { default as UploaderCore } from './UploaderCore';
-export { EventBus } from './EventBus';
+// 核心类
+export { UploaderCore } from './UploaderCore';
+export { EventBus, EventCallback } from './EventBus';
+export { WorkerManager } from './WorkerManager';
 export { TaskScheduler } from './TaskScheduler';
 export { PluginManager } from './PluginManager';
-export { WorkerManager } from './WorkerManager';
-export { ServiceWorkerManager } from './ServiceWorkerManager';
-export { WorkerPoolManager } from './WorkerPoolManager';
-export { DebugCenter } from './DebugCenter';
-export { MonitoringSystem } from './MonitoringSystem';
-export { NetworkManager } from './NetworkManager';
-export { UploadStrategyManager } from './UploadStrategyManager';
 export { FileManager } from './FileManager';
-export { FileProcessor } from './FileProcessor';
+export { NetworkManager } from './NetworkManager';
+export { DebugCenter } from './DebugCenter';
+export { ServiceWorkerManager } from './ServiceWorkerManager';
 
-// 依赖注入相关
-export { DependencyContainer } from './DependencyContainer';
-export { ServiceContainer } from './ServiceContainer';
+// 常量和默认值
+export { DEFAULT_CHUNK_SIZE, DEFAULT_RETRY_COUNT } from './constants';
 
-// 错误处理系统新增导出
-export { ErrorCenter } from './ErrorCenter';
-export {
-  WorkerErrorBridge,
-  workerErrorBridge,
-  safeWorkerExec,
-  safeWorkerExecAsync,
-} from './WorkerErrorBridge';
-export {
-  errorHandlingSystem,
-  safeAsync,
-  safeCallback,
-} from './error/ErrorHandlingSystem';
+// 服务容器
+export { default as DependencyContainer } from './DependencyContainer';
 
-// 降级处理系统导出
-export {
-  DegradationManager,
-  degradationManager,
-  withDegradation,
-  DegradationLevel,
-} from './DegradationManager';
+// 错误处理
+export { ErrorCenter } from './error';
+export * from './error';
 
-// 版本信息
-export const VERSION = '3.0.0';
+// 类型定义转发
+export * from '../types';

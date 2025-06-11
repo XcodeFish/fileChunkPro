@@ -14,120 +14,17 @@ import {
   IConfigValidationResult,
   IPerformanceMetric,
   ILogStorageProvider,
+  LogLevelStringType,
+  logLevelFromString,
 } from '../types/debug';
 import { Logger } from '../utils/Logger';
-import { ErrorCenter, UploadError } from './ErrorCenter';
+import { ErrorCenter, UploadError } from './error';
 import { EventBus } from './EventBus';
-
-/**
- * 内存日志存储提供者
- */
-class MemoryLogStorage implements ILogStorageProvider {
-  private logs: ILogEntry[] = [];
-  private maxEntries: number;
-
-  constructor(maxEntries = 1000) {
-    this.maxEntries = maxEntries;
-  }
-
-  async saveLog(entry: ILogEntry): Promise<void> {
-    this.logs.push(entry);
-    if (this.logs.length > this.maxEntries) {
-      this.logs.shift();
-    }
-  }
-
-  async getLogs(filter?: ILogFilterOptions): Promise<ILogEntry[]> {
-    if (!filter) {
-      return [...this.logs];
-    }
-
-    return this.logs.filter(log => {
-      // 过滤日志级别
-      if (filter.level !== undefined && log.level > filter.level) {
-        return false;
-      }
-
-      // 过滤模块名
-      if (filter.module) {
-        if (typeof filter.module === 'string') {
-          if (log.module !== filter.module) {
-            return false;
-          }
-        } else if (!filter.module.test(log.module)) {
-          return false;
-        }
-      }
-
-      // 过滤时间范围
-      if (filter.timeRange) {
-        if (
-          filter.timeRange.start !== undefined &&
-          log.timestamp < filter.timeRange.start
-        ) {
-          return false;
-        }
-        if (
-          filter.timeRange.end !== undefined &&
-          log.timestamp > filter.timeRange.end
-        ) {
-          return false;
-        }
-      }
-
-      // 搜索内容
-      if (filter.search) {
-        const searchContent = `${log.module}:${log.message}:${JSON.stringify(log.data || '')}`;
-        if (typeof filter.search === 'string') {
-          if (!searchContent.includes(filter.search)) {
-            return false;
-          }
-        } else if (!filter.search.test(searchContent)) {
-          return false;
-        }
-      }
-
-      return true;
-    });
-  }
-
-  async clearLogs(): Promise<void> {
-    this.logs = [];
-  }
-
-  async exportLogs(format: 'json' | 'text' | 'csv' = 'json'): Promise<string> {
-    let result: string;
-
-    switch (format) {
-      case 'json':
-        result = JSON.stringify(this.logs, null, 2);
-        break;
-      case 'text':
-        result = this.logs
-          .map(
-            log =>
-              `[${new Date(log.timestamp).toISOString()}] [${LogLevel[log.level]}] [${log.module}] ${log.message}`
-          )
-          .join('\n');
-        break;
-      case 'csv': {
-        const header = 'Timestamp,Level,Module,Message,Data\n';
-        const rows = this.logs
-          .map(
-            log =>
-              `"${new Date(log.timestamp).toISOString()}","${LogLevel[log.level]}","${log.module}","${log.message.replace(/"/g, '""')}","${JSON.stringify(log.data || '').replace(/"/g, '""')}"`
-          )
-          .join('\n');
-        result = header + rows;
-        break;
-      }
-      default:
-        result = JSON.stringify(this.logs);
-    }
-
-    return result;
-  }
-}
+import {
+  PerformanceCollector,
+  PerformanceMetricType,
+} from '../utils/PerformanceCollector';
+import { LogStorage } from '../utils/LogStorage';
 
 /**
  * 调试中心类 - 实现IDebugCenter接口
@@ -167,7 +64,10 @@ export class DebugCenter implements IDebugCenter {
    */
   private constructor() {
     this.config = { ...this.DEFAULT_CONFIG };
-    this.logStorage = new MemoryLogStorage(this.config.maxLogEntries);
+    this.logStorage = new LogStorage({
+      maxEntries: this.config.maxLogEntries,
+      cleanupThreshold: Math.floor(this.config.maxLogEntries * 0.8),
+    });
     this.eventBus = new EventBus();
     this.errorCenter = new ErrorCenter();
     this.setupErrorHandler();
@@ -261,14 +161,30 @@ export class DebugCenter implements IDebugCenter {
    * 初始化调试中心
    */
   public initialize(config: Partial<IDebugConfig>): void {
+    // 处理logLevel字段，确保正确转换
+    if (typeof config.logLevel === 'string') {
+      config = {
+        ...config,
+        logLevel: logLevelFromString(config.logLevel),
+      };
+    }
+
+    // 合并配置
     this.config = { ...this.DEFAULT_CONFIG, ...config };
 
     // 重新初始化日志存储
     if (this.config.persistLogs) {
-      // 这里可以根据需要实现持久化存储
-      this.logStorage = new MemoryLogStorage(this.config.maxLogEntries);
+      // 使用高效索引的日志存储
+      this.logStorage = new LogStorage({
+        maxEntries: this.config.maxLogEntries,
+        cleanupThreshold: Math.floor(this.config.maxLogEntries * 0.8),
+      });
     } else {
-      this.logStorage = new MemoryLogStorage(this.config.maxLogEntries);
+      // 非持久化也使用高效存储，只是不保存到磁盘
+      this.logStorage = new LogStorage({
+        maxEntries: this.config.maxLogEntries,
+        cleanupThreshold: Math.floor(this.config.maxLogEntries * 0.8),
+      });
     }
 
     // 记录初始化完成日志
@@ -296,24 +212,31 @@ export class DebugCenter implements IDebugCenter {
    * 获取当前日志级别
    */
   public getLogLevel(): LogLevel {
-    return this.config.logLevel;
+    return typeof this.config.logLevel === 'string'
+      ? logLevelFromString(this.config.logLevel)
+      : this.config.logLevel;
   }
 
   /**
    * 设置日志级别
    */
-  public setLogLevel(level: LogLevel): void {
-    this.config.logLevel = level;
+  public setLogLevel(level: LogLevel | LogLevelStringType): void {
+    if (typeof level === 'string') {
+      this.config.logLevel = logLevelFromString(level);
+    } else {
+      this.config.logLevel = level;
+    }
+
     const logger = this.getLogger('DebugCenter');
-    logger.info(`日志级别已设置为: ${LogLevel[level]}`);
+    logger.info(`日志级别已设置为: ${LogLevel[this.getLogLevel()]}`);
   }
 
   /**
    * 获取指定模块的日志记录器
    */
-  public getLogger(module: string): any {
+  public getLogger(module: string): Logger {
     const logger = new Logger(module, {
-      level: LogLevel[this.config.logLevel].toLowerCase(),
+      level: this.getLogLevel(),
     });
 
     // 拦截日志并存储
@@ -323,56 +246,88 @@ export class DebugCenter implements IDebugCenter {
     const originalError = logger.error;
 
     logger.debug = (message: string, ...data: any[]) => {
-      if (this.config.enabled && this.config.logLevel >= LogLevel.DEBUG) {
+      if (this.config.enabled && this.getLogLevel() >= LogLevel.DEBUG) {
+        const logEntryId = `${module}_debug_${Date.now()}`;
+        // 创建性能快照关联
+        const perfSnapshotId = this.createPerformanceSnapshot(
+          'log_debug',
+          module
+        );
+
         this.logToStorage({
-          id: `${module}_debug_${Date.now()}`,
+          id: logEntryId,
           timestamp: Date.now(),
           level: LogLevel.DEBUG,
           module,
           message,
           data: data.length > 0 ? data : undefined,
+          performanceSnapshotId: perfSnapshotId,
         });
       }
       return originalDebug.call(logger, message, ...data);
     };
 
     logger.info = (message: string, ...data: any[]) => {
-      if (this.config.enabled && this.config.logLevel >= LogLevel.INFO) {
+      if (this.config.enabled && this.getLogLevel() >= LogLevel.INFO) {
+        const logEntryId = `${module}_info_${Date.now()}`;
+        // 创建性能快照关联
+        const perfSnapshotId = this.createPerformanceSnapshot(
+          'log_info',
+          module
+        );
+
         this.logToStorage({
-          id: `${module}_info_${Date.now()}`,
+          id: logEntryId,
           timestamp: Date.now(),
           level: LogLevel.INFO,
           module,
           message,
           data: data.length > 0 ? data : undefined,
+          performanceSnapshotId: perfSnapshotId,
         });
       }
       return originalInfo.call(logger, message, ...data);
     };
 
     logger.warn = (message: string, ...data: any[]) => {
-      if (this.config.enabled && this.config.logLevel >= LogLevel.WARN) {
+      if (this.config.enabled && this.getLogLevel() >= LogLevel.WARN) {
+        const logEntryId = `${module}_warn_${Date.now()}`;
+        // 创建性能快照关联
+        const perfSnapshotId = this.createPerformanceSnapshot(
+          'log_warn',
+          module
+        );
+
         this.logToStorage({
-          id: `${module}_warn_${Date.now()}`,
+          id: logEntryId,
           timestamp: Date.now(),
           level: LogLevel.WARN,
           module,
           message,
           data: data.length > 0 ? data : undefined,
+          performanceSnapshotId: perfSnapshotId,
         });
       }
       return originalWarn.call(logger, message, ...data);
     };
 
     logger.error = (message: string, ...data: any[]) => {
-      if (this.config.enabled && this.config.logLevel >= LogLevel.ERROR) {
+      if (this.config.enabled) {
+        const logEntryId = `${module}_error_${Date.now()}`;
+        // 创建性能快照关联
+        const perfSnapshotId = this.createPerformanceSnapshot(
+          'log_error',
+          module
+        );
+
         this.logToStorage({
-          id: `${module}_error_${Date.now()}`,
+          id: logEntryId,
           timestamp: Date.now(),
           level: LogLevel.ERROR,
           module,
           message,
           data: data.length > 0 ? data : undefined,
+          performanceSnapshotId: perfSnapshotId,
         });
       }
       return originalError.call(logger, message, ...data);
@@ -382,30 +337,50 @@ export class DebugCenter implements IDebugCenter {
   }
 
   /**
-   * 将日志存储到存储提供者
+   * 创建性能快照
+   */
+  private createPerformanceSnapshot(eventType: string, module: string): string {
+    const snapshotId = `perf_snapshot_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    // 收集性能数据
+    PerformanceCollector.getInstance().collect(
+      PerformanceMetricType.LOG_ASSOCIATION,
+      undefined,
+      {
+        metricId: snapshotId,
+        eventType,
+        module,
+      }
+    );
+
+    return snapshotId;
+  }
+
+  /**
+   * 将日志保存到存储
    */
   private async logToStorage(entry: ILogEntry): Promise<void> {
     try {
       await this.logStorage.saveLog(entry);
-      this.eventBus.emit('log:new', entry);
     } catch (error) {
-      console.error('Failed to save log entry:', error);
+      console.error('保存日志到存储失败:', error);
     }
   }
 
   /**
-   * 获取过滤后的日志
+   * 获取日志
    */
   public async getLogs(filter?: ILogFilterOptions): Promise<ILogEntry[]> {
     return await this.logStorage.getLogs(filter);
   }
 
   /**
-   * 清除所有日志
+   * 清除日志
    */
   public async clearLogs(): Promise<void> {
     await this.logStorage.clearLogs();
-    this.eventBus.emit('log:cleared');
+    const logger = this.getLogger('DebugCenter');
+    logger.info('日志已清除');
   }
 
   /**
@@ -423,11 +398,8 @@ export class DebugCenter implements IDebugCenter {
   public addBreakpoint(
     breakpoint: Omit<IBreakpoint, 'id' | 'hitCount'>
   ): IBreakpoint {
-    if (!this.config.breakpointsEnabled) {
-      throw new Error('断点功能未启用');
-    }
+    const id = `bp_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
 
-    const id = `bp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
     const newBreakpoint: IBreakpoint = {
       ...breakpoint,
       id,
@@ -435,7 +407,13 @@ export class DebugCenter implements IDebugCenter {
     };
 
     this.breakpoints.set(id, newBreakpoint);
-    this.eventBus.emit('breakpoint:added', newBreakpoint);
+
+    const logger = this.getLogger('DebugCenter');
+    logger.info(
+      `断点已添加: ${breakpoint.moduleName}${breakpoint.functionName ? `::${breakpoint.functionName}` : ''}`,
+      { breakpointId: id, active: breakpoint.active }
+    );
+
     return newBreakpoint;
   }
 
@@ -443,11 +421,14 @@ export class DebugCenter implements IDebugCenter {
    * 移除断点
    */
   public removeBreakpoint(id: string): boolean {
-    const result = this.breakpoints.delete(id);
-    if (result) {
-      this.eventBus.emit('breakpoint:removed', id);
+    const success = this.breakpoints.delete(id);
+
+    if (success) {
+      const logger = this.getLogger('DebugCenter');
+      logger.info(`断点已移除: ${id}`);
     }
-    return result;
+
+    return success;
   }
 
   /**
@@ -461,17 +442,17 @@ export class DebugCenter implements IDebugCenter {
    * 创建错误诊断结果
    */
   private createDiagnosticResult(error: UploadError): IDiagnosticResult {
-    const diagnostic: IDiagnosticResult = {
-      errorId: error.errorId,
-      timestamp: error.timestamp,
+    const diagnosticResult: IDiagnosticResult = {
+      errorId: error.id,
+      timestamp: Date.now(),
       errorType: error.type,
-      severity: error.severity,
+      severity: error.isFatal ? '致命' : '一般',
       message: error.message,
       rootCause: this.determineRootCause(error),
       context: error.context || {},
-      recommendation: error.recommendedSolutions || [],
+      recommendation: [],
       relatedErrors: [],
-      recoverable: error.isRecoverable || false,
+      recoverable: !error.isFatal,
       debugInfo: {
         stack: error.stack,
         state: this.captureState(),
@@ -479,30 +460,67 @@ export class DebugCenter implements IDebugCenter {
       },
     };
 
-    this.diagnosticResults.push(diagnostic);
-    this.eventBus.emit('diagnostic:new', diagnostic);
-    return diagnostic;
+    // 生成推荐解决方案
+    diagnosticResult.recommendation = this.generateRecommendations(error);
+
+    // 将诊断结果添加到集合
+    this.diagnosticResults.push(diagnosticResult);
+
+    return diagnosticResult;
   }
 
   /**
-   * 确定错误的根本原因
+   * 确定错误根本原因
    */
   private determineRootCause(error: UploadError): string {
-    // 根据错误类型和上下文分析根本原因
-    if (error.originalError) {
-      return `${error.type}: ${error.originalError.message || error.message}`;
+    // 基于错误类型和诊断数据确定根本原因
+    if (error.diagnosticData && error.diagnosticData.rootCause) {
+      return error.diagnosticData.rootCause;
     }
-    return `${error.type}: ${error.message}`;
+
+    return `未知(${error.type})`;
   }
 
   /**
-   * 捕获当前状态信息
+   * 生成错误推荐解决方案
+   */
+  private generateRecommendations(error: UploadError): string[] {
+    // 基于错误类型提供解决建议
+    const recommendations: string[] = [];
+
+    switch (error.type) {
+      case 'NETWORK_ERROR':
+        recommendations.push('检查网络连接是否正常');
+        recommendations.push('确保服务器地址配置正确');
+        break;
+      case 'TIMEOUT_ERROR':
+        recommendations.push('检查网络质量');
+        recommendations.push('增加超时配置');
+        recommendations.push('考虑减小分片大小');
+        break;
+      case 'FILE_ERROR':
+        recommendations.push('检查文件格式是否正确');
+        recommendations.push('验证文件权限');
+        break;
+      // 更多针对不同错误类型的推荐解决方案
+      default:
+        recommendations.push('查看详细错误信息');
+        recommendations.push('联系技术支持');
+    }
+
+    return recommendations;
+  }
+
+  /**
+   * 捕获当前状态
    */
   private captureState(): Record<string, any> {
-    // 这里可以收集当前上传任务状态、配置等信息
+    // 捕获运行时状态
     return {
       timestamp: Date.now(),
-      // 其他状态信息
+      enabled: this.config.enabled,
+      breakpointsCount: this.breakpoints.size,
+      diagnosticsCount: this.diagnosticResults.length,
     };
   }
 
@@ -511,34 +529,33 @@ export class DebugCenter implements IDebugCenter {
    */
   private captureEnvironment(): Record<string, any> {
     const env: Record<string, any> = {
+      timestamp: Date.now(),
       userAgent:
         typeof navigator !== 'undefined' ? navigator.userAgent : 'unknown',
       platform:
         typeof navigator !== 'undefined' ? navigator.platform : 'unknown',
-      timestamp: Date.now(),
     };
 
-    // 浏览器环境
-    if (typeof window !== 'undefined') {
-      env.windowSize = {
-        width: window.innerWidth,
-        height: window.innerHeight,
+    // 捕获性能数据
+    if (typeof window !== 'undefined' && window.performance) {
+      const timing = window.performance.timing;
+      env.performance = {
+        navigationStart: timing.navigationStart,
+        domComplete: timing.domComplete,
+        loadEventEnd: timing.loadEventEnd,
       };
-      env.isOnline = navigator.onLine;
 
-      // 添加网络信息
-      if ('connection' in navigator) {
-        const conn = (navigator as any).connection;
-        if (conn) {
-          env.network = {
-            type: conn.type,
-            effectiveType: conn.effectiveType,
-            downlink: conn.downlink,
-            rtt: conn.rtt,
-            saveData: conn.saveData,
-          };
-        }
-      }
+      // 计算关键性能指标
+      env.performanceMetrics = {
+        pageLoadTime: timing.loadEventEnd - timing.navigationStart,
+        domProcessingTime: timing.domComplete - timing.domLoading,
+        networkLatency: timing.responseEnd - timing.fetchStart,
+      };
+    }
+
+    // 捕获内存使用情况（如果可用）
+    if (typeof window !== 'undefined' && (window.performance as any).memory) {
+      env.memory = (window.performance as any).memory;
     }
 
     return env;
@@ -564,137 +581,167 @@ export class DebugCenter implements IDebugCenter {
 
     const recommendations: string[] = [];
 
-    // 检查关键配置项是否存在
-    if (!config.chunkSize) {
-      issues.push({
-        type: 'warning',
-        field: 'chunkSize',
-        message: '未设置分片大小，将使用默认值',
-        recommendation: '根据网络环境设置合适的分片大小可以优化上传性能',
-      });
-      recommendations.push('建议设置合适的分片大小，一般在1MB~5MB之间');
-    } else if (config.chunkSize < 512 * 1024) {
-      issues.push({
-        type: 'warning',
-        field: 'chunkSize',
-        message: '分片大小过小，可能影响上传性能',
-        recommendation: '建议设置分片大小大于512KB',
-      });
-    } else if (config.chunkSize > 10 * 1024 * 1024) {
-      issues.push({
-        type: 'warning',
-        field: 'chunkSize',
-        message: '分片大小过大，可能导致单次上传失败率增加',
-        recommendation: '建议分片大小不超过10MB',
-      });
+    // 验证基本配置
+    if (config.chunkSize !== undefined) {
+      if (typeof config.chunkSize !== 'number' || config.chunkSize <= 0) {
+        issues.push({
+          type: 'error',
+          field: 'chunkSize',
+          message: 'chunkSize必须是正整数',
+          recommendation: '请设置合适的分片大小，例如2MB（2 * 1024 * 1024）',
+        });
+      } else {
+        // 分析分片大小是否合适
+        if (config.chunkSize < 1024 * 1024) {
+          // 小于1MB
+          issues.push({
+            type: 'warning',
+            field: 'chunkSize',
+            message: '分片大小过小，可能导致请求数过多',
+            recommendation: '建议将分片大小设置为1MB-10MB之间',
+          });
+        } else if (config.chunkSize > 20 * 1024 * 1024) {
+          // 大于20MB
+          issues.push({
+            type: 'warning',
+            field: 'chunkSize',
+            message: '分片大小过大，可能导致上传失败率增加',
+            recommendation: '建议将分片大小设置为1MB-10MB之间',
+          });
+        }
+      }
+    } else {
+      recommendations.push('未设置分片大小，将使用默认值');
     }
 
-    // 检查并发数配置
-    if (!config.concurrency) {
-      issues.push({
-        type: 'info',
-        field: 'concurrency',
-        message: '未设置并发数，将使用默认值',
-        recommendation: '设置合适的并发数可以优化上传速度',
-      });
-    } else if (config.concurrency > 10) {
-      issues.push({
-        type: 'warning',
-        field: 'concurrency',
-        message: '并发数过高，可能导致网络拥塞',
-        recommendation: '一般情况下，并发数设置为3-6较为合适',
-      });
-    }
-
-    // 检查重试配置
-    if (!config.retryCount && config.retryCount !== 0) {
-      issues.push({
-        type: 'info',
-        field: 'retryCount',
-        message: '未设置重试次数，将使用默认值',
-        recommendation: '设置合适的重试次数可以提高上传成功率',
-      });
-    }
-
-    // 检查超时配置
-    if (!config.timeout) {
-      issues.push({
-        type: 'info',
-        field: 'timeout',
-        message: '未设置请求超时时间，将使用默认值',
-        recommendation: '设置合理的超时时间可以避免长时间等待无响应的请求',
-      });
-    }
-
-    // 检查配置的一致性
-    if (config.retryCount > 0 && !config.retryDelay) {
-      issues.push({
-        type: 'warning',
-        field: 'retryDelay',
-        message: '设置了重试次数但未设置重试延迟',
-        recommendation: '建议设置合适的重试延迟，避免立即重试导致的网络拥塞',
-      });
-    }
-
-    // 生成优化建议
-    if (config.chunkSize && config.concurrency) {
-      const totalBufferSize = config.chunkSize * config.concurrency;
-      if (totalBufferSize > 50 * 1024 * 1024) {
+    // 并发数验证
+    if (config.concurrency !== undefined) {
+      if (
+        typeof config.concurrency !== 'number' ||
+        config.concurrency <= 0 ||
+        !Number.isInteger(config.concurrency)
+      ) {
+        issues.push({
+          type: 'error',
+          field: 'concurrency',
+          message: 'concurrency必须是正整数',
+          recommendation: '请设置合适的并发数，例如3',
+        });
+      } else if (config.concurrency > 6) {
         issues.push({
           type: 'warning',
-          field: 'memory',
-          message: '当前配置可能导致较高的内存占用',
-          recommendation: '考虑减小分片大小或并发数以减少内存使用',
+          field: 'concurrency',
+          message: '并发数过高可能导致网络阻塞',
+          recommendation: '建议将并发数设置为3-6之间',
+        });
+      } else if (config.concurrency === 1) {
+        issues.push({
+          type: 'info',
+          field: 'concurrency',
+          message: '并发数为1，上传速度可能较慢',
+          recommendation: '建议将并发数设置为3-6之间以提高上传速度',
+        });
+      }
+    }
+
+    // 重试次数验证
+    if (config.retryCount !== undefined) {
+      if (
+        typeof config.retryCount !== 'number' ||
+        config.retryCount < 0 ||
+        !Number.isInteger(config.retryCount)
+      ) {
+        issues.push({
+          type: 'error',
+          field: 'retryCount',
+          message: 'retryCount必须是非负整数',
+          recommendation: '请设置合适的重试次数，例如3',
+        });
+      } else if (config.retryCount === 0) {
+        issues.push({
+          type: 'warning',
+          field: 'retryCount',
+          message: '重试次数为0，上传失败将不会重试',
+          recommendation: '建议设置重试次数为3-5以提高上传成功率',
+        });
+      } else if (config.retryCount > 10) {
+        issues.push({
+          type: 'warning',
+          field: 'retryCount',
+          message: '重试次数过多可能导致资源浪费',
+          recommendation: '建议将重试次数设置为3-5之间',
         });
       }
     }
 
     // 计算性能影响
     let performanceImpact: 'high' | 'medium' | 'low' | 'none' = 'none';
-    const errorCount = issues.filter(i => i.type === 'error').length;
-    const warningCount = issues.filter(i => i.type === 'warning').length;
+    let securityImpact: 'high' | 'medium' | 'low' | 'none' = 'none';
 
-    if (errorCount > 0) {
+    // 基于配置计算性能影响
+    const concurrencyIssue = issues.find(i => i.field === 'concurrency');
+    const chunkSizeIssue = issues.find(i => i.field === 'chunkSize');
+
+    if (
+      (concurrencyIssue && concurrencyIssue.type === 'error') ||
+      (chunkSizeIssue && chunkSizeIssue.type === 'error')
+    ) {
       performanceImpact = 'high';
-    } else if (warningCount > 2) {
+    } else if (
+      (concurrencyIssue && concurrencyIssue.type === 'warning') ||
+      (chunkSizeIssue && chunkSizeIssue.type === 'warning')
+    ) {
       performanceImpact = 'medium';
-    } else if (warningCount > 0) {
+    } else {
       performanceImpact = 'low';
     }
 
-    // 生成最优配置建议
-    const optimalSettings: Record<string, any> = { ...config };
-
-    // 调整可能存在问题的配置
-    if (
-      !optimalSettings.chunkSize ||
-      optimalSettings.chunkSize < 512 * 1024 ||
-      optimalSettings.chunkSize > 10 * 1024 * 1024
-    ) {
-      optimalSettings.chunkSize = 2 * 1024 * 1024; // 2MB
+    // 验证安全配置（如果有）
+    if (config.securityLevel !== undefined) {
+      if (!['basic', 'standard', 'advanced'].includes(config.securityLevel)) {
+        issues.push({
+          type: 'error',
+          field: 'securityLevel',
+          message: 'securityLevel必须是basic、standard或advanced',
+          recommendation: '请设置有效的安全级别',
+        });
+        securityImpact = 'high';
+      } else if (config.securityLevel === 'basic') {
+        issues.push({
+          type: 'info',
+          field: 'securityLevel',
+          message: '使用基本安全级别，安全性较低',
+          recommendation: '如需更高安全性，请考虑设置为standard或advanced',
+        });
+        securityImpact = 'medium';
+      }
+    } else {
+      securityImpact = 'low';
     }
 
-    if (!optimalSettings.concurrency || optimalSettings.concurrency > 10) {
+    // 推荐的最优配置
+    const optimalSettings: Record<string, any> = {};
+    if (config.chunkSize === undefined || chunkSizeIssue) {
+      optimalSettings.chunkSize = 5 * 1024 * 1024; // 5MB
+    }
+    if (config.concurrency === undefined || concurrencyIssue) {
       optimalSettings.concurrency = 3;
     }
-
-    if (!optimalSettings.retryCount && optimalSettings.retryCount !== 0) {
+    if (
+      config.retryCount === undefined ||
+      issues.find(i => i.field === 'retryCount')
+    ) {
       optimalSettings.retryCount = 3;
     }
 
-    if (!optimalSettings.retryDelay && optimalSettings.retryCount > 0) {
-      optimalSettings.retryDelay = 1000;
-    }
-
     return {
-      isValid: errorCount === 0,
+      isValid: !issues.some(issue => issue.type === 'error'),
       issues,
       recommendations,
-      optimalSettings,
+      optimalSettings:
+        Object.keys(optimalSettings).length > 0 ? optimalSettings : undefined,
       performanceImpact,
-      securityImpact: issues.some(i => i.field === 'security')
-        ? 'medium'
-        : 'low',
+      securityImpact,
     };
   }
 
@@ -702,12 +749,10 @@ export class DebugCenter implements IDebugCenter {
    * 获取性能指标
    */
   public getPerformanceMetrics(category?: string): IPerformanceMetric[] {
-    if (!category) {
-      return [...this.performanceMetrics];
+    if (category) {
+      return this.performanceMetrics.filter(m => m.category === category);
     }
-    return this.performanceMetrics.filter(
-      metric => metric.category === category
-    );
+    return [...this.performanceMetrics];
   }
 
   /**
@@ -717,53 +762,64 @@ export class DebugCenter implements IDebugCenter {
     metric: Omit<IPerformanceMetric, 'id' | 'timestamp'>
   ): void {
     const id = `metric_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
-    const newMetric: IPerformanceMetric = {
+    const timestamp = Date.now();
+
+    const fullMetric: IPerformanceMetric = {
       ...metric,
       id,
-      timestamp: Date.now(),
+      timestamp,
     };
 
-    this.performanceMetrics.push(newMetric);
+    this.performanceMetrics.push(fullMetric);
 
-    // 保持性能指标数量在合理范围内
-    if (this.performanceMetrics.length > this.config.maxLogEntries) {
-      this.performanceMetrics = this.performanceMetrics.slice(
-        -this.config.maxLogEntries
-      );
+    // 记录日志
+    const logger = this.getLogger('DebugCenter');
+    logger.debug(`性能指标: ${metric.name} = ${metric.value}${metric.unit}`, {
+      category: metric.category,
+      id,
+    });
+
+    // 如果指标数量过多，移除最旧的
+    if (this.performanceMetrics.length > 1000) {
+      this.performanceMetrics.splice(0, 100);
     }
-
-    this.eventBus.emit('performance:metric', newMetric);
   }
 
   /**
    * 显示控制台
    */
   public showConsole(): void {
-    if (!this.config.consoleEnabled) {
-      return;
-    }
+    if (!this.consoleVisible) {
+      this.consoleVisible = true;
+      this.eventBus.emit('console:show');
 
-    this.consoleVisible = true;
-    this.eventBus.emit('console:show');
+      const logger = this.getLogger('DebugCenter');
+      logger.debug('调试控制台已显示');
+    }
   }
 
   /**
    * 隐藏控制台
    */
   public hideConsole(): void {
-    this.consoleVisible = false;
-    this.eventBus.emit('console:hide');
+    if (this.consoleVisible) {
+      this.consoleVisible = false;
+      this.eventBus.emit('console:hide');
+
+      const logger = this.getLogger('DebugCenter');
+      logger.debug('调试控制台已隐藏');
+    }
   }
 
   /**
-   * 订阅事件
+   * 注册事件处理程序
    */
   public on(event: string, handler: (...args: any[]) => void): void {
     this.eventBus.on(event, handler);
   }
 
   /**
-   * 取消订阅事件
+   * 注销事件处理程序
    */
   public off(event: string, handler: (...args: any[]) => void): void {
     this.eventBus.off(event, handler);

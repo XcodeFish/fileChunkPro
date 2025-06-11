@@ -16,7 +16,7 @@ import {
 } from '../types/plugin';
 import { EventBus } from './EventBus';
 import DependencyContainer from './DependencyContainer';
-import { UploadError, ErrorCenter } from './ErrorCenter';
+import { UploadError, ErrorCenter } from './error';
 import { UploadErrorType } from '../types';
 import SecurityPluginManager, {
   SecurityPluginManagerOptions,

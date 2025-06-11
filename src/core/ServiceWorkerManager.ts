@@ -4,7 +4,7 @@
  */
 
 import { EventBus } from './EventBus';
-import { UploadError, UploadErrorType } from './ErrorCenter';
+import { UploadError, UploadErrorType } from './error';
 import { IServiceWorkerManager, ServiceWorkerOptions } from '../types/services';
 import { ResumeData } from '../types/resume';
 

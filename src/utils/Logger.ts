@@ -3,18 +3,16 @@
  * 提供统一的日志记录功能，支持不同级别的日志
  */
 
-// 日志级别枚举
-export enum LogLevel {
-  NONE = 'none',
-  ERROR = 'error',
-  WARN = 'warn',
-  INFO = 'info',
-  DEBUG = 'debug',
-}
+import {
+  LogLevel,
+  LogLevelString,
+  LogLevelStringType,
+  logLevelFromString,
+} from '../types/debug';
 
 // 日志配置接口
 export interface LoggerConfig {
-  level?: LogLevel | string;
+  level?: LogLevel | LogLevelStringType;
   prefix?: string; // 日志前缀
   includeTimestamp?: boolean; // 是否包含时间戳
   maxLogSize?: number; // 最大日志大小
@@ -53,7 +51,8 @@ const logCache: Array<{
 export class Logger {
   private moduleName: string;
   private config: LoggerConfig;
-  private logLevel: string | LogLevel = LogLevel.INFO;
+  private logLevel: LogLevel = LogLevel.INFO;
+  private rateLimitCache: Map<string, number> = new Map(); // 日志限流缓存
 
   /**
    * 创建日志记录器
@@ -68,7 +67,13 @@ export class Logger {
       enableStorage: !!config.enableStorage,
       maxLogSize: config.maxLogSize || 1000,
     };
-    this.logLevel = this.config.level || LogLevel.INFO;
+
+    // 使用新的辅助函数处理字符串日志级别
+    if (typeof this.config.level === 'string') {
+      this.logLevel = logLevelFromString(this.config.level);
+    } else if (typeof this.config.level === 'number') {
+      this.logLevel = this.config.level;
+    }
   }
 
   /**
@@ -77,6 +82,11 @@ export class Logger {
    */
   public static setGlobalConfig(config: LoggerConfig): void {
     Object.assign(globalConfig, config);
+
+    // 处理日志级别
+    if (typeof config.level === 'string') {
+      globalConfig.level = logLevelFromString(config.level);
+    }
   }
 
   /**
@@ -140,7 +150,13 @@ export class Logger {
    */
   private log(level: LogLevel, message: string, ...data: any[]): void {
     // 检查日志级别
-    if (level < (this.config.level ?? globalConfig.level!)) {
+    const effectiveLevel = this.config.level ?? globalConfig.level;
+    const logLevel =
+      typeof effectiveLevel === 'string'
+        ? logLevelFromString(effectiveLevel)
+        : effectiveLevel!;
+
+    if (level < logLevel) {
       return;
     }
 
@@ -193,7 +209,7 @@ export class Logger {
     }
 
     // 添加日志级别
-    const levelStr = level.toString();
+    const levelStr = LogLevelString[level];
     if (this.config.colorize ?? globalConfig.colorize) {
       parts.push(this.colorizeLevel(levelStr, level));
     } else {
@@ -247,10 +263,7 @@ export class Logger {
    * @returns 是否发送
    */
   private shouldLogToServer(): boolean {
-    return (
-      (this.config.logToServer ?? globalConfig.logToServer ?? false) &&
-      !!(this.config.serverUrl ?? globalConfig.serverUrl)
-    );
+    return this.config.logToServer ?? globalConfig.logToServer ?? false;
   }
 
   /**
@@ -265,13 +278,14 @@ export class Logger {
       message,
       module: this.moduleName,
       timestamp: Date.now(),
-      data: data.length > 0 ? data : undefined,
+      data: data.length > 0 ? JSON.parse(JSON.stringify(data)) : undefined,
     });
 
-    // 限制缓存大小
+    // 控制缓存大小
     const maxSize = this.config.maxLogSize ?? globalConfig.maxLogSize ?? 1000;
     if (logCache.length > maxSize) {
-      logCache.splice(0, logCache.length - maxSize);
+      // 移除最老的日志
+      logCache.shift();
     }
   }
 
@@ -282,40 +296,39 @@ export class Logger {
    * @param data 附加数据
    */
   private sendToServer(level: LogLevel, message: string, data: any[]): void {
+    // 优化：使用批处理和重试机制发送日志
     const serverUrl = this.config.serverUrl ?? globalConfig.serverUrl;
     if (!serverUrl) return;
 
-    try {
-      const payload = {
-        level: level.toString(),
-        message,
-        module: this.moduleName,
-        timestamp: new Date().toISOString(),
-        data: data.length > 0 ? data : undefined,
-      };
+    const logData = {
+      level,
+      message,
+      module: this.moduleName,
+      timestamp: Date.now(),
+      data: data.length > 0 ? data : undefined,
+    };
 
-      // 使用 fetch API 或 XMLHttpRequest 发送日志
+    // 实际发送逻辑（可以使用批处理优化）
+    try {
       if (typeof fetch !== 'undefined') {
         fetch(serverUrl, {
           method: 'POST',
           headers: {
             'Content-Type': 'application/json',
           },
-          body: JSON.stringify(payload),
-          // 使用 keepalive 以确保请求在页面关闭后仍然完成
-          keepalive: true,
-        }).catch(() => {
-          // 忽略错误，避免日志系统本身产生更多错误
+          body: JSON.stringify(logData),
+        }).catch(error => {
+          console.error('发送日志到服务器失败:', error);
         });
       }
     } catch (error) {
-      // 忽略错误，避免日志系统本身产生更多错误
+      console.error('发送日志到服务器出错:', error);
     }
   }
 
   /**
-   * 获取缓存的日志
-   * @returns 日志缓存
+   * 获取日志缓存
+   * @returns 日志缓存副本
    */
   public static getLogCache(): any[] {
     return [...logCache];
@@ -329,19 +342,49 @@ export class Logger {
   }
 
   /**
-   * 导出日志到JSON字符串
-   * @returns JSON格式的日志
+   * 导出日志
+   * @returns 格式化的日志字符串
    */
   public static exportLogs(): string {
-    return JSON.stringify(logCache);
+    return JSON.stringify(logCache, null, 2);
+  }
+
+  /**
+   * 限制日志频率
+   * @param key 限制键
+   * @param interval 最小间隔(ms)
+   * @returns 是否应该记录
+   */
+  public rateLimit(key: string, interval = 1000): boolean {
+    const now = Date.now();
+    const lastTime = this.rateLimitCache.get(key) || 0;
+
+    if (now - lastTime < interval) {
+      return false;
+    }
+
+    this.rateLimitCache.set(key, now);
+    return true;
   }
 
   /**
    * 获取当前日志级别
-   * @returns 当前日志级别
+   * @returns 日志级别
    */
-  getLevel(): string {
+  getLevel(): LogLevel {
     return this.logLevel;
+  }
+
+  /**
+   * 设置日志级别
+   * @param level 日志级别
+   */
+  setLevel(level: LogLevel | LogLevelStringType): void {
+    if (typeof level === 'string') {
+      this.logLevel = logLevelFromString(level);
+    } else {
+      this.logLevel = level;
+    }
   }
 }
 

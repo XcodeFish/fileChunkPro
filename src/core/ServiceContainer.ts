@@ -9,7 +9,7 @@ import { FileManager } from './FileManager';
 import { NetworkManager } from './NetworkManager';
 import { PluginManager } from './PluginManager';
 import { TaskScheduler } from './TaskScheduler';
-import { ErrorCenter } from './ErrorCenter';
+import { ErrorCenter } from './error';
 import { UploaderOptions } from '../types';
 import { Logger } from '../utils/Logger';
 import { MemoryManager } from '../utils/MemoryManager';

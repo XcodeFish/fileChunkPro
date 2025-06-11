@@ -5,6 +5,7 @@
 
 /**
  * 日志级别枚举
+ * 提供数值和字符串双重表示，支持各种使用场景
  */
 export enum LogLevel {
   NONE = 0,
@@ -13,6 +14,50 @@ export enum LogLevel {
   INFO = 3,
   DEBUG = 4,
   ALL = 5
+}
+
+// 日志级别字符串映射
+export const LogLevelString: Record<LogLevel, string> = {
+  [LogLevel.NONE]: 'none',
+  [LogLevel.ERROR]: 'error',
+  [LogLevel.WARN]: 'warn',
+  [LogLevel.INFO]: 'info',
+  [LogLevel.DEBUG]: 'debug',
+  [LogLevel.ALL]: 'all'
+};
+
+// 日志级别字符串反向映射
+export const LogLevelFromString: Record<string, LogLevel> = {
+  'none': LogLevel.NONE,
+  'error': LogLevel.ERROR,
+  'warn': LogLevel.WARN, 
+  'info': LogLevel.INFO,
+  'debug': LogLevel.DEBUG,
+  'all': LogLevel.ALL
+};
+
+/**
+ * 日志级别字符串类型（用于类型安全）
+ */
+export type LogLevelStringType = 'none' | 'error' | 'warn' | 'info' | 'debug' | 'all';
+
+/**
+ * 将字符串日志级别转换为枚举值
+ * @param level 日志级别字符串
+ * @returns 对应的枚举值，默认返回INFO
+ */
+export function logLevelFromString(level: string | LogLevelStringType): LogLevel {
+  const normalized = level.toLowerCase() as LogLevelStringType;
+  return LogLevelFromString[normalized] ?? LogLevel.INFO;
+}
+
+/**
+ * 将枚举日志级别转换为字符串
+ * @param level 日志级别枚举值
+ * @returns 对应的字符串表示
+ */
+export function logLevelToString(level: LogLevel): LogLevelStringType {
+  return LogLevelString[level] as LogLevelStringType;
 }
 
 /**
@@ -25,6 +70,7 @@ export interface ILogEntry {
   module: string;
   message: string;
   data?: any;
+  performanceSnapshotId?: string; // 关联的性能快照ID
 }
 
 /**
@@ -67,7 +113,7 @@ export interface IBreakpoint {
  */
 export interface IDebugConfig {
   enabled: boolean;
-  logLevel: LogLevel;
+  logLevel: LogLevel | LogLevelStringType;
   persistLogs: boolean;
   maxLogEntries: number;
   allowRemoteDebug: boolean;
@@ -154,7 +200,7 @@ export interface IDebugCenter {
  */
 export interface IDeveloperToolsPluginConfig {
   enabled?: boolean;
-  logLevel?: LogLevel;
+  logLevel?: LogLevel | LogLevelStringType;
   persistLogs?: boolean;
   maxLogEntries?: number;
   allowRemoteDebug?: boolean;

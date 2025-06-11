@@ -18,7 +18,7 @@ import {
 import { EnvironmentType } from '../adapters/interfaces';
 import { EventBus } from './EventBus';
 import { DependencyContainer } from './DependencyContainer';
-import { UploadError } from './ErrorCenter';
+import { UploadError } from './error';
 import { NetworkDetector } from '../utils/NetworkDetector';
 import { Logger } from '../utils/Logger';
 

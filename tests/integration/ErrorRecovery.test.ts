@@ -3,8 +3,8 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import {
   UploadError,
   ErrorCenter,
-  ErrorType,
-} from '../../src/core/ErrorCenter';
+  UploadErrorType as ErrorType,
+} from '../../src/core/error';
 import { UploaderCore } from '../../src/core/UploaderCore';
 import ChunkPlugin from '../../src/plugins/ChunkPlugin';
 import ResumePlugin from '../../src/plugins/ResumePlugin';

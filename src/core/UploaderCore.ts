@@ -28,7 +28,7 @@ import { IStorageAdapter } from '../types/storage';
 import { FileManager, IFileManager } from './FileManager';
 import { NetworkManager, INetworkManager } from './NetworkManager';
 import { DependencyContainer } from './DependencyContainer';
-import { ErrorCenter, UploadError } from './ErrorCenter';
+import { ErrorCenter, UploadError } from './error';
 import { EventBus } from './EventBus';
 import { PluginManager } from './PluginManager';
 import { TaskScheduler } from './TaskScheduler';
