@@ -20,6 +20,8 @@ export interface FileContentInfo {
   isBinary: boolean;
   potentiallyMalicious: boolean;
   warnings: string[];
+  confidence?: number; // 添加检测置信度
+  detectedFeatures?: string[]; // 添加检测到的特征
 }
 
 /**
@@ -63,6 +65,35 @@ export class FileContentDetector {
       description: 'SVG image',
       offset: 0,
       signature: [0x3c, 0x73, 0x76, 0x67], // "<svg"
+    },
+    // 添加新现代图像格式
+    {
+      mimeType: 'image/avif',
+      extension: 'avif',
+      description: 'AVIF image',
+      offset: 4,
+      signature: [0x66, 0x74, 0x79, 0x70, 0x61, 0x76, 0x69, 0x66], // ftyp + avif
+    },
+    {
+      mimeType: 'image/heic',
+      extension: 'heic',
+      description: 'HEIC image',
+      offset: 4,
+      signature: [0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x63], // ftyp + heic
+    },
+    {
+      mimeType: 'image/heif',
+      extension: 'heif',
+      description: 'HEIF image',
+      offset: 4,
+      signature: [0x66, 0x74, 0x79, 0x70, 0x68, 0x65, 0x69, 0x66], // ftyp + heif
+    },
+    {
+      mimeType: 'image/jxl',
+      extension: 'jxl',
+      description: 'JPEG XL image',
+      offset: 0,
+      signature: [0x00, 0x00, 0x00, 0x0c, 0x4a, 0x58, 0x4c, 0x20], // JXL header
     },
 
     // 文档格式
@@ -132,6 +163,28 @@ export class FileContentDetector {
       offset: 0,
       signature: [0x66, 0x4c, 0x61, 0x43], // "fLaC"
     },
+    // 添加新音频格式
+    {
+      mimeType: 'audio/webm',
+      extension: 'weba',
+      description: 'WebM audio',
+      offset: 0,
+      signature: [0x1a, 0x45, 0xdf, 0xa3],
+    },
+    {
+      mimeType: 'audio/ogg',
+      extension: 'oga',
+      description: 'OGG audio',
+      offset: 0,
+      signature: [0x4f, 0x67, 0x67, 0x53], // "OggS"
+    },
+    {
+      mimeType: 'audio/opus',
+      extension: 'opus',
+      description: 'Opus audio',
+      offset: 0,
+      signature: [0x4f, 0x70, 0x75, 0x73, 0x48, 0x65, 0x61, 0x64], // "OpusHead"
+    },
 
     // 视频格式
     {
@@ -155,6 +208,28 @@ export class FileContentDetector {
       offset: 0,
       signature: [0x1a, 0x45, 0xdf, 0xa3],
     },
+    // 添加新视频格式
+    {
+      mimeType: 'video/ogg',
+      extension: 'ogv',
+      description: 'OGG video',
+      offset: 0,
+      signature: [0x4f, 0x67, 0x67, 0x53], // "OggS"
+    },
+    {
+      mimeType: 'video/x-matroska',
+      extension: 'mkv',
+      description: 'Matroska video',
+      offset: 0,
+      signature: [0x1a, 0x45, 0xdf, 0xa3],
+    },
+    {
+      mimeType: 'video/avi',
+      extension: 'avi',
+      description: 'AVI video',
+      offset: 0,
+      signature: [0x52, 0x49, 0x46, 0x46], // "RIFF"
+    },
 
     // 可执行文件格式
     {
@@ -170,6 +245,34 @@ export class FileContentDetector {
       description: 'ELF executable',
       offset: 0,
       signature: [0x7f, 0x45, 0x4c, 0x46], // "ELF"
+    },
+    {
+      mimeType: 'application/x-mach-binary',
+      extension: 'macho',
+      description: 'Mach-O binary',
+      offset: 0,
+      signature: [0xcf, 0xfa, 0xed, 0xfe], // Mach-O 32-bit Little Endian
+    },
+    {
+      mimeType: 'application/x-mach-binary',
+      extension: 'macho',
+      description: 'Mach-O binary',
+      offset: 0,
+      signature: [0xfe, 0xed, 0xfa, 0xce], // Mach-O 32-bit Big Endian
+    },
+    {
+      mimeType: 'application/x-mach-binary',
+      extension: 'macho',
+      description: 'Mach-O binary',
+      offset: 0,
+      signature: [0xcf, 0xfa, 0xed, 0xfe], // Mach-O 64-bit Little Endian
+    },
+    {
+      mimeType: 'application/x-mach-binary',
+      extension: 'macho',
+      description: 'Mach-O binary',
+      offset: 0,
+      signature: [0xfe, 0xed, 0xfa, 0xcf], // Mach-O 64-bit Big Endian
     },
 
     // 字体格式
@@ -194,6 +297,14 @@ export class FileContentDetector {
       offset: 0,
       signature: [0x00, 0x01, 0x00, 0x00],
     },
+    // 添加字体格式
+    {
+      mimeType: 'font/otf',
+      extension: 'otf',
+      description: 'OpenType font',
+      offset: 0,
+      signature: [0x4f, 0x54, 0x54, 0x4f], // "OTTO"
+    },
 
     // 其他格式
     {
@@ -207,18 +318,47 @@ export class FileContentDetector {
       ],
     },
     {
-      mimeType: 'application/x-mach-binary',
-      extension: 'dylib',
-      description: 'Mach-O binary',
-      offset: 0,
-      signature: [0xfe, 0xed, 0xfa, 0xce],
-    },
-    {
       mimeType: 'application/xml',
       extension: 'xml',
       description: 'XML document',
       offset: 0,
       signature: [0x3c, 0x3f, 0x78, 0x6d, 0x6c], // "<?xml"
+    },
+    // 添加新文件格式
+    {
+      mimeType: 'application/json',
+      extension: 'json',
+      description: 'JSON file',
+      offset: 0,
+      signature: [0x7b], // "{"
+    },
+    {
+      mimeType: 'application/wasm',
+      extension: 'wasm',
+      description: 'WebAssembly binary',
+      offset: 0,
+      signature: [0x00, 0x61, 0x73, 0x6d], // "\0asm"
+    },
+    {
+      mimeType: 'application/x-photoshop',
+      extension: 'psd',
+      description: 'Photoshop document',
+      offset: 0,
+      signature: [0x38, 0x42, 0x50, 0x53], // "8BPS"
+    },
+    {
+      mimeType: 'application/illustrator',
+      extension: 'ai',
+      description: 'Adobe Illustrator',
+      offset: 0,
+      signature: [0x25, 0x21, 0x50, 0x53, 0x2d, 0x41, 0x64, 0x6f], // "%!PS-Ado"
+    },
+    {
+      mimeType: 'application/vnd.tcpdump.pcap',
+      extension: 'pcap',
+      description: 'PCAP file',
+      offset: 0,
+      signature: [0xd4, 0xc3, 0xb2, 0xa1], // PCAP magic number
     },
   ];
 
@@ -228,25 +368,102 @@ export class FileContentDetector {
     {
       pattern: /<script[\s\S]*?>[\s\S]*?<\/script>/i,
       description: '可能包含脚本代码',
+      severity: 'medium',
     },
-    { pattern: /eval\s*\(/i, description: '动态执行JS代码' },
-    { pattern: /document\.write\s*\(/i, description: 'DOM修改操作' },
-    { pattern: /new\s+Function\s*\(/i, description: '动态函数创建' },
+    {
+      pattern: /eval\s*\(/i,
+      description: '动态执行JS代码',
+      severity: 'high',
+    },
+    {
+      pattern: /document\.write\s*\(/i,
+      description: 'DOM修改操作',
+      severity: 'medium',
+    },
+    {
+      pattern: /new\s+Function\s*\(/i,
+      description: '动态函数创建',
+      severity: 'high',
+    },
 
     // 潜在恶意Windows脚本
-    { pattern: /(powershell|cmd)\.exe/i, description: '包含Windows命令行引用' },
-    { pattern: /ActiveXObject/i, description: 'ActiveX对象引用' },
+    {
+      pattern: /(powershell|cmd)\.exe/i,
+      description: '包含Windows命令行引用',
+      severity: 'high',
+    },
+    {
+      pattern: /ActiveXObject/i,
+      description: 'ActiveX对象引用',
+      severity: 'high',
+    },
 
     // 潜在恶意代码特征
     {
       pattern: /shell_exec|system\s*\(|passthru\s*\(|exec\s*\(/i,
       description: '系统命令执行',
+      severity: 'critical',
     },
-    { pattern: /base64_decode\s*\(/i, description: 'BASE64解码操作' },
-    { pattern: /fromCharCode|unescape|escape/i, description: '字符转换操作' },
+    {
+      pattern: /base64_decode\s*\(/i,
+      description: 'BASE64解码操作',
+      severity: 'high',
+    },
+    {
+      pattern: /fromCharCode|unescape|escape/i,
+      description: '字符转换操作',
+      severity: 'medium',
+    },
 
     // 可疑URL引用
-    { pattern: /https?:\/\/[^\s/$.?#].[^\s]*/i, description: '包含URL引用' },
+    {
+      pattern: /https?:\/\/[^\s/$.?#].[^\s]*/i,
+      description: '包含URL引用',
+      severity: 'low',
+    },
+
+    // 新增检测模式 - 编码形式恶意代码
+    {
+      pattern: /(?:atob|btoa)\s*\(['"]([\w+/=]+)['"]\)/i,
+      description: 'Base64编码/解码操作',
+      severity: 'high',
+    },
+
+    // 新增检测模式 - XSS攻击模式
+    {
+      pattern: /<img[^>]+onerror\s*=\s*['"]/i,
+      description: 'img标签事件处理可能包含XSS',
+      severity: 'high',
+    },
+    {
+      pattern: /on(?:load|error|click|mouseover|focus)\s*=\s*["']/i,
+      description: '可疑的事件处理属性',
+      severity: 'high',
+    },
+
+    // 新增检测模式 - SQL注入模式
+    {
+      pattern: /';\s*(?:DROP|DELETE|UPDATE|INSERT)\s+/i,
+      description: '可能的SQL注入攻击',
+      severity: 'critical',
+    },
+    {
+      pattern: /UNION\s+(?:ALL\s+)?SELECT\s+/i,
+      description: '可能的SQL注入语法',
+      severity: 'critical',
+    },
+
+    // 新增检测模式 - 命令注入模式
+    {
+      pattern: /[&|;`]\s*(?:rm|wget|curl|bash|sh)\s+/i,
+      description: '可能的命令注入',
+      severity: 'critical',
+    },
+    {
+      pattern: /\$\(\s*[`'"]/i,
+      description: '命令替换语法',
+      severity: 'high',
+    },
   ];
 
   /**
@@ -289,6 +506,8 @@ export class FileContentDetector {
       isBinary: true,
       potentiallyMalicious: false,
       warnings: [],
+      confidence: 0,
+      detectedFeatures: [],
     };
 
     try {
@@ -300,13 +519,22 @@ export class FileContentDetector {
       }
 
       // 识别文件类型
+      let highestConfidence = 0;
       for (const sig of this.signatures) {
         if (this.matchSignature(headerBytes, sig)) {
-          result.mimeType = sig.mimeType;
-          result.extension = sig.extension;
-          result.description = sig.description;
-          break;
+          // 如果找到多个匹配，选择最高置信度的
+          const confidence = this.calculateConfidence(headerBytes, sig);
+          if (confidence > highestConfidence) {
+            highestConfidence = confidence;
+            result.mimeType = sig.mimeType;
+            result.extension = sig.extension;
+            result.description = sig.description;
+          }
         }
+      }
+
+      if (highestConfidence > 0) {
+        result.confidence = highestConfidence;
       }
 
       // 检测是否为文本文件
@@ -317,18 +545,17 @@ export class FileContentDetector {
       if (result.mimeType && this.isDangerousFileType(result.mimeType)) {
         result.potentiallyMalicious = true;
         result.warnings.push(`文件类型 ${result.mimeType} 可能包含可执行代码`);
+        result.detectedFeatures?.push('dangerous_file_type');
       }
 
       // 对文本文件进行内容检查
-      if (result.isText && file.size < 1024 * 1024) {
-        // 仅检查小于1MB的文本文件
-        const content = await this.readTextFile(file);
-        const maliciousDetection = this.detectMaliciousContent(content);
-
-        if (maliciousDetection.length > 0) {
-          result.potentiallyMalicious = true;
-          result.warnings = [...result.warnings, ...maliciousDetection];
-        }
+      if (result.isText) {
+        // 采用分块检查逻辑处理大文件
+        await this.analyzeTextContent(file, result);
+      } else if (file.size < 10 * 1024 * 1024) {
+        // 限制10MB以下二进制文件
+        // 二进制文件的浅度内容检查，检测是否包含恶意代码片段
+        await this.analyzeBinaryContent(file, result);
       }
 
       return result;
@@ -339,6 +566,168 @@ export class FileContentDetector {
       );
       return result;
     }
+  }
+
+  /**
+   * 计算特征匹配的置信度
+   * @param bytes 文件字节
+   * @param signature 文件特征
+   * @returns 置信度(0-100)
+   */
+  private calculateConfidence(
+    bytes: Uint8Array,
+    signature: FileSignature
+  ): number {
+    // 完全匹配特征的基础置信度是80%
+    let confidence = 80;
+
+    // 特征长度越长，置信度越高
+    confidence += Math.min(signature.signature.length * 2, 15);
+
+    // 检查更多的字节内容是否一致
+    const extendedCheck = this.performExtendedCheck(bytes, signature);
+    confidence += extendedCheck ? 5 : 0;
+
+    return Math.min(confidence, 100);
+  }
+
+  /**
+   * 执行扩展验证
+   */
+  private performExtendedCheck(
+    _bytes: Uint8Array,
+    _signature: FileSignature
+  ): boolean {
+    // 实际应用中，可以对特定文件格式实现更详细的验证
+    // 例如，对 PNG 检查 IHDR 块，对 PDF 检查版本号等
+    return true;
+  }
+
+  /**
+   * 分块分析文本内容
+   * @param file 文件对象
+   * @param result 结果对象
+   */
+  private async analyzeTextContent(
+    file: Blob,
+    result: FileContentInfo
+  ): Promise<void> {
+    const MAX_CHUNK_SIZE = 1024 * 1024; // 1MB
+    const CHUNK_COUNT = Math.min(5, Math.ceil(file.size / MAX_CHUNK_SIZE)); // 最多检查5个区块
+
+    // 策略性选择文件的不同部分
+    const chunks: Blob[] = [];
+
+    // 始终检查文件头部
+    chunks.push(file.slice(0, MAX_CHUNK_SIZE));
+
+    if (file.size > MAX_CHUNK_SIZE) {
+      // 检查文件中间部分
+      for (let i = 1; i < CHUNK_COUNT - 1; i++) {
+        const start = Math.floor((file.size / CHUNK_COUNT) * i);
+        chunks.push(file.slice(start, start + MAX_CHUNK_SIZE));
+      }
+
+      // 检查文件尾部
+      if (file.size > 2 * MAX_CHUNK_SIZE) {
+        chunks.push(
+          file.slice(Math.max(0, file.size - MAX_CHUNK_SIZE), file.size)
+        );
+      }
+    }
+
+    // 分析每个区块
+    let maliciousContentDetected = false;
+    for (const chunk of chunks) {
+      const content = await this.readTextFile(chunk);
+      const maliciousDetection = this.detectMaliciousContent(content);
+
+      if (maliciousDetection.length > 0) {
+        maliciousContentDetected = true;
+        // 去重添加警告
+        for (const warning of maliciousDetection) {
+          if (!result.warnings.includes(warning)) {
+            result.warnings.push(warning);
+          }
+        }
+
+        // 添加检测到的特征
+        if (result.detectedFeatures) {
+          result.detectedFeatures.push('malicious_code_pattern');
+        }
+      }
+    }
+
+    result.potentiallyMalicious =
+      maliciousContentDetected || result.potentiallyMalicious;
+  }
+
+  /**
+   * 分析二进制内容
+   */
+  private async analyzeBinaryContent(
+    file: Blob,
+    result: FileContentInfo
+  ): Promise<void> {
+    // 对二进制文件中可能包含的字符串进行检查
+    const buffer = await file.arrayBuffer();
+    const bytes = new Uint8Array(buffer);
+
+    // 简单的字符串提取和检查
+    const extractedStrings = this.extractStringsFromBinary(bytes);
+    let maliciousContentDetected = false;
+
+    for (const str of extractedStrings) {
+      if (str.length > 4) {
+        // 忽略过短的字符串
+        const maliciousDetection = this.detectMaliciousContent(str);
+        if (maliciousDetection.length > 0) {
+          maliciousContentDetected = true;
+          // 去重添加警告
+          for (const warning of maliciousDetection) {
+            if (!result.warnings.includes(warning)) {
+              result.warnings.push(warning);
+            }
+          }
+
+          // 添加检测到的特征
+          if (result.detectedFeatures) {
+            result.detectedFeatures.push('binary_malicious_strings');
+          }
+        }
+      }
+    }
+
+    result.potentiallyMalicious =
+      maliciousContentDetected || result.potentiallyMalicious;
+  }
+
+  /**
+   * 从二进制数据中提取可能的字符串
+   */
+  private extractStringsFromBinary(bytes: Uint8Array): string[] {
+    const strings: string[] = [];
+    let currentString = '';
+
+    for (let i = 0; i < bytes.length; i++) {
+      const byte = bytes[i];
+      // 可打印ASCII字符范围
+      if (byte >= 32 && byte <= 126) {
+        currentString += String.fromCharCode(byte);
+      } else if (currentString.length >= 4) {
+        // 只保留较长的字符串
+        strings.push(currentString);
+        currentString = '';
+      } else {
+        currentString = '';
+      }
+    }
+
+    if (currentString.length >= 4) {
+      strings.push(currentString);
+    }
+
+    return strings;
   }
 
   /**
@@ -444,15 +833,31 @@ export class FileContentDetector {
    */
   private detectMaliciousContent(content: string): string[] {
     const warnings: string[] = [];
+    const highSeverityWarnings: string[] = [];
+    const criticalWarnings: string[] = [];
 
     // 检查内容中是否包含已知的危险模式
     for (const pattern of this.maliciousPatterns) {
       if (pattern.pattern.test(content)) {
-        warnings.push(pattern.description);
+        const warning = pattern.description;
+
+        // 根据严重程度分类
+        switch (pattern.severity) {
+          case 'critical':
+            criticalWarnings.push(warning);
+            break;
+          case 'high':
+            highSeverityWarnings.push(warning);
+            break;
+          default:
+            warnings.push(warning);
+            break;
+        }
       }
     }
 
-    return warnings;
+    // 优先返回高严重性警告
+    return [...criticalWarnings, ...highSeverityWarnings, ...warnings];
   }
 
   /**
@@ -472,9 +877,60 @@ export class FileContentDetector {
       'application/x-ms-shortcut', // .lnk
       'application/x-msi', // Windows安装包
       'application/x-javascript', // 可能存在XSS风险
+      'application/vnd.microsoft.portable-executable', // PE文件
+      'application/x-dosexec', // DOS可执行文件
+      'application/vnd.appimage', // AppImage Linux包装执行文件
+      'application/x-executable', // 一般可执行文件
+      'application/x-python-code', // Python字节码
+      'application/x-mach-binary', // macOS可执行文件
     ];
 
     return dangerousMimeTypes.includes(mimeType);
+  }
+
+  /**
+   * 跨平台文件类型检测
+   */
+  static async detectContentType(file: File | Blob): Promise<string> {
+    const detector = new FileContentDetector();
+    const mimeType = await detector.detectMimeType(file);
+    return mimeType || 'application/octet-stream';
+  }
+
+  /**
+   * 检验扩展名与内容类型是否匹配
+   */
+  static validateExtensionWithContent(
+    fileName: string,
+    contentResult: { success: boolean; detectedMimeType?: string }
+  ): boolean {
+    const ext = fileName.split('.').pop()?.toLowerCase() || '';
+    if (!ext || !contentResult.detectedMimeType) {
+      return true; // 无法确定，默认通过
+    }
+
+    // 获取扩展名对应的预期MIME类型列表
+    const extensionToMimeMap: Record<string, string[]> = {
+      jpg: ['image/jpeg'],
+      jpeg: ['image/jpeg'],
+      png: ['image/png'],
+      gif: ['image/gif'],
+      webp: ['image/webp'],
+      svg: ['image/svg+xml'],
+      pdf: ['application/pdf'],
+      doc: ['application/msword'],
+      docx: [
+        'application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+      ],
+      // ... 其他映射
+    };
+
+    const expectedMimeTypes = extensionToMimeMap[ext];
+    if (!expectedMimeTypes) {
+      return true; // 未知扩展名，默认通过
+    }
+
+    return expectedMimeTypes.includes(contentResult.detectedMimeType);
   }
 }
 

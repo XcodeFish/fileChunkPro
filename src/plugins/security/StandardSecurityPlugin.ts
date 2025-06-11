@@ -20,6 +20,7 @@ import {
 import FileContentDetector from '../../utils/FileContentDetector';
 import SecurityError from '../../utils/SecurityError';
 import { IPlugin } from '../interfaces';
+import UrlSafetyChecker from '../../utils/UrlSafetyChecker';
 
 import {
   BasicSecurityPlugin,
@@ -275,9 +276,36 @@ class StandardSecurityPlugin implements IPlugin {
       now - this._lastTokenFetch > this._tokenRefreshInterval
     ) {
       try {
-        const response = await fetch(this._options.csrfTokenUrl, {
+        // URL安全性验证
+        const urlChecker = new UrlSafetyChecker({
+          allowedProtocols: ['https:', 'http:'],
+          checkPath: true,
+          checkQueryParams: true,
+        });
+
+        const urlValidationResult = urlChecker.validateUrl(
+          this._options.csrfTokenUrl
+        );
+
+        if (!urlValidationResult.valid) {
+          throw new Error(
+            `CSRF token URL不安全: ${urlValidationResult.reason}`
+          );
+        }
+
+        // 创建URL对象
+        const url = new URL(this._options.csrfTokenUrl);
+
+        // 添加随机参数防止缓存
+        url.searchParams.set('_', Date.now().toString());
+
+        const response = await fetch(url.toString(), {
           method: 'GET',
           credentials: 'include', // 包含cookies
+          headers: {
+            'X-Requested-With': 'XMLHttpRequest', // 防止CSRF
+            Accept: 'application/json',
+          },
         });
 
         if (!response.ok) {
@@ -286,9 +314,29 @@ class StandardSecurityPlugin implements IPlugin {
           );
         }
 
-        const data = await response.json();
-        if (!data.token) {
+        let data;
+        const contentType = response.headers.get('content-type');
+
+        if (contentType && contentType.includes('application/json')) {
+          data = await response.json();
+        } else {
+          // 尝试作为文本读取
+          const text = await response.text();
+          try {
+            data = JSON.parse(text);
+          } catch (e) {
+            // 如果不是JSON，则尝试直接使用文本作为令牌
+            data = { token: text.trim() };
+          }
+        }
+
+        if (!data || !data.token) {
           throw new Error('CSRF token not found in response');
+        }
+
+        // 验证token格式
+        if (typeof data.token !== 'string' || data.token.length < 8) {
+          throw new Error('Invalid CSRF token format');
         }
 
         this._csrfToken = data.token;
@@ -296,10 +344,26 @@ class StandardSecurityPlugin implements IPlugin {
 
         this._logSecurityEvent('CSRF token fetched', {
           tokenRefreshInterval: this._tokenRefreshInterval,
+          expiresAt: new Date(now + this._tokenRefreshInterval).toISOString(),
         });
       } catch (error) {
         this._logSecurityEvent('Failed to fetch CSRF token', error);
-        throw error;
+
+        // 尝试使用现有令牌（如果存在）
+        if (!this._csrfToken) {
+          throw error;
+        } else {
+          // 仍然使用现有令牌，但缩短刷新间隔，以便下次更早重试
+          this._lastTokenFetch = now - this._tokenRefreshInterval * 0.8;
+          this._logSecurityEvent(
+            'Using existing CSRF token due to fetch error',
+            {
+              nextRetryIn:
+                Math.round((this._tokenRefreshInterval * 0.2) / 1000) +
+                ' seconds',
+            }
+          );
+        }
       }
     }
   }
@@ -422,14 +486,31 @@ class StandardSecurityPlugin implements IPlugin {
       let modified = false;
 
       // 添加CSRF令牌到请求头
-      if (this._options.enableCSRFProtection && this._csrfToken) {
+      if (this._options.enableCSRFProtection) {
         // 如果令牌过期或不存在，重新获取
-        if (Date.now() - this._lastTokenFetch > this._tokenRefreshInterval) {
-          await this._fetchCSRFToken();
+        if (
+          !this._csrfToken ||
+          Date.now() - this._lastTokenFetch > this._tokenRefreshInterval
+        ) {
+          try {
+            await this._fetchCSRFToken();
+          } catch (error) {
+            this._logSecurityEvent(
+              'CSRF token refresh failed during upload',
+              error
+            );
+            // 继续上传，但记录警告 - 如果之前有令牌，将继续使用
+          }
         }
 
         if (this._csrfToken && this._options.csrfTokenHeaderName) {
           headers[this._options.csrfTokenHeaderName] = this._csrfToken;
+
+          // 添加额外的安全头，防止点击劫持和XSS
+          headers['X-Content-Type-Options'] = 'nosniff';
+          headers['X-Frame-Options'] = 'DENY';
+          headers['X-XSS-Protection'] = '1; mode=block';
+
           modified = true;
         }
       }

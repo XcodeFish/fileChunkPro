@@ -6,6 +6,10 @@
 import { UploaderCore } from '../core/UploaderCore';
 import { IPlugin, UploadErrorType } from '../types';
 import { FileContentDetector } from '../utils/FileContentDetector';
+import ValidationError from '../utils/ValidationError';
+import HookResult from '../types/HookResult';
+import { Environment, SecurityLevel } from '../types';
+import SecurityValidator from '../utils/SecurityValidator';
 
 // 通用文件接口定义
 interface IValidatableFile {
@@ -43,6 +47,10 @@ interface ValidatorPluginOptions {
   autoFixFileNames?: boolean; // 是否自动修复文件名
   extraMimeTypes?: Record<string, string>; // 额外的MIME类型映射
   strictMimeValidation?: boolean; // 是否使用严格MIME类型验证
+  maxFileNameLength?: number; // 最大文件名长度
+  securityLevel?: SecurityLevel; // 安全级别
+  adaptiveMode?: boolean; // 是否启用自适应安全策略
+  environment?: Environment; // 运行环境
 }
 
 /**
@@ -53,6 +61,7 @@ export class ValidatorPlugin implements IPlugin {
   private uploader: UploaderCore | null = null;
   private fileContentDetector: FileContentDetector;
   private extraMimeTypesMap: Record<string, string> = {};
+  private _adaptiveSuggestions: Map<string, string[]> = new Map();
 
   // 扩展文件类型映射，包含更多特殊文件类型
   private readonly extendedMimeTypes: Record<string, string> = {
@@ -118,6 +127,9 @@ export class ValidatorPlugin implements IPlugin {
       allowEmptyFiles: false,
       autoFixFileNames: false,
       strictMimeValidation: false,
+      maxFileNameLength: 255,
+      securityLevel: SecurityLevel.STANDARD,
+      adaptiveMode: false,
       ...options,
     };
 
@@ -147,6 +159,12 @@ export class ValidatorPlugin implements IPlugin {
     // 注册beforeChunk钩子
     if (this.options.validateChunks) {
       uploader.hook('beforeChunk', this.validateChunks.bind(this));
+    }
+
+    // 如果启用自适应模式，添加定期检查钩子
+    if (this.options.adaptiveMode) {
+      uploader.hook('afterUploadSuccess', this.updateSecurityStats.bind(this));
+      uploader.hook('afterUploadError', this.updateSecurityStats.bind(this));
     }
   }
 
@@ -362,10 +380,10 @@ export class ValidatorPlugin implements IPlugin {
     }
 
     // 检查文件名长度
-    if (fileName.length > 255) {
+    if (fileName.length > this.options.maxFileNameLength) {
       throw new ValidationError(
         UploadErrorType.FILE_ERROR,
-        '文件名长度超过最大限制(255个字符)'
+        `文件名长度超过最大限制(${this.options.maxFileNameLength}个字符)`
       );
     }
 
@@ -553,5 +571,56 @@ export class ValidatorPlugin implements IPlugin {
     });
 
     return chunks;
+  }
+
+  /**
+   * 更新安全统计信息
+   */
+  private async updateSecurityStats(): Promise<HookResult> {
+    if (!this.uploader || !this.options.adaptiveMode) return { handled: false };
+
+    try {
+      // 获取当前安全统计信息
+      const stats = SecurityValidator.getSecurityStats();
+
+      // 每50次上传或检测到高风险后，重新评估安全级别
+      if (
+        stats.uploads.total % 50 === 0 ||
+        stats.riskDistribution.high > 0 ||
+        stats.riskDistribution.critical > 0
+      ) {
+        // 如果检测到高风险且当前不是高级安全级别，提升安全级别
+        if (
+          (stats.riskDistribution.high > 5 ||
+            stats.riskDistribution.critical > 0) &&
+          this.options.securityLevel !== SecurityLevel.ADVANCED
+        ) {
+          this.options.securityLevel = SecurityLevel.ADVANCED;
+          this.options.validateFileContent = true;
+          this.options.strictMimeValidation = true;
+
+          this.uploader.logger.warn('基于风险评估自动升级至高级安全级别');
+        }
+        // 如果连续安全上传次数很多且没有高风险，可以考虑降低安全级别
+        else if (
+          stats.uploads.consecutiveSafe > 100 &&
+          stats.riskDistribution.high === 0 &&
+          stats.riskDistribution.critical === 0 &&
+          this.options.securityLevel === SecurityLevel.ADVANCED
+        ) {
+          this.options.securityLevel = SecurityLevel.STANDARD;
+          this.uploader.logger.info(
+            '基于长时间安全上传历史，安全级别已降为标准级别'
+          );
+        }
+      }
+    } catch (error) {
+      // 忽略安全统计错误，不影响上传流程
+      if (this.uploader) {
+        this.uploader.logger.error('更新安全统计失败', error);
+      }
+    }
+
+    return { handled: false };
   }
 }
