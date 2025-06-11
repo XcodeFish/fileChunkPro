@@ -14,6 +14,7 @@ import {
   TaskStats,
 } from '../types';
 import MemoryManager from '../utils/MemoryManager';
+import { StateLockManager } from '../utils/StateLock';
 
 import EventBus from './EventBus';
 
@@ -82,6 +83,7 @@ export class TaskScheduler {
     warn?: (message: string) => void;
     error?: (message: string) => void;
   };
+  private schedulerLockId = 'task-scheduler';
 
   constructor(options: TaskSchedulerOptions, eventBus?: EventBus) {
     this.options = {
@@ -723,32 +725,63 @@ export class TaskScheduler {
   }
 
   /**
-   * 暂停任务处理
+   * 暂停任务调度器
    */
   pause(): void {
-    if (!this.paused) {
+    const lock = StateLockManager.getLock(this.schedulerLockId);
+
+    lock.withLockSync(() => {
+      if (this.paused) return; // 已经是暂停状态，无需处理
+
       this.paused = true;
-      this.eventBus.emit('schedulerPaused', { timestamp: Date.now() });
-    }
+
+      // 记录暂停时状态
+      const currentState = {
+        runningTasks: this.runningTasks.size,
+        pendingTasks: this.taskQueue.length,
+        timestamp: Date.now(),
+      };
+
+      // 触发事件
+      this.eventBus.emit('paused', currentState);
+
+      this.logger?.info?.('任务调度器已暂停', currentState);
+    });
   }
 
   /**
-   * 判断调度器是否处于暂停状态
-   * @returns 是否暂停
+   * 检查调度器是否暂停
    */
   isPaused(): boolean {
     return this.paused;
   }
 
   /**
-   * 恢复任务处理
+   * 恢复任务调度器
    */
   resume(): void {
-    if (this.paused) {
+    const lock = StateLockManager.getLock(this.schedulerLockId);
+
+    lock.withLockSync(() => {
+      if (!this.paused) return; // 已经是运行状态，无需处理
+
       this.paused = false;
-      this.eventBus.emit('schedulerResumed', { timestamp: Date.now() });
-      this.processNextTask();
-    }
+
+      // 记录恢复时状态
+      const currentState = {
+        runningTasks: this.runningTasks.size,
+        pendingTasks: this.taskQueue.length,
+        timestamp: Date.now(),
+      };
+
+      // 触发事件
+      this.eventBus.emit('resumed', currentState);
+
+      this.logger?.info?.('任务调度器已恢复', currentState);
+    });
+
+    // 锁外处理，以避免死锁
+    this.processNextTask();
   }
 
   /**

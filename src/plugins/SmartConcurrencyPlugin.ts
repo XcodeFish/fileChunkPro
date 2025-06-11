@@ -15,6 +15,7 @@ import { TaskScheduler } from '../../core/TaskScheduler';
 import { UploaderCore } from '../../core/UploaderCore';
 import { Logger } from '../../utils/Logger';
 import { NetworkDetector } from '../../utils/NetworkDetector';
+import { StateLockManager } from '../utils/StateLock';
 
 // 导入拆分后的模块
 import { ConcurrencyStrategy } from '../strategies/ConcurrencyStrategy';
@@ -80,6 +81,7 @@ class SmartConcurrencyPlugin implements IPlugin {
   private currentConcurrency = 3;
   private adaptationEnabled = true;
   private initialConcurrencySet = false;
+  private concurrencyLockId = 'concurrency-control';
 
   // 监控间隔
   private networkCheckInterval: any = null;
@@ -300,14 +302,31 @@ class SmartConcurrencyPlugin implements IPlugin {
 
   /**
    * 设置并发数
+   * @param concurrency 并发数
    */
   private setConcurrency(concurrency: number): void {
     if (!this.taskScheduler) return;
 
-    this.currentConcurrency = concurrency;
-    this.taskScheduler.setConcurrency(concurrency);
+    // 使用状态锁确保设置并发数的原子性
+    const lock = StateLockManager.getLock(this.concurrencyLockId);
 
-    this.logger.debug('设置并发数', { concurrency });
+    lock.withLockSync(() => {
+      const actual = Math.max(
+        this.minConcurrency,
+        Math.min(this.maxConcurrency, concurrency)
+      );
+
+      // 在锁保护下更新状态
+      this.currentConcurrency = actual;
+      this.taskScheduler!.setConcurrency(actual);
+
+      this.eventBus?.emit('concurrency:change', {
+        value: actual,
+        timestamp: Date.now(),
+        previous: this.currentConcurrency,
+        reason: 'manual_adjustment',
+      });
+    });
   }
 
   /**

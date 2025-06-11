@@ -5,11 +5,26 @@
 
 import { UploaderCore } from '../core/UploaderCore';
 import { IPlugin, ChunkInfo } from '../types';
+import {
+  createAdaptiveThrottle,
+  detectDevicePerformanceFactor,
+} from '../utils/AdaptiveThrottle';
 
 interface ProgressPluginOptions {
-  throttle?: number; // 节流时间间隔（毫秒）
-  useChunkEvent?: boolean; // 是否使用chunk事件计算进度
-  progressDecimal?: number; // 进度精度，小数点位数
+  /** 初始节流时间间隔（毫秒），将被自适应调整 */
+  throttle?: number;
+  /** 是否使用chunk事件计算进度 */
+  useChunkEvent?: boolean;
+  /** 进度精度，小数点位数 */
+  progressDecimal?: number;
+  /** 是否使用自适应节流 */
+  adaptiveThrottle?: boolean;
+  /** 最小节流时间(ms) */
+  minThrottle?: number;
+  /** 最大节流时间(ms) */
+  maxThrottle?: number;
+  /** 是否记录性能数据 */
+  logPerformance?: boolean;
 }
 
 /**
@@ -23,85 +38,103 @@ export class ProgressPlugin implements IPlugin {
   private lastProgress = 0;
   private lastEmitTime = 0;
   private activeUpload = false;
+  private adaptiveThrottleFn: ReturnType<typeof createAdaptiveThrottle> | null =
+    null;
+  private devicePerformanceFactor: number;
 
   /**
    * 创建进度监控插件实例
    * @param options 进度插件选项
    */
   constructor(options: ProgressPluginOptions = {}) {
+    // 检测设备性能因子
+    this.devicePerformanceFactor = detectDevicePerformanceFactor();
+
     this.options = {
       throttle: 200, // 默认200ms节流
       useChunkEvent: true,
       progressDecimal: 2, // 默认保留2位小数
+      adaptiveThrottle: true, // 默认启用自适应节流
+      minThrottle: 50, // 最小节流时间
+      maxThrottle: 500, // 最大节流时间
+      logPerformance: false, // 默认不记录性能数据
       ...options,
     };
   }
 
   /**
-   * 插件安装方法
+   * 安装插件
    * @param uploader 上传器实例
    */
-  install(uploader: UploaderCore): void {
+  public install(uploader: UploaderCore): void {
     this.uploader = uploader;
+    const eventBus = uploader.getEventBus();
 
-    // 注册事件监听
-    uploader.on('uploadStart', this.handleUploadStart.bind(this));
-    uploader.on('chunkSuccess', this.handleChunkSuccess.bind(this));
-    uploader.on('uploadComplete', this.handleUploadComplete.bind(this));
-    // 添加对complete事件的监听，确保在上传完成时也处理进度
-    uploader.on('complete', this.handleUploadComplete.bind(this));
-    uploader.on('error', this.handleError.bind(this));
+    // 初始化自适应节流函数
+    if (this.options.adaptiveThrottle) {
+      this.adaptiveThrottleFn = createAdaptiveThrottle(
+        this.emitProgress.bind(this),
+        {
+          minDelay: this.options.minThrottle,
+          maxDelay: this.options.maxThrottle,
+          deviceFactor: this.devicePerformanceFactor,
+          logPerformance: this.options.logPerformance,
+          onThrottled: delay => {
+            // 当节流延迟被调整时记录
+            if (this.options.logPerformance) {
+              console.log(`[ProgressPlugin] 节流延迟调整为: ${delay}ms`);
+            }
+          },
+        }
+      );
+    }
 
-    // 注册钩子，获取分片总数
-    uploader.hook('afterChunksGenerated', this.setTotalChunks.bind(this));
+    // 监听分片上传成功事件
+    if (this.options.useChunkEvent) {
+      eventBus.on('chunkSuccess', (_data: { chunkInfo: ChunkInfo }) => {
+        if (!this.activeUpload) return;
+        this.uploadedChunks++;
+        this.calculateAndEmitProgress();
+      });
+    }
+
+    // 监听上传开始事件
+    eventBus.on('uploadStart', (data: { chunks: number }) => {
+      this.reset();
+      this.activeUpload = true;
+      this.totalChunks = data.chunks || 0;
+    });
+
+    // 监听上传完成事件
+    eventBus.on('uploadSuccess', () => {
+      this.emitProgress(100); // 确保完成时发送100%进度
+      this.activeUpload = false;
+    });
+
+    // 监听上传失败事件
+    eventBus.on('uploadError', () => {
+      this.activeUpload = false;
+    });
+
+    // 监听上传暂停事件
+    eventBus.on('uploadPause', () => {
+      this.activeUpload = false;
+    });
+
+    // 监听上传取消事件
+    eventBus.on('uploadAbort', () => {
+      this.activeUpload = false;
+    });
   }
 
   /**
-   * 处理上传开始事件
+   * 重置进度状态
    */
-  private handleUploadStart(): void {
+  private reset(): void {
+    this.totalChunks = 0;
     this.uploadedChunks = 0;
     this.lastProgress = 0;
-    this.activeUpload = true;
-
-    // 发送初始进度
-    this.emitProgress(0);
-  }
-
-  /**
-   * 设置总分片数
-   * @param chunks 分片信息
-   */
-  private setTotalChunks(chunks: ChunkInfo[]): void {
-    this.totalChunks = chunks.length;
-  }
-
-  /**
-   * 处理分片上传成功事件
-   */
-  private handleChunkSuccess(): void {
-    if (!this.activeUpload) return;
-
-    this.uploadedChunks++;
-    this.calculateAndEmitProgress();
-  }
-
-  /**
-   * 处理上传完成事件
-   */
-  private handleUploadComplete(): void {
-    this.activeUpload = false;
-
-    // 确保发送100%进度，并且强制设置上传分片数等于总分片数
-    this.uploadedChunks = this.totalChunks;
-    this.emitProgress(100);
-  }
-
-  /**
-   * 处理错误事件
-   */
-  private handleError(): void {
-    this.activeUpload = false;
+    this.lastEmitTime = 0;
   }
 
   /**
@@ -116,20 +149,26 @@ export class ProgressPlugin implements IPlugin {
     );
 
     // 进度格式化，保留指定小数位
-    const progressDecimal = this.options.progressDecimal ?? 2; // 使用空值合并操作符替代非空断言
+    const progressDecimal = this.options.progressDecimal ?? 2;
     const formatProgress = Number(progress.toFixed(progressDecimal));
 
-    // 节流发送进度
-    const now = Date.now();
-    const throttleTime = this.options.throttle ?? 200; // 使用空值合并操作符替代非空断言
+    // 使用自适应节流或传统节流发送进度
+    if (this.options.adaptiveThrottle && this.adaptiveThrottleFn) {
+      // 使用自适应节流函数触发进度更新
+      this.adaptiveThrottleFn(formatProgress);
+    } else {
+      // 使用传统节流方式
+      const now = Date.now();
+      const throttleTime = this.options.throttle ?? 200;
 
-    if (
-      now - this.lastEmitTime >= throttleTime ||
-      formatProgress - this.lastProgress >= 1 // 进度变化超过1%时立即发送
-    ) {
-      this.emitProgress(formatProgress);
-      this.lastEmitTime = now;
-      this.lastProgress = formatProgress;
+      if (
+        now - this.lastEmitTime >= throttleTime ||
+        formatProgress - this.lastProgress >= 1 // 进度变化超过1%时立即发送
+      ) {
+        this.emitProgress(formatProgress);
+        this.lastEmitTime = now;
+        this.lastProgress = formatProgress;
+      }
     }
   }
 
@@ -138,9 +177,19 @@ export class ProgressPlugin implements IPlugin {
    * @param progress 进度值(0-100)
    */
   private emitProgress(progress: number): void {
-    if (this.uploader) {
-      this.uploader.emit('progress', progress);
-    }
+    if (!this.uploader || !this.activeUpload) return;
+
+    // 避免发送相同进度
+    if (progress === this.lastProgress && progress !== 100) return;
+
+    this.lastProgress = progress;
+
+    // 发送进度事件
+    const eventBus = this.uploader.getEventBus();
+    eventBus.emit('progress', {
+      progress,
+      timestamp: Date.now(),
+    });
   }
 }
 
